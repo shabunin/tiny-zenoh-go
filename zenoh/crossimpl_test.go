@@ -31,6 +31,8 @@ type peerEvent struct {
 	Priority   int             `json:"priority"`
 	Matching   *bool           `json:"matching"`
 	Miss       int             `json:"miss"`
+	Zser       json.RawMessage `json:"zser"` // zsersub
+	ZserErr    *string         `json:"zser_err"`
 }
 
 type peerEventInner struct {

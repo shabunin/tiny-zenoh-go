@@ -242,6 +242,7 @@ type putOptions struct {
 	timestamp   *Timestamp
 	autoTS      bool
 	sourceInfo  *SourceInfo
+	destination Locality
 }
 
 func defaultPutOptions() putOptions {
@@ -253,36 +254,44 @@ func (o *putOptions) qos() protocol.QoS {
 }
 
 // PutOption customizes a put, delete, publisher or reply.
-type PutOption func(*putOptions)
+type PutOption interface{ applyPut(*putOptions) }
+
+type putFn func(*putOptions)
+
+func (f putFn) applyPut(o *putOptions) { f(o) }
 
 // WithEncoding sets the payload encoding.
-func WithEncoding(e Encoding) PutOption { return func(o *putOptions) { o.encoding = e } }
+func WithEncoding(e Encoding) PutOption { return putFn(func(o *putOptions) { o.encoding = e }) }
 
 // WithAttachment attaches opaque user bytes.
-func WithAttachment(b []byte) PutOption { return func(o *putOptions) { o.attachment = b } }
+func WithAttachment(b []byte) PutOption { return putFn(func(o *putOptions) { o.attachment = b }) }
 
 // WithPriority sets the message priority.
-func WithPriority(p Priority) PutOption { return func(o *putOptions) { o.priority = p } }
+func WithPriority(p Priority) PutOption { return putFn(func(o *putOptions) { o.priority = p }) }
 
 // WithCongestionControl sets the congestion-control mode.
 func WithCongestionControl(c CongestionControl) PutOption {
-	return func(o *putOptions) { o.congestion = c }
+	return putFn(func(o *putOptions) { o.congestion = c })
 }
 
 // WithExpress disables batching for the message.
-func WithExpress(e bool) PutOption { return func(o *putOptions) { o.express = e } }
+func WithExpress(e bool) PutOption { return putFn(func(o *putOptions) { o.express = e }) }
 
 // WithReliability selects the reliable or best-effort channel.
-func WithReliability(r Reliability) PutOption { return func(o *putOptions) { o.reliability = r } }
+func WithReliability(r Reliability) PutOption {
+	return putFn(func(o *putOptions) { o.reliability = r })
+}
 
 // WithTimestamp sets an explicit timestamp.
-func WithTimestamp(ts Timestamp) PutOption { return func(o *putOptions) { o.timestamp = &ts } }
+func WithTimestamp(ts Timestamp) PutOption { return putFn(func(o *putOptions) { o.timestamp = &ts }) }
 
 // WithAutoTimestamp stamps the message with the session's HLC.
-func WithAutoTimestamp() PutOption { return func(o *putOptions) { o.autoTS = true } }
+func WithAutoTimestamp() PutOption { return putFn(func(o *putOptions) { o.autoTS = true }) }
 
 // WithSourceInfo tags the message with its source entity and sequence number.
-func WithSourceInfo(si SourceInfo) PutOption { return func(o *putOptions) { o.sourceInfo = &si } }
+func WithSourceInfo(si SourceInfo) PutOption {
+	return putFn(func(o *putOptions) { o.sourceInfo = &si })
+}
 
 // -----------------------------------------------------------------------------
 // Hybrid logical clock

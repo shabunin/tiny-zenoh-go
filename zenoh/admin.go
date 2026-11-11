@@ -10,9 +10,13 @@ import (
 
 func (s *Session) startAdmin() error {
 	key := "@/" + s.zid.String() + "/router"
-	_, err := s.DeclareQueryable(key, func(q *Query) {
+	k, err := validKey(key)
+	if err != nil {
+		return err
+	}
+	_, err = s.declareQueryable(k, func(q *Query) {
 		_ = q.Reply(key, []byte(s.adminJSON()), WithEncoding(EncodingApplicationJSON))
-	})
+	}, true, nil) // not in the namespace, like zenohd's admin space
 	return err
 }
 

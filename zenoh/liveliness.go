@@ -24,7 +24,7 @@ type LivelinessToken struct {
 
 // DeclareToken declares a liveliness token on key.
 func (l Liveliness) DeclareToken(key string) (*LivelinessToken, error) {
-	k, err := validKey(key)
+	k, err := l.s.nsKey(key)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +43,7 @@ func (l Liveliness) DeclareToken(key string) (*LivelinessToken, error) {
 }
 
 // KeyExpr returns the token's key expression.
-func (t *LivelinessToken) KeyExpr() string { return t.key }
+func (t *LivelinessToken) KeyExpr() string { return t.s.userKey(t.key) }
 
 // Undeclare withdraws the token.
 func (t *LivelinessToken) Undeclare() error {
@@ -123,7 +123,7 @@ func (s *Session) pushTokensLocked(key string) []string {
 // DeclareSubscriber subscribes to liveliness changes on key. With history, the
 // tokens alive at declaration time are reported first.
 func (l Liveliness) DeclareSubscriber(key string, handler func(Sample), history bool) (*LivelinessSubscriber, error) {
-	k, err := validKey(key)
+	k, err := l.s.nsKey(key)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +142,9 @@ func (l Liveliness) DeclareSubscriber(key string, handler func(Sample), history 
 	}
 	s.mu.Unlock()
 	for _, key := range known {
-		handler(Sample{KeyExpr: key, Kind: SampleKindPut})
+		if user, ok := s.nsStrip(key); ok {
+			handler(Sample{KeyExpr: user, Kind: SampleKindPut})
+		}
 	}
 	if err := s.broadcast(routed, ls.interest(ls.id, mode)); err != nil {
 		s.mu.Lock()
@@ -188,14 +190,14 @@ func (g *livGet) finish() {
 // Get returns the liveliness tokens currently alive on key. The channel is
 // closed when every router has answered or the timeout expires.
 func (l Liveliness) Get(key string, opts ...GetOption) (<-chan Reply, error) {
-	k, err := validKey(key)
+	k, err := l.s.nsKey(key)
 	if err != nil {
 		return nil, err
 	}
 	s := l.s
 	o := getOptions{timeout: s.cfg.QueryTimeout}
 	for _, opt := range opts {
-		opt(&o)
+		opt.applyGet(&o)
 	}
 	f := newFifo[Reply]()
 	id := l.interestID()
@@ -220,8 +222,10 @@ func (l Liveliness) Get(key string, opts ...GetOption) (<-chan Reply, error) {
 	}
 	s.mu.Unlock()
 	for _, key := range known {
-		smp := Sample{KeyExpr: key, Kind: SampleKindPut}
-		g.cb(Reply{Sample: &smp})
+		if user, ok := s.nsStrip(key); ok {
+			smp := Sample{KeyExpr: user, Kind: SampleKindPut}
+			g.cb(Reply{Sample: &smp})
+		}
 	}
 	if len(routed) == 0 {
 		g.finish()
@@ -267,7 +271,11 @@ func (s *Session) livGetFinal(id uint32, f *face) {
 // livelinessEvent routes a token declaration/undeclaration from the router.
 // Declarations tagged with an interest id answer that interest only.
 func (s *Session) livelinessEvent(m *protocol.Declare, key string, kind SampleKind) {
-	smp := Sample{KeyExpr: key, Kind: kind}
+	user, ok := s.nsStrip(key)
+	if !ok {
+		return // outside our namespace
+	}
+	smp := Sample{KeyExpr: user, Kind: kind}
 	s.mu.Lock()
 	var handlers []func(Sample)
 	if m != nil && m.HasInterestID {

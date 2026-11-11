@@ -30,6 +30,8 @@ usage: zpeer.py <router | json-config> <mode> <args...>
   bigpub <key> <size> <n>   put n pattern payloads of size bytes
   bigqueryable <key> <size> <secs>  reply a pattern payload; print the query body digest
   bigget <selector> <size>  get with a pattern body; print reply digests
+  zsersub <key>             deserialize one zenoh-ext tuple sample, print it
+  zserpub <key>             publish one zenoh-ext serialized tuple
 """
 import hashlib
 import json
@@ -248,6 +250,31 @@ def main():
         done.wait(30)
         ml.undeclare()
         sub.undeclare()
+    elif mode in ("zsersub", "zserpub"):
+        # zenoh-ext serialization of a fixed tuple (see TestZextRust).
+        from zenoh.ext import z_serialize, z_deserialize, Int32, Int64, UInt8, Float32
+        types = tuple[Int32, str, list[float], dict[str, Int64], bool, bytes, list[UInt8], Float32]
+        key = args[0]
+        if mode == "zserpub":
+            v = (Int32(-7), "héllo", [0.5, -2.0], {"k": Int64(-9)}, True, b"\x00\x01", [UInt8(3)], Float32(1.5))
+            pub = s.declare_publisher(key)
+            time.sleep(0.5)
+            pub.put(z_serialize(v))
+            time.sleep(0.3)
+        else:
+            def on_zser(smp):
+                try:
+                    v = list(z_deserialize(types, smp.payload))
+                    v[5] = v[5].hex()
+                    emit(zser=v)
+                except Exception as e:
+                    emit(zser_err=str(e))
+                done.set()
+
+            h = s.declare_subscriber(key, on_zser)
+            emit(ready=True)
+            done.wait(10)
+            h.undeclare()
     elif mode == "token":
         key, secs = args[0], float(args[1])
         t = s.liveliness().declare_token(key)

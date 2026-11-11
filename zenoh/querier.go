@@ -17,15 +17,15 @@ type Querier struct {
 // DeclareQuerier declares a querier on key; opts (target, consolidation,
 // timeout, ...) become the defaults of its queries.
 func (s *Session) DeclareQuerier(key string, opts ...GetOption) (*Querier, error) {
-	k, err := validKey(key)
+	k, err := s.nsKey(key)
 	if err != nil {
 		return nil, err
 	}
 	var o getOptions
 	for _, opt := range opts {
-		opt(&o)
+		opt.applyGet(&o)
 	}
-	m, err := s.newMatcher(kindQbl, k.String(), o.target == TargetAllComplete)
+	m, err := s.newMatcher(kindQbl, k.String(), o.target == TargetAllComplete, o.destination)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +33,7 @@ func (s *Session) DeclareQuerier(key string, opts ...GetOption) (*Querier, error
 }
 
 // KeyExpr returns the querier's key expression.
-func (q *Querier) KeyExpr() string { return q.key.String() }
+func (q *Querier) KeyExpr() string { return q.s.userKey(q.key.String()) }
 
 // Get queries the querier's key with selector parameters params (may be
 // empty); replies arrive on a channel closed when the query completes.
@@ -50,10 +50,10 @@ func (q *Querier) Get(params string, opts ...GetOption) (<-chan Reply, error) {
 func (q *Querier) GetFunc(params string, cb func(Reply), done func(), opts ...GetOption) error {
 	o := getOptions{timeout: q.s.cfg.QueryTimeout}
 	for _, opt := range q.opts {
-		opt(&o)
+		opt.applyGet(&o)
 	}
 	for _, opt := range opts {
-		opt(&o)
+		opt.applyGet(&o)
 	}
 	return q.s.get(q.key, params, &o, q, cb, done)
 }

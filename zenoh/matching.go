@@ -32,6 +32,7 @@ type matcher struct {
 	kind     declKind
 	key      string
 	complete bool // queryables: complete ones including key only
+	dest     Locality
 	lsn      map[*MatchingListener]struct{}
 	running  bool // a goroutine is delivering notifications
 	dirty    bool // re-check requested while running
@@ -52,14 +53,14 @@ func (m *matcher) interest(mode protocol.InterestMode) *protocol.Interest {
 }
 
 // newMatcher registers a matcher and asks the routed faces about key.
-func (s *Session) newMatcher(k declKind, key string, complete bool) (*matcher, error) {
+func (s *Session) newMatcher(k declKind, key string, complete bool, dest Locality) (*matcher, error) {
 	s.mu.Lock()
 	if s.closed.Load() {
 		s.mu.Unlock()
 		return nil, ErrSessionClosed
 	}
 	s.nextInterest++
-	m := &matcher{s: s, id: s.nextInterest, kind: k, key: key, complete: complete,
+	m := &matcher{s: s, id: s.nextInterest, kind: k, key: key, complete: complete, dest: dest,
 		lsn: map[*MatchingListener]struct{}{}}
 	s.matchers[m.id] = m
 	routed := s.routedFacesLocked()
@@ -98,15 +99,21 @@ func (m *matcher) matches(key string, complete bool) bool {
 }
 
 // statusLocked computes the matching status from what the session knows:
-// its own entities, those declared by its faces, and the router mesh.
+// its own entities (that take local traffic, unless the destination is
+// remote only), those declared by its faces, and the router mesh (unless
+// the destination is the session only).
 func (m *matcher) statusLocked() bool {
 	s := m.s
+	local, remote := m.dest != LocalityRemote, m.dest != LocalitySessionLocal
 	switch m.kind {
 	case kindSub:
 		for _, sub := range s.subs {
-			if m.matches(sub.key.String(), false) {
+			if local && sub.origin.allows(true) && m.matches(sub.key.String(), false) {
 				return true
 			}
+		}
+		if !remote {
+			return false
 		}
 		for _, f := range s.faces {
 			for _, key := range f.subs {
@@ -117,9 +124,12 @@ func (m *matcher) statusLocked() bool {
 		}
 	case kindQbl:
 		for _, q := range s.queryables {
-			if m.matches(q.key.String(), q.complete) {
+			if local && q.origin.allows(true) && m.matches(q.key.String(), q.complete) {
 				return true
 			}
+		}
+		if !remote {
+			return false
 		}
 		for _, f := range s.faces {
 			for _, q := range f.qbls {

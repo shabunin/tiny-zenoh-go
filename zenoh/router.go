@@ -115,13 +115,13 @@ func (s *Session) localSourcesLocked(k declKind, key string, dst *face) (present
 		switch k {
 		case kindSub:
 			for _, sub := range s.subs {
-				if sub.key.String() == key {
+				if sub.remote() && sub.key.String() == key {
 					return true, false
 				}
 			}
 		case kindQbl:
 			for _, q := range s.queryables {
-				if q.key.String() == key {
+				if q.remote() && q.key.String() == key {
 					present, complete = true, complete || q.complete
 				}
 			}
@@ -174,11 +174,15 @@ func (s *Session) keysLocked(k declKind, filter string, dst *face) []string {
 		switch k {
 		case kindSub:
 			for _, sub := range s.subs {
-				add(sub.key.String())
+				if sub.remote() {
+					add(sub.key.String())
+				}
 			}
 		case kindQbl:
 			for _, q := range s.queryables {
-				add(q.key.String())
+				if q.remote() {
+					add(q.key.String())
+				}
 			}
 		case kindToken:
 			for _, t := range s.localTokens {
@@ -483,7 +487,7 @@ func (s *Session) routerRequest(src *face, key string, m *protocol.Request) {
 		return
 	}
 	for _, q := range s.queryables {
-		if keyexpr.Intersect(q.key.String(), key) && (m.Target != TargetAllComplete || q.complete) {
+		if q.remote() && keyexpr.Intersect(q.key.String(), key) && (m.Target != TargetAllComplete || q.complete) {
 			rq.local = true
 			break
 		}

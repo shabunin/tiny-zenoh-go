@@ -55,7 +55,7 @@ func (s *Session) mcastMessage(g *mcastGroup, p *transport.MulticastPeer, m prot
 	case *protocol.Push:
 		key, ok := s.mcastResolve(g, p.Addr, m.WireExpr)
 		if ok {
-			s.dispatchSample(sampleFromBody(key, m.Body, m.QoS))
+			s.dispatchSample(sampleFromBody(key, m.Body, m.QoS), false)
 		}
 	case *protocol.Declare:
 		switch d := m.Body.(type) {

@@ -48,29 +48,34 @@ type getOptions struct {
 	timeout       time.Duration
 	body          *protocol.QueryBody
 	attachment    []byte
+	destination   Locality
 }
 
-// GetOption customizes a Get.
-type GetOption func(*getOptions)
+// GetOption customizes a Get or a querier.
+type GetOption interface{ applyGet(*getOptions) }
+
+type getFn func(*getOptions)
+
+func (f getFn) applyGet(o *getOptions) { f(o) }
 
 // WithTarget selects which queryables are queried.
-func WithTarget(t QueryTarget) GetOption { return func(o *getOptions) { o.target = t } }
+func WithTarget(t QueryTarget) GetOption { return getFn(func(o *getOptions) { o.target = t }) }
 
 // WithConsolidation selects reply consolidation.
 func WithConsolidation(c ConsolidationMode) GetOption {
-	return func(o *getOptions) { o.consolidation = c }
+	return getFn(func(o *getOptions) { o.consolidation = c })
 }
 
 // WithTimeout bounds the query.
-func WithTimeout(d time.Duration) GetOption { return func(o *getOptions) { o.timeout = d } }
+func WithTimeout(d time.Duration) GetOption { return getFn(func(o *getOptions) { o.timeout = d }) }
 
 // WithPayload sends a value along with the query.
 func WithPayload(payload []byte, enc Encoding) GetOption {
-	return func(o *getOptions) { o.body = &protocol.QueryBody{Encoding: enc.wire(), Payload: payload} }
+	return getFn(func(o *getOptions) { o.body = &protocol.QueryBody{Encoding: enc.wire(), Payload: payload} })
 }
 
 // WithQueryAttachment attaches opaque bytes to the query.
-func WithQueryAttachment(b []byte) GetOption { return func(o *getOptions) { o.attachment = b } }
+func WithQueryAttachment(b []byte) GetOption { return getFn(func(o *getOptions) { o.attachment = b }) }
 
 type pendingQuery struct {
 	key     string
@@ -190,13 +195,13 @@ func (s *Session) Get(selector string, opts ...GetOption) (<-chan Reply, error) 
 // called once when the query completes.
 func (s *Session) GetFunc(selector string, cb func(Reply), done func(), opts ...GetOption) error {
 	key, params := splitSelector(selector)
-	k, err := validKey(key)
+	k, err := s.nsKey(key)
 	if err != nil {
 		return err
 	}
 	o := getOptions{timeout: s.cfg.QueryTimeout}
 	for _, opt := range opts {
-		opt(&o)
+		opt.applyGet(&o)
 	}
 	return s.get(k, params, &o, nil, cb, done)
 }
@@ -212,7 +217,7 @@ func (s *Session) get(k *keyexpr.Key, params string, o *getOptions, qr *Querier,
 	pq := &pendingQuery{
 		key: k.String(), mode: mode, cb: cb, onDone: done,
 		latest: map[string]Reply{}, mono: map[string]*Timestamp{},
-		faces: map[*face]bool{}, local: true,
+		faces: map[*face]bool{}, local: o.destination != LocalityRemote,
 	}
 	s.mu.Lock()
 	if s.closed.Load() {
@@ -229,14 +234,16 @@ func (s *Session) get(k *keyexpr.Key, params string, o *getOptions, qr *Querier,
 	}
 	qid := s.nextQID
 	s.nextQID++
-	for _, f := range s.faces {
-		if f.wantsQueryLocked(k.String(), o.target) {
+	if o.destination != LocalitySessionLocal {
+		for _, f := range s.faces {
+			if f.wantsQueryLocked(k.String(), o.target) {
+				pq.faces[f] = true
+			}
+		}
+		routers, _ := s.meshRouteLocked(kindQbl, nil, 0, k.String(), o.target)
+		for f := range routers {
 			pq.faces[f] = true
 		}
-	}
-	routers, _ := s.meshRouteLocked(kindQbl, nil, 0, k.String(), o.target)
-	for f := range routers {
-		pq.faces[f] = true
 	}
 	dst := make([]*face, 0, len(pq.faces))
 	for f := range pq.faces {
@@ -274,8 +281,15 @@ func (s *Session) get(k *keyexpr.Key, params string, o *getOptions, qr *Querier,
 			s.queryFinal(qid, f) // that peer is going away: don't wait for it
 		}
 	}
-	// Also ask this session's own queryables.
-	s.dispatchQuery(qid, nil, k.String(), params, o.body, o.attachment, o.target)
+	if pq.local {
+		// Also ask this session's own queryables.
+		s.dispatchQuery(qid, nil, k.String(), params, o.body, o.attachment, o.target)
+	} else if len(dst) == 0 {
+		s.mu.Lock()
+		delete(s.queries, qid)
+		s.mu.Unlock()
+		pq.finish()
+	}
 	return nil
 }
 
@@ -324,6 +338,15 @@ func (s *Session) deliverReply(qid uint32, r Reply) {
 	if r.Sample != nil && !pq.anyKey && !keyexpr.Intersect(pq.key, r.Sample.KeyExpr) {
 		return
 	}
+	if r.Sample != nil {
+		user, ok := s.nsStrip(r.Sample.KeyExpr)
+		if !ok {
+			return // outside our namespace
+		}
+		smp := *r.Sample
+		smp.KeyExpr = user
+		r.Sample = &smp
+	}
 	pq.add(r)
 }
 
@@ -351,35 +374,60 @@ func (s *Session) handleResponse(f *face, m *protocol.Response) {
 type Queryable struct {
 	s        *Session
 	id       uint32
-	key      *keyexpr.Key
+	key      *keyexpr.Key // full key (namespace included)
 	complete bool
+	origin   Locality
+	raw      bool // outside the namespace (admin space)
 	handler  func(*Query)
 }
 
 // QueryableOption customizes a queryable.
-type QueryableOption func(*Queryable)
+type QueryableOption interface{ applyQbl(*Queryable) }
+
+type qblFn func(*Queryable)
+
+func (f qblFn) applyQbl(q *Queryable) { f(q) }
 
 // WithComplete declares that the queryable answers for every key it matches.
-func WithComplete(c bool) QueryableOption { return func(q *Queryable) { q.complete = c } }
+func WithComplete(c bool) QueryableOption { return qblFn(func(q *Queryable) { q.complete = c }) }
 
 // KeyExpr returns the queryable's key expression.
-func (q *Queryable) KeyExpr() string { return q.key.String() }
+func (q *Queryable) KeyExpr() string {
+	if q.raw {
+		return q.key.String()
+	}
+	return q.s.userKey(q.key.String())
+}
+
+// remote reports whether the entity is declared to the network.
+func (q *Queryable) remote() bool { return q.origin != LocalitySessionLocal }
 
 // DeclareQueryable calls handler for each query intersecting key. Replies may
 // be sent from the handler; when it returns the query is finalized, unless the
 // handler called Query.Detach (then call Query.Finish when done).
 func (s *Session) DeclareQueryable(key string, handler func(*Query), opts ...QueryableOption) (*Queryable, error) {
-	k, err := validKey(key)
+	k, err := s.nsKey(key)
 	if err != nil {
 		return nil, err
 	}
-	q := &Queryable{s: s, id: s.entityID(), key: k, handler: handler}
+	return s.declareQueryable(k, handler, false, opts)
+}
+
+// declareQueryable declares a queryable on full key k (raw: not in the
+// namespace).
+func (s *Session) declareQueryable(k *keyexpr.Key, handler func(*Query), raw bool, opts []QueryableOption) (*Queryable, error) {
+	q := &Queryable{s: s, id: s.entityID(), key: k, handler: handler, raw: raw}
 	for _, opt := range opts {
-		opt(q)
+		opt.applyQbl(q)
 	}
 	s.mu.Lock()
 	s.queryables[q.id] = q
-	err = s.declareLocalLocked(kindQbl, k.String(), &protocol.Declare{QoS: protocol.QoSDeclare, Body: &protocol.DeclareQueryable{
+	if !q.remote() {
+		s.mu.Unlock()
+		s.checkMatching()
+		return q, nil
+	}
+	err := s.declareLocalLocked(kindQbl, k.String(), &protocol.Declare{QoS: protocol.QoSDeclare, Body: &protocol.DeclareQueryable{
 		ID: q.id, WireExpr: protocol.WireExpr{Suffix: k.String()}, Complete: q.complete}})
 	if err != nil {
 		s.mu.Lock()
@@ -397,6 +445,11 @@ func (q *Queryable) Undeclare() error {
 	delete(q.s.queryables, q.id)
 	if !ok {
 		q.s.mu.Unlock()
+		return nil
+	}
+	if !q.remote() {
+		q.s.mu.Unlock()
+		q.s.checkMatching()
 		return nil
 	}
 	return q.s.declareLocalLocked(kindQbl, q.key.String(), &protocol.Declare{QoS: protocol.QoSDeclare,
@@ -439,6 +492,8 @@ func (s *Session) handleRequest(f *face, m *protocol.Request) {
 	s.dispatchQuery(m.ID, f, key, q.Parameters, q.Body, q.Attachment, m.Target)
 }
 
+// dispatchQuery hands a query on full key key to our matching queryables:
+// origin is the face it comes from, nil for our own session's.
 func (s *Session) dispatchQuery(rid uint32, origin *face, key, params string,
 	body *protocol.QueryBody, att []byte, target QueryTarget) {
 	s.dispatchQueryWith(rid, origin, nil, key, params, body, att, target)
@@ -446,10 +501,13 @@ func (s *Session) dispatchQuery(rid uint32, origin *face, key, params string,
 
 func (s *Session) dispatchQueryWith(rid uint32, origin *face, onFinal func(), key, params string,
 	body *protocol.QueryBody, att []byte, target QueryTarget) {
+	local := origin == nil
+	user, inNS := s.nsStrip(key)
 	s.mu.Lock()
 	var qs []*Queryable
 	for _, q := range s.queryables {
-		if keyexpr.Intersect(q.key.String(), key) && (target != TargetAllComplete || q.complete) {
+		if (q.raw || inNS) && q.origin.allows(local) &&
+			keyexpr.Intersect(q.key.String(), key) && (target != TargetAllComplete || q.complete) {
 			qs = append(qs, q)
 		}
 	}
@@ -457,7 +515,10 @@ func (s *Session) dispatchQueryWith(rid uint32, origin *face, onFinal func(), ke
 	st := &queryState{s: s, rid: rid, origin: origin, onFinal: onFinal}
 	st.remaining.Store(int32(len(qs) + 1))
 	for _, qbl := range qs {
-		query := &Query{st: st, qbl: qbl, key: key, params: params, attachment: att}
+		query := &Query{st: st, qbl: qbl, key: key, ukey: user, params: params, attachment: att}
+		if qbl.raw {
+			query.ukey = key
+		}
 		if body != nil {
 			query.payload, query.encoding = body.Payload, encodingFromWire(body.Encoding)
 		}
@@ -473,7 +534,8 @@ func (s *Session) dispatchQueryWith(rid uint32, origin *face, onFinal func(), ke
 type Query struct {
 	st         *queryState
 	qbl        *Queryable
-	key        string
+	key        string // full key (namespace included)
+	ukey       string // as the queryable's user sees it
 	params     string
 	payload    []byte
 	encoding   Encoding
@@ -483,7 +545,7 @@ type Query struct {
 }
 
 // KeyExpr returns the queried key expression.
-func (q *Query) KeyExpr() string { return q.key }
+func (q *Query) KeyExpr() string { return q.ukey }
 
 // Parameters returns the selector parameters (after '?').
 func (q *Query) Parameters() string { return q.params }
@@ -491,9 +553,9 @@ func (q *Query) Parameters() string { return q.params }
 // Selector returns "key?parameters" (or just key).
 func (q *Query) Selector() string {
 	if q.params == "" {
-		return q.key
+		return q.ukey
 	}
-	return q.key + "?" + q.params
+	return q.ukey + "?" + q.params
 }
 
 // AcceptsAnyKey reports whether the querier accepts replies on keys outside
@@ -540,7 +602,13 @@ func (q *Query) respond(key string, body protocol.ResponseBody, r Reply) error {
 }
 
 func (q *Query) replyData(key string, kind SampleKind, payload []byte, opts []PutOption) error {
-	k, err := validKey(key)
+	var k *keyexpr.Key
+	var err error
+	if q.qbl.raw {
+		k, err = validKey(key)
+	} else {
+		k, err = q.st.s.nsKey(key)
+	}
 	if err != nil {
 		return err
 	}
@@ -549,7 +617,7 @@ func (q *Query) replyData(key string, kind SampleKind, payload []byte, opts []Pu
 	}
 	o := defaultPutOptions()
 	for _, opt := range opts {
-		opt(&o)
+		opt.applyPut(&o)
 	}
 	data := q.st.s.buildData(kind, &o)
 	if p, ok := data.(*protocol.Put); ok {

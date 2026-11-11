@@ -132,10 +132,14 @@ func (s *Session) snapshotLocked(f *face) []transport.Encoder {
 		return out // south faces learn about us through their interests
 	}
 	for id, sub := range s.subs {
-		decl(&protocol.DeclareSubscriber{ID: id, WireExpr: protocol.WireExpr{Suffix: sub.key.String()}})
+		if sub.remote() {
+			decl(&protocol.DeclareSubscriber{ID: id, WireExpr: protocol.WireExpr{Suffix: sub.key.String()}})
+		}
 	}
 	for id, q := range s.queryables {
-		decl(&protocol.DeclareQueryable{ID: id, WireExpr: protocol.WireExpr{Suffix: q.key.String()}, Complete: q.complete})
+		if q.remote() {
+			decl(&protocol.DeclareQueryable{ID: id, WireExpr: protocol.WireExpr{Suffix: q.key.String()}, Complete: q.complete})
+		}
 	}
 	for id, t := range s.localTokens {
 		decl(&protocol.DeclareToken{ID: id, WireExpr: protocol.WireExpr{Suffix: t.key}})
@@ -305,7 +309,7 @@ func (f *face) onMessage(m protocol.Message, reliable bool) error {
 		if !ok {
 			return nil // unknown mapping: drop, as zenoh-rust does
 		}
-		s.dispatchSample(sampleFromBody(key, m.Body, m.QoS))
+		s.dispatchSample(sampleFromBody(key, m.Body, m.QoS), false)
 		if s.cfg.Mode != ModeClient {
 			s.routerForward(f, key, m, reliable)
 		}
@@ -490,14 +494,14 @@ func (f *face) handleInterest(m *protocol.Interest) {
 	s.mu.Lock()
 	if m.Options&protocol.InterestSubscribers != 0 {
 		for id, sub := range s.subs {
-			if match(sub.key.String()) {
+			if sub.remote() && match(sub.key.String()) {
 				decl(&protocol.DeclareSubscriber{ID: id, WireExpr: protocol.WireExpr{Suffix: sub.key.String()}})
 			}
 		}
 	}
 	if m.Options&protocol.InterestQueryables != 0 {
 		for id, q := range s.queryables {
-			if match(q.key.String()) {
+			if q.remote() && match(q.key.String()) {
 				decl(&protocol.DeclareQueryable{ID: id, WireExpr: protocol.WireExpr{Suffix: q.key.String()}, Complete: q.complete})
 			}
 		}

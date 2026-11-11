@@ -7,11 +7,19 @@ import (
 	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
-func (s *Session) dispatchSample(smp Sample) {
+// dispatchSample hands a sample on full key smp.KeyExpr, published by our
+// session (local) or another one, to our matching subscribers.
+func (s *Session) dispatchSample(smp Sample, local bool) {
+	full := smp.KeyExpr
+	user, ok := s.nsStrip(full)
+	if !ok {
+		return // outside our namespace
+	}
+	smp.KeyExpr = user
 	s.mu.Lock()
 	var handlers []func(Sample)
 	for _, sub := range s.subs {
-		if keyexpr.Intersect(sub.key.String(), smp.KeyExpr) {
+		if sub.origin.allows(local) && keyexpr.Intersect(sub.key.String(), full) {
 			handlers = append(handlers, sub.handler)
 		}
 	}
@@ -47,7 +55,12 @@ func (s *Session) publish(key string, we protocol.WireExpr, kind SampleKind, pay
 		p.Payload = payload
 	}
 	// Deliver to this session's own matching subscribers, like zenoh-rust.
-	s.dispatchSample(sampleFromBody(key, body, o.qos()))
+	if o.destination != LocalityRemote {
+		s.dispatchSample(sampleFromBody(key, body, o.qos()), true)
+	}
+	if o.destination == LocalitySessionLocal {
+		return nil
+	}
 
 	s.mu.Lock()
 	var dst []*face
@@ -80,26 +93,26 @@ func (s *Session) publish(key string, we protocol.WireExpr, kind SampleKind, pay
 
 // Put publishes payload on key.
 func (s *Session) Put(key string, payload []byte, opts ...PutOption) error {
-	k, err := validKey(key)
+	k, err := s.nsKey(key)
 	if err != nil {
 		return err
 	}
 	o := defaultPutOptions()
 	for _, opt := range opts {
-		opt(&o)
+		opt.applyPut(&o)
 	}
 	return s.publish(k.String(), protocol.WireExpr{Suffix: k.String()}, SampleKindPut, payload, &o)
 }
 
 // Delete publishes a deletion on key.
 func (s *Session) Delete(key string, opts ...PutOption) error {
-	k, err := validKey(key)
+	k, err := s.nsKey(key)
 	if err != nil {
 		return err
 	}
 	o := defaultPutOptions()
 	for _, opt := range opts {
-		opt(&o)
+		opt.applyPut(&o)
 	}
 	return s.publish(k.String(), protocol.WireExpr{Suffix: k.String()}, SampleKindDelete, nil, &o)
 }
@@ -112,25 +125,37 @@ func (s *Session) Delete(key string, opts ...PutOption) error {
 type Subscriber struct {
 	s       *Session
 	id      uint32
-	key     *keyexpr.Key
+	key     *keyexpr.Key // full key (namespace included)
+	origin  Locality
 	handler func(Sample)
 	stop    chan struct{} // closed by Undeclare
 	once    sync.Once
 }
 
 // KeyExpr returns the subscriber's key expression.
-func (sub *Subscriber) KeyExpr() string { return sub.key.String() }
+func (sub *Subscriber) KeyExpr() string { return sub.s.userKey(sub.key.String()) }
+
+// remote reports whether the entity is declared to the network.
+func (sub *Subscriber) remote() bool { return sub.origin != LocalitySessionLocal }
 
 // DeclareSubscriber calls handler for every sample published on keys
-// intersecting key.
-func (s *Session) DeclareSubscriber(key string, handler func(Sample)) (*Subscriber, error) {
-	k, err := validKey(key)
+// intersecting key (see WithAllowedOrigin).
+func (s *Session) DeclareSubscriber(key string, handler func(Sample), opts ...SubscriberOption) (*Subscriber, error) {
+	k, err := s.nsKey(key)
 	if err != nil {
 		return nil, err
 	}
 	sub := &Subscriber{s: s, id: s.entityID(), key: k, handler: handler, stop: make(chan struct{})}
+	for _, o := range opts {
+		o.applySub(sub)
+	}
 	s.mu.Lock()
 	s.subs[sub.id] = sub
+	if !sub.remote() {
+		s.mu.Unlock()
+		s.checkMatching()
+		return sub, nil
+	}
 	err = s.declareLocalLocked(kindSub, k.String(), &protocol.Declare{QoS: protocol.QoSDeclare,
 		Body: &protocol.DeclareSubscriber{ID: sub.id, WireExpr: protocol.WireExpr{Suffix: k.String()}}})
 	if err != nil {
@@ -144,9 +169,9 @@ func (s *Session) DeclareSubscriber(key string, handler func(Sample)) (*Subscrib
 
 // DeclareSubscriberChan is like DeclareSubscriber but delivers samples on an
 // unbounded channel, closed by Undeclare or when the session ends.
-func (s *Session) DeclareSubscriberChan(key string) (*Subscriber, <-chan Sample, error) {
+func (s *Session) DeclareSubscriberChan(key string, opts ...SubscriberOption) (*Subscriber, <-chan Sample, error) {
 	f := newFifo[Sample]()
-	sub, err := s.DeclareSubscriber(key, f.push)
+	sub, err := s.DeclareSubscriber(key, f.push, opts...)
 	if err != nil {
 		f.close()
 		return nil, nil, err
@@ -172,6 +197,11 @@ func (sub *Subscriber) Undeclare() error {
 		return nil
 	}
 	sub.once.Do(func() { close(sub.stop) })
+	if !sub.remote() {
+		s.mu.Unlock()
+		s.checkMatching()
+		return nil
+	}
 	return s.declareLocalLocked(kindSub, sub.key.String(), &protocol.Declare{QoS: protocol.QoSDeclare,
 		Body: &protocol.UndeclareSubscriber{ID: sub.id}})
 }
@@ -185,7 +215,7 @@ func (sub *Subscriber) Undeclare() error {
 // bytes of scope instead of the full key.
 type Publisher struct {
 	s      *Session
-	key    string
+	key    string // full key (namespace included)
 	exprID uint16
 	opts   []PutOption
 	m      *matcher
@@ -193,7 +223,7 @@ type Publisher struct {
 
 // DeclarePublisher declares a publisher on key; opts become its defaults.
 func (s *Session) DeclarePublisher(key string, opts ...PutOption) (*Publisher, error) {
-	k, err := validKey(key)
+	k, err := s.nsKey(key)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +238,11 @@ func (s *Session) DeclarePublisher(key string, opts ...PutOption) (*Publisher, e
 	if err != nil {
 		return nil, err
 	}
-	m, err := s.newMatcher(kindSub, k.String(), false)
+	o := defaultPutOptions()
+	for _, opt := range opts {
+		opt.applyPut(&o)
+	}
+	m, err := s.newMatcher(kindSub, k.String(), false, o.destination)
 	if err != nil {
 		return nil, err
 	}
@@ -216,15 +250,15 @@ func (s *Session) DeclarePublisher(key string, opts ...PutOption) (*Publisher, e
 }
 
 // KeyExpr returns the publisher's key expression.
-func (p *Publisher) KeyExpr() string { return p.key }
+func (p *Publisher) KeyExpr() string { return p.s.userKey(p.key) }
 
 func (p *Publisher) options(opts []PutOption) putOptions {
 	o := defaultPutOptions()
 	for _, opt := range p.opts {
-		opt(&o)
+		opt.applyPut(&o)
 	}
 	for _, opt := range opts {
-		opt(&o)
+		opt.applyPut(&o)
 	}
 	return o
 }

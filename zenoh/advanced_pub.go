@@ -96,7 +96,7 @@ func (s *Session) DeclareAdvancedPublisher(key string, conf AdvancedPublisherCon
 		id = strconv.FormatUint(uint64(ap.eid), 10)
 	}
 	ap.suffix = joinKey(advPrefix, "pub", s.zid.String(), id, meta)
-	full := joinKey(pub.key, ap.suffix)
+	full := joinKey(pub.KeyExpr(), ap.suffix)
 	fail := func(err error) (*AdvancedPublisher, error) {
 		_ = ap.Undeclare()
 		return nil, err
@@ -188,7 +188,7 @@ func (ap *AdvancedPublisher) prepare(kind SampleKind, payload []byte, opts []Put
 		ap.sn++
 	}
 	if ap.qbl != nil {
-		smp := Sample{KeyExpr: ap.key, Kind: kind, Payload: payload, Encoding: o.encoding,
+		smp := Sample{KeyExpr: ap.KeyExpr(), Kind: kind, Payload: payload, Encoding: o.encoding,
 			Timestamp: o.timestamp, Attachment: o.attachment, SourceInfo: o.sourceInfo,
 			Priority: o.priority, Congestion: o.congestion, Express: o.express}
 		if len(ap.cache) >= ap.max {

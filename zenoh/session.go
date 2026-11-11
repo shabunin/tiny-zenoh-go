@@ -118,6 +118,11 @@ type Config struct {
 	// Gateway configures the subregions we are the gateway of (zenoh-rust
 	// gateway.south); the zero value keeps zenoh's auto preset.
 	Gateway GatewayConfig
+	// Namespace, if set (a key expression without wildcards), prefixes every
+	// key the session is given with "<Namespace>/" and strips it from every
+	// key it gives back; traffic on keys outside the namespace doesn't reach
+	// the session (zenoh-rust config "namespace").
+	Namespace string
 	// ZID is this session's id. Default: random.
 	ZID ZID
 	// Lease is the session lease announced to other nodes. Default 10s.
@@ -288,6 +293,9 @@ func Open(cfg Config) (*Session, error) {
 		southNets:   map[Region]*lsNetwork{},
 	}
 	if err := cfg.validateRegions(); err != nil {
+		return nil, err
+	}
+	if err := validNamespace(cfg.Namespace); err != nil {
 		return nil, err
 	}
 	if s.zid.IsZero() {
