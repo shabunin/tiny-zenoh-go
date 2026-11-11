@@ -41,7 +41,10 @@ func dialVsock(l Locator, timeout time.Duration) (transport.Link, error) {
 	return f, nil
 }
 
-// waitConnected waits for a non-blocking connect to finish.
+// waitConnected waits for a non-blocking connect to finish. The socket's
+// state is checked on every wake-up, the first one included: RawConn.Write
+// resets the poller's write readiness before calling us, so a connect that
+// completed before then produces no further edge to wait for.
 func waitConnected(f *os.File, timeout time.Duration) error {
 	if timeout > 0 {
 		_ = f.SetWriteDeadline(time.Now().Add(timeout))
@@ -52,14 +55,13 @@ func waitConnected(f *os.File, timeout time.Duration) error {
 		return err
 	}
 	var soErr int
-	waited := false
 	werr := rc.Write(func(fd uintptr) bool {
-		if !waited {
-			waited = true
-			return false // wait until writable
-		}
 		soErr, err = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_ERROR)
-		return true
+		if err != nil || soErr != 0 {
+			return true
+		}
+		_, perr := unix.Getpeername(int(fd))
+		return perr != unix.ENOTCONN // connected (or failed in a way the first use reports)
 	})
 	if werr != nil {
 		return werr

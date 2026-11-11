@@ -135,6 +135,11 @@ session can publish, subscribe and serve queries itself.
 - **Go peer ↔ Rust peer, no router**: either side listening/connecting,
   pub/sub, queries both ways, liveliness, and a Rust peer and a Go peer
   finding each other by multicast scouting.
+- **unixpipe and vsock with zenoh-rust 1.10.2** (Rust test peer built with
+  both links): Rust peer listening / Go peer dialing, Go router listening /
+  Rust clients dialing; pub/sub and queries both ways.
+- **REST plugin**: same requests answered identically by zenohd's REST
+  plugin and `plugins/rest` (JSON, HTML, `_raw`, SSE, PUT/DELETE, errors).
 - **Go peer attached to zenohd** alongside clients: data, queries, liveliness.
 - **gozenohd routing for Rust**: the whole interop + cross suite passes with
   `ZENOH_ROUTER=go` (an in-process Go router instead of zenohd), plus
@@ -295,6 +300,10 @@ ZENOH_ROUTER=go ZENOH_PY=... go test ./zenoh/    # same suites, tiny-zenoh-go as
 git clone -b 1.10.2 https://github.com/eclipse-zenoh/zenoh-pico
 cmake -S zenoh-pico -B pico-build -DBUILD_TESTING=OFF -DZ_FEATURE_UNSTABLE_API=1 && cmake --build pico-build
 ZENOH_PICO=$PWD/pico-build go test -run Pico ./zenoh/
+
+# unixpipe + vsock against zenoh-rust (vsock needs the vsock_loopback module)
+(cd zenoh/testdata/zrs && cargo build --release)
+ZENOH_RS=$PWD/zenoh/testdata/zrs/target/release/zrs go test -run RustLink ./zenoh/
 
 # router meshes: one or two zenohd routers not connected to each other
 docker run -d --name zenohd2 --net=host eclipse/zenoh -l tcp/127.0.0.1:7448 --no-multicast-scouting
@@ -588,9 +597,13 @@ tiny-zenoh-go/
 - None of the INIT/OPEN extensions are mandatory, so an acceptor can answer
   with none of them; the INIT ACK cookie is opaque to the initiator.
 - `unixpipe` and `vsock` are not in zenoh-rust's default features (neither
-  zenohd's image nor the Python binding has them), so they are tested
-  between Go nodes, and against zenoh-rust's handshake played by hand
-  (`link/unixpipe_test.go`). The pipe reader opens its FIFO read-write, so
+  zenohd's image nor the Python binding has them), so their Rust interop
+  tests use a small zenoh-rust peer built with both (`zenoh/testdata/zrs`,
+  `ZENOH_RS`); the unixpipe handshake is also played by hand in
+  `link/unixpipe_test.go`. A non-blocking vsock connect must check the
+  socket on the first poller callback: `RawConn.Write` resets write
+  readiness first, so a connect that already completed gives no new edge
+  (seen as sporadic 5 s dial timeouts against Rust's listener). The pipe reader opens its FIFO read-write, so
   it never sees EOF: a vanished peer is noticed by the session lease.
 - INIT ext `0x7` is the *patch* level (z64, 1 today): both sides use the
   lower one, and at patch ≥ 1 the first FRAGMENT of every message carries
