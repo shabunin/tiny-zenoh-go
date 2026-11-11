@@ -241,6 +241,7 @@ type putOptions struct {
 	reliability Reliability
 	timestamp   *Timestamp
 	autoTS      bool
+	sourceInfo  *SourceInfo
 }
 
 func defaultPutOptions() putOptions {
@@ -279,6 +280,9 @@ func WithTimestamp(ts Timestamp) PutOption { return func(o *putOptions) { o.time
 
 // WithAutoTimestamp stamps the message with the session's HLC.
 func WithAutoTimestamp() PutOption { return func(o *putOptions) { o.autoTS = true } }
+
+// WithSourceInfo tags the message with its source entity and sequence number.
+func WithSourceInfo(si SourceInfo) PutOption { return func(o *putOptions) { o.sourceInfo = &si } }
 
 // -----------------------------------------------------------------------------
 // Hybrid logical clock

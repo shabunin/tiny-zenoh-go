@@ -37,6 +37,37 @@ func NewZID(b []byte) (ZID, error) {
 	return ZID{cp}, nil
 }
 
+// ParseZID parses the hex form produced by String.
+func ParseZID(s string) (ZID, error) {
+	if len(s) == 0 || len(s) > 32 {
+		return ZID{}, ErrZIDLength
+	}
+	if len(s)%2 == 1 {
+		s = "0" + s
+	}
+	b := make([]byte, len(s)/2)
+	for i := range b {
+		hi, lo := unhex(s[2*i]), unhex(s[2*i+1])
+		if hi < 0 || lo < 0 {
+			return ZID{}, errors.New("protocol: invalid ZID hex")
+		}
+		b[len(b)-1-i] = byte(hi<<4 | lo)
+	}
+	return NewZID(b)
+}
+
+func unhex(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
+}
+
 // Bytes returns the ZID's wire bytes (little-endian). Do not mutate.
 func (z ZID) Bytes() []byte { return z.b }
 

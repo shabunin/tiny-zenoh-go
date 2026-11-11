@@ -75,6 +75,7 @@ func WithQueryAttachment(b []byte) GetOption { return func(o *getOptions) { o.at
 type pendingQuery struct {
 	key     string
 	querier uint32 // the querier's interest id, 0 for Session.Get
+	anyKey  bool   // "_anyke": accept replies on any key
 	mode    ConsolidationMode
 	timer   *time.Timer
 	// Guarded by Session.mu: the faces the request went to, and whether the
@@ -139,9 +140,10 @@ func (q *pendingQuery) finish(extra ...Reply) {
 	for _, k := range q.order {
 		flush = append(flush, q.latest[k])
 	}
+	timer := q.timer
 	q.mu.Unlock()
-	if q.timer != nil {
-		q.timer.Stop()
+	if timer != nil {
+		timer.Stop()
 	}
 	for _, r := range append(flush, extra...) {
 		q.cb(r)
@@ -154,12 +156,23 @@ func (q *pendingQuery) finish(extra ...Reply) {
 // hasTimeRange reports whether selector parameters carry a "_time" range,
 // which makes Auto consolidation resolve to None (as in zenoh-rust).
 func hasTimeRange(params string) bool {
-	for _, kv := range strings.Split(params, ";") {
-		if k, _, _ := strings.Cut(kv, "="); k == "_time" {
-			return true
+	_, ok := Param(params, "_time")
+	return ok
+}
+
+const anyKeyParam = "_anyke"
+
+// Param returns the value of name in selector parameters "k1=v1;k2;..." (a
+// name without '=' has an empty value).
+func Param(params, name string) (string, bool) {
+	for params != "" {
+		var kv string
+		kv, params, _ = strings.Cut(params, ";")
+		if k, v, _ := strings.Cut(kv, "="); k == name {
+			return v, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // Get queries "key[?parameters]" and returns replies on a channel that is
@@ -206,6 +219,7 @@ func (s *Session) get(k *keyexpr.Key, params string, o *getOptions, qr *Querier,
 		s.mu.Unlock()
 		return ErrSessionClosed
 	}
+	_, pq.anyKey = Param(params, anyKeyParam)
 	if qr != nil {
 		if qr.m.gone {
 			s.mu.Unlock()
@@ -229,7 +243,11 @@ func (s *Session) get(k *keyexpr.Key, params string, o *getOptions, qr *Querier,
 	}
 	s.queries[qid] = pq
 	s.mu.Unlock()
-	pq.timer = time.AfterFunc(o.timeout, func() { s.queryTimeout(qid) })
+	pq.mu.Lock()
+	if !pq.finished {
+		pq.timer = time.AfterFunc(o.timeout, func() { s.queryTimeout(qid) })
+	}
+	pq.mu.Unlock()
 
 	req := &protocol.Request{
 		ID: qid, WireExpr: protocol.WireExpr{Suffix: k.String()}, QoS: protocol.QoSRequest,
@@ -242,7 +260,11 @@ func (s *Session) get(k *keyexpr.Key, params string, o *getOptions, qr *Querier,
 				s.mu.Lock()
 				delete(s.queries, qid)
 				s.mu.Unlock()
-				pq.timer.Stop()
+				pq.mu.Lock()
+				if pq.timer != nil {
+					pq.timer.Stop()
+				}
+				pq.mu.Unlock()
 				if s.closed.Load() {
 					return ErrSessionClosed
 				}
@@ -296,8 +318,9 @@ func (s *Session) deliverReply(qid uint32, r Reply) {
 	if pq == nil {
 		return
 	}
-	// Like zenoh-rust, drop replies on keys outside the query's key expression.
-	if r.Sample != nil && !keyexpr.Intersect(pq.key, r.Sample.KeyExpr) {
+	// Like zenoh-rust, drop replies on keys outside the query's key expression
+	// unless the query says "_anyke".
+	if r.Sample != nil && !pq.anyKey && !keyexpr.Intersect(pq.key, r.Sample.KeyExpr) {
 		return
 	}
 	pq.add(r)
@@ -472,6 +495,13 @@ func (q *Query) Selector() string {
 	return q.key + "?" + q.params
 }
 
+// AcceptsAnyKey reports whether the querier accepts replies on keys outside
+// the query's key expression (the "_anyke" selector parameter).
+func (q *Query) AcceptsAnyKey() bool {
+	_, ok := Param(q.params, anyKeyParam)
+	return ok
+}
+
 // Payload returns the value sent with the query, if any.
 func (q *Query) Payload() []byte { return q.payload }
 
@@ -513,7 +543,7 @@ func (q *Query) replyData(key string, kind SampleKind, payload []byte, opts []Pu
 	if err != nil {
 		return err
 	}
-	if !keyexpr.Intersect(q.key, k.String()) {
+	if !keyexpr.Intersect(q.key, k.String()) && !q.AcceptsAnyKey() {
 		return fmt.Errorf("zenoh: reply key %q does not match query %q", key, q.key)
 	}
 	o := defaultPutOptions()

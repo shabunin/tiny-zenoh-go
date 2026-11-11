@@ -32,9 +32,10 @@ func (s *Session) buildData(kind SampleKind, o *putOptions) protocol.DataBody {
 		ts = &t
 	}
 	if kind == SampleKindDelete {
-		return &protocol.Del{Timestamp: ts, Attachment: o.attachment}
+		return &protocol.Del{Timestamp: ts, Attachment: o.attachment, SourceInfo: o.sourceInfo}
 	}
-	return &protocol.Put{Timestamp: ts, Encoding: o.encoding.wire(), Attachment: o.attachment}
+	return &protocol.Put{Timestamp: ts, Encoding: o.encoding.wire(), Attachment: o.attachment,
+		SourceInfo: o.sourceInfo}
 }
 
 func (s *Session) publish(key string, we protocol.WireExpr, kind SampleKind, payload []byte, o *putOptions) error {
