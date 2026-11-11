@@ -122,12 +122,7 @@ func TestMemoryStorage(t *testing.T) {
 	m.cfg.GCLifespan = time.Nanosecond
 	m.gc(time.Now().Add(time.Second))
 	m.mu.Lock()
-	tomb := 0
-	for _, u := range m.data {
-		if u.kind == zenoh.SampleKindDelete {
-			tomb++
-		}
-	}
+	tomb := len(m.latest)
 	nwild := len(m.wildDels) + len(m.wildPuts)
 	m.mu.Unlock()
 	if tomb != 0 || nwild != 0 {

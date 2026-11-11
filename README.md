@@ -90,8 +90,9 @@ are reported and ignored. Plugins are built in, not loaded: **`rest`**
 server-sent events subscriptions, PUT/PATCH/DELETE, `@/local`; output checked
 against zenohd's plugin) and **`storage_manager`** with the `memory` volume
 (`plugins/storage`: latest value per key with timestamps, tombstones,
-wildcard puts/deletes, `strip_prefix`, `complete`, `garbage_collection`;
-replication between storages and other backends are not implemented).
+wildcard puts/deletes, `strip_prefix`, `complete`, `garbage_collection`,
+and **`replication`**: replicas align with each other and with zenoh-rust's;
+other backends are not implemented).
 
 QUIC uses the same TLS settings; enable it with a blank import:
 `import _ "github.com/shabunin/tiny-zenoh-go/link/quic"` (gozenohd already does,
@@ -119,7 +120,7 @@ session can publish, subscribe and serve queries itself.
 | `protocol`       | ✅ | Scouting (`SCOUT`, `HELLO`) and the full transport message set: `INIT` `OPEN` `CLOSE` `KEEP_ALIVE` `FRAME` `FRAGMENT` `JOIN`; `PUSH` `REQUEST` `RESPONSE` `RESPONSE_FINAL` `DECLARE` (keyexpr/subscriber/queryable/token + undeclares, final) `INTEREST` `OAM`; `PUT` `DEL` `QUERY` `REPLY` `ERR`; extensions (QoS, Timestamp, SourceInfo, ResponderId, attachments, target, budget, timeout). |
 | `transport`      | ✅ | Unicast session over stream links (length-prefixed batches) or packet links (one batch per datagram, batch size capped at the link MTU), both sides of the handshake (`Open` and `Accept`, with duplicate/self rejection) + negotiation, stream framing, FRAME batching with SNs, FRAGMENT split/reassembly, keep-alive, lease expiry, CLOSE. **QoS** (INIT ext `QoS`/`QoSLink`, 8 priorities × reliable/best-effort SN channels, priority in FRAME/FRAGMENT); **compression** (INIT ext 0x6, batch header byte, own pure-Go LZ4 block codec in `internal/lz4`); **multilink** (`Config.MaxLinks`: INIT/OPEN ext 0x4 with zenoh's RSA-512 PKCS#1 key proof, one transport over several links with per-link batch size/compression/lease, zenoh-rust's link selection by reliability and priority range, link loss without session loss); **multicast** (`NewMulticast` over a `MulticastLink`: periodic `JOIN` with next SNs, per-sender SN windows and reassembly, sender leases, CLOSE); **low latency** (`Config.LowLatency`: INIT ext 0x5, every network message sent alone with no FRAME/SN/fragmentation, u32 LE length prefix on streams); **patch** (INIT ext 0x7: fragment start/drop markers). Imports no `net`. |
 | `link`           | ✅ TCP, UDP, UDP multicast, TLS, QUIC, WS, Unix, named pipes, vsock, serial | Locator parsing incl. `?metadata` / `#config`; TCP; UDP (MTU 65487 like zenoh on Linux, one listener socket demultiplexed per remote address); UDP multicast groups `udp/224.x.x.x:port#iface=<name>;ttl=<n>` (send socket bound to the interface, own datagrams filtered); TLS with zenoh's config keys (`root_ca_certificate`, `listen_*`/`connect_*` certificate & key as `_file`/`_base64`/`_raw`, `enable_mtls`, `verify_name_on_connect`); QUIC in `link/quic` (via `link.Register`; zenoh's variants chosen by ALPN from the locator metadata: single stream, multistream with a stream per priority (default), mixed reliability with best-effort traffic in QUIC datagrams `?mixed_rel=1`, datagrams only `?rel=0`); WebSocket `ws/host:port` (own minimal RFC 6455 code, one binary message per batch); Unix sockets `unixsock-stream/<path>` (flock'd `<path>.lock`, stale sockets replaced); named pipes `unixpipe/<path>` (zenoh's FIFO handshake: flock'd `<path>_uplink` request FIFO, DEADBEEF+suffix invitations, a dedicated FIFO pair per link, `#file_mask=`); VM sockets `vsock/<cid>:<port>` (Linux AF_VSOCK, `VMADDR_CID_*` names, host↔VM or `vsock_loopback`); serial `serial/<dev>#baudrate=N` (z-serial framing: COBS, CRC-32, I/A/R connect handshake, 1500-byte frames; Linux ttys opened raw with exclusive access; `link.NewSerial` wraps any byte stream, e.g. a TinyGo `machine.UART`). |
-| `plugins`        | ✅ rest, storage (memory) | `plugins/rest`: zenoh-plugin-rest over any session (`rest.Serve(s, ":8000")`, `rest.Handler(s)`), JSON samples with zenoh's payload-to-JSON rules. `plugins/storage`: zenoh-plugin-storage-manager's in-memory volume (`storage.NewMemory(s, storage.Config{KeyExpr: "demo/**"})`). Both in gozenohd. REST is not in TinyGo builds. |
+| `plugins`        | ✅ rest, storage (memory) | `plugins/rest`: zenoh-plugin-rest over any session (`rest.Serve(s, ":8000")`, `rest.Handler(s)`), JSON samples with zenoh's payload-to-JSON rules. `plugins/storage`: zenoh-plugin-storage-manager's in-memory volume (`storage.NewMemory(s, storage.Config{KeyExpr: "demo/**"})`) with **replication** (`Config.Replication`: zenoh's digest/aligner protocol — XXH3 fingerprints of a log cut into intervals and sub-intervals, hot/warm/cold eras, bincode digests on `@-digest/<zid>/<config hash>`, alignment queries to `@zid/<zid>/<config hash>/aligner`, initial alignment of an empty replica). Both in gozenohd. REST is not in TinyGo builds. |
 | `zext`           | ✅ | zenoh-ext **serialization** (`z_serialize` / `z_deserialize` format): fixed-width little-endian numbers incl. 128-bit, bool, LEB128 lengths, strings, bytes, sequences, maps, tuples as concatenation; `Serializer`/`Deserializer`, generic `WriteSlice`/`ReadMap`..., `Serialize(vals...)`/`Deserialize(b, ptrs...)` without reflection (TinyGo), `Marshaler`/`Unmarshaler` for structs. |
 | `shm`            | ✅ Linux | zenoh's POSIX shared memory, layout-compatible with zenoh-rust 1.x (SHM protocol v2): `/dev/shm/<id>.zenoh` metadata/data/auth segments, INIT/OPEN negotiation (challenges read from each other's auth segment), per-priority handoff counters, watchdog confirmation (50 ms) and validation (100 ms), refcounts and generations, garbage collection, orphan-segment cleanup. Enabled with `Config.SharedMemory` (`gozenohd --shm`): payloads ≥ 3 KiB to SHM-capable faces go through a 16 MiB pool; received SHM payloads are copied out. Stub returning `ErrUnsupported` elsewhere and on TinyGo. |
 | `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, incl. *aggregate* interests); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`, with `Multihop` relaying link states across any number of hops), declaration push between peers, writer-side filtering, peers attached to routers); **regions** (zenoh 1.10: every node sorted into its north region or a south subregion it is the gateway of; routers gossip with their peers and don't relay inside a peer region; peers are gateways of their clients; custom subregions by role/ZID/interface/announced `RegionName` with `Gateway.South`, so a peer can be the gateway of a group of peers and a router the gateway of router subregions, each its own link-state mesh; one forwarding gateway per peer or router subregion when several serve it); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), **query cancellation** (`CancellationToken` + `WithCancellation` on gets, querier gets and liveliness gets, as zenoh's unstable API: local, stops replies, waits for running callbacks), matching status and matching listeners on publishers and queriers, **advanced pub/sub** (zenoh-ext compatible: `DeclareAdvancedPublisher` with cache, sequence numbers + heartbeats for miss detection, publisher detection; `DeclareAdvancedSubscriber` with history incl. late-joining publishers (`_max`, `_time` limits), in-order delivery, recovery of lost samples by gap queries / periodic queries / heartbeats, miss listeners, subscriber detection), `_anyke` replies, `_time` ranges (`ParseTimeRange`), source info on samples, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; **namespaces** (`Config.Namespace`: every key the session is given goes under `<ns>/`, every key it gives back loses it, traffic outside it is dropped; the admin space stays outside); **locality** (`WithAllowedOrigin` on subscribers and queryables, `WithAllowedDestination` on puts, publishers, gets and queriers: same session only, remote only, or both; session-local entities are not declared, matching status follows the destination); priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress); **interceptors** (zenoh's `downsampling`, `low_pass_filter` and `qos/network` sections as `Downsampling`, `LowPassFilter`, `QoSOverwrite`: per-rule rate limits, size limits on payload + attachment, priority / congestion control / express overwrite filtered by key, QoS and payload size; per face by interface, link protocol and ZID, ingress and/or egress) and **timestamping** (`Timestamping`: routers stamp PUTs that cross them, future timestamps replaced or dropped); **admin space** (`AdminSpace`, on by default in router mode: `@/<zid>/<mode>` with zid/version/`Metadata`/locators/sessions (links, region, router-link weights), `/metrics` (OpenMetrics, gzip), `/linkstate/<region>` (Graphviz graphs of every mesh and peer region), `/subscriber`, `/queryable`, `/token`, `/publisher`, `/querier` `/<key>` (who declared what), `/route/successor/src/<zid>/dst/<zid>`; and in every session the session-local `@/<zid>/session/transport/unicast/<zid>[/link/<id>]` with PUT/DELETE events as transports and links come and go, also queryable through its `@adv/…` form for advanced subscribers). |
@@ -138,6 +139,11 @@ session can publish, subscribe and serve queries itself.
 - **unixpipe and vsock with zenoh-rust 1.10.2** (Rust test peer built with
   both links): Rust peer listening / Go peer dialing, Go router listening /
   Rust clients dialing; pub/sub and queries both ways.
+- **Storage replication with zenoh-rust 1.10.2's storage manager**: a Go
+  replica bootstraps from a zenohd one and the other way round; events only
+  one side has, in the hot, warm and cold eras, deletes and wildcard
+  deletes reach the other side; with and without `strip_prefix`; once
+  aligned, zenohd's published digest equals the Go replica's.
 - **REST plugin**: same requests answered identically by zenohd's REST
   plugin and `plugins/rest` (JSON, HTML, `_raw`, SSE, PUT/DELETE, errors).
 - **Go peer attached to zenohd** alongside clients: data, queries, liveliness.
@@ -301,6 +307,10 @@ git clone -b 1.10.2 https://github.com/eclipse-zenoh/zenoh-pico
 cmake -S zenoh-pico -B pico-build -DBUILD_TESTING=OFF -DZ_FEATURE_UNSTABLE_API=1 && cmake --build pico-build
 ZENOH_PICO=$PWD/pico-build go test -run Pico ./zenoh/
 
+# storage replication against zenoh-rust: a zenohd running two replicated storages
+# (exact command in plugins/storage/replication_test.go), then
+ZENOH_REPL=tcp/127.0.0.1:17470 go test -run Replication ./plugins/storage/
+
 # unixpipe + vsock against zenoh-rust (vsock needs the vsock_loopback module)
 (cd zenoh/testdata/zrs && cargo build --release)
 ZENOH_RS=$PWD/zenoh/testdata/zrs/target/release/zrs go test -run RustLink ./zenoh/
@@ -367,7 +377,8 @@ go run ./examples/zprobe                        # hex-dump a raw handshake
       ✅ timestamping, ✅ admin space, ✅ query cancellation.
 - [x] **M9 — Router plugins & config.** ✅ zenohd JSON5 config and
       command line, ✅ REST plugin, ✅ storage manager with the memory
-      volume. Not done: storage replication (alignment), backends other
+      volume, ✅ storage replication (digests and alignment,
+      interoperable with zenoh-rust replicas). Not done: backends other
       than memory, admin-space config writes, dynamic plugin loading.
 
 ## Package layout
@@ -385,6 +396,7 @@ tiny-zenoh-go/
 ├── zext/             # zenoh-ext serialization (z_serialize format)
 ├── plugins/          # rest (REST API), storage (storage manager, memory volume)
 ├── internal/json5/   # JSON5 → JSON for zenoh config files
+├── internal/xxh3/    # XXH3-64 (storage replication fingerprints)
 ├── cmd/gozenohd/      # pure-Go router
 └── examples/         # zprobe, tinycheck, tinyput, tinypeer, tinyserial,
                       # boardtest (device test agent, Rust harness, StickC/Cardputer firmware)
@@ -629,6 +641,23 @@ tiny-zenoh-go/
   matching tokens gets the same replies re-sent by zenohd 1.10.2 until it
   times out (gozenohd replies once); a pico *peer* attached to a router
   exchanges nothing with the router's clients (pico clients do).
+
+- Storage replication is the storage manager's own protocol over plain
+  pub/sub and queries. The configuration fingerprint is XXH3-64 over the
+  storage key expression, the strip prefix, then the interval and the
+  propagation delay in milliseconds as **u128** little-endian, the
+  sub-interval count (usize) and hot/warm (u64); an event's is XXH3-64 of
+  its stripped key, the NTP64 time and the 16-byte uhlc ID. Digests,
+  alignment queries and replies are bincode 1 (`HashMap`s as u64 length +
+  pairs, enum variants as u32, timestamps as u64 + 16 raw bytes, the
+  Discovery ZID as its hex string); queries and replies carry them in
+  attachments. Wildcard updates are logged under the full (unstripped)
+  wildcard key. Two places where tiny-zenoh-go follows zenoh's intent
+  rather than its 1.10 code (fingerprints are unaffected): a recent delete
+  still in the latest-updates cache keeps an older put out (zenoh only
+  consults the cache when the new event is newer), and a put overridden
+  by a newer wildcard delete is deleted rather than stored with an empty
+  payload.
 
 ## Spec references
 

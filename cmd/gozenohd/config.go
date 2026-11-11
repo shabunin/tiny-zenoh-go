@@ -550,7 +550,35 @@ func decodeStorage(name string, raw json.RawMessage) (storage.Config, error) {
 		}
 	}
 	if len(s.Replication) > 0 && string(s.Replication) != "null" {
-		warnf("storage %s: replication is not supported; the storage runs alone", name)
+		// zenoh-backend-traits: interval in (fractional) seconds,
+		// propagation_delay in milliseconds.
+		var r struct {
+			Interval         *float64 `json:"interval"`
+			SubIntervals     *int     `json:"sub_intervals"`
+			Hot              *uint64  `json:"hot"`
+			Warm             *uint64  `json:"warm"`
+			PropagationDelay *uint64  `json:"propagation_delay"`
+		}
+		if err := json.Unmarshal(s.Replication, &r); err != nil {
+			return c, fmt.Errorf("replication: %w", err)
+		}
+		rc := &storage.ReplicationConfig{}
+		if r.Interval != nil {
+			rc.Interval = time.Duration(*r.Interval * float64(time.Second))
+		}
+		if r.SubIntervals != nil {
+			rc.SubIntervals = *r.SubIntervals
+		}
+		if r.Hot != nil {
+			rc.Hot = *r.Hot
+		}
+		if r.Warm != nil {
+			rc.Warm = *r.Warm
+		}
+		if r.PropagationDelay != nil {
+			rc.PropagationDelay = time.Duration(*r.PropagationDelay) * time.Millisecond
+		}
+		c.Replication = rc
 	}
 	return c, nil
 }

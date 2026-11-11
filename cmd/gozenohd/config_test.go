@@ -30,6 +30,7 @@ func TestConfigTree(t *testing.T) {
 	tree, err := configTree(file, "127.0.0.1:0", []string{
 		`plugins/storage_manager/storages/b:{key_expr:"b/**",strip_prefix:"b",volume:{id:"memory"},complete:"true",garbage_collection:{period:5,lifespan:60}}`,
 		`/metadata:{name:"x"}`,
+		`plugins/storage_manager/storages/c:{key_expr:"c/**",volume:"memory",replication:{interval:1.5,sub_intervals:3,hot:2,warm:4,propagation_delay:100}}`,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -51,12 +52,16 @@ func TestConfigTree(t *testing.T) {
 	if string(cfg.Metadata) != `{"name":"x"}` {
 		t.Fatalf("metadata: %s", cfg.Metadata)
 	}
-	if p.restAddr != "127.0.0.1:0" || len(p.storages) != 2 {
+	if p.restAddr != "127.0.0.1:0" || len(p.storages) != 3 {
 		t.Fatalf("plugins: %+v", p)
 	}
 	b := p.storages[1]
 	if b.name != "b" || !b.cfg.Complete || b.cfg.StripPrefix != "b" || b.cfg.GCPeriod != 5*time.Second || b.cfg.GCLifespan != time.Minute {
 		t.Fatalf("storage b: %+v", b)
+	}
+	if r := p.storages[2].cfg.Replication; r == nil || r.Interval != 1500*time.Millisecond || r.SubIntervals != 3 ||
+		r.Hot != 2 || r.Warm != 4 || r.PropagationDelay != 100*time.Millisecond {
+		t.Fatalf("storage c replication: %+v", r)
 	}
 
 	tree, err = configTree("", "", []string{

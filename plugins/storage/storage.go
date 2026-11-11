@@ -1,21 +1,23 @@
 // Package storage is zenoh's storage manager with its "memory" volume
 // (zenoh-rust plugins/zenoh-plugin-storage-manager): a storage subscribes
 // to a key expression, keeps the latest value of every key under it, and
-// answers queries on it with those values and their timestamps.
+// answers queries on it with those values and their timestamps. With
+// Config.Replication, storages on the same key expression and settings
+// align with each other, wire-compatible with zenoh-rust's replicas (see
+// replication.go).
 //
 // As in zenoh-rust: samples without a timestamp get one from the session;
-// an older sample never replaces a newer one; deletes leave a tombstone so
-// that late older puts stay deleted; puts and deletes on wildcard keys
-// apply to every stored key they cover and also override older puts that
-// arrive later on such keys; tombstones and wildcard updates are forgotten
-// after GCLifespan. Replication (alignment between storages) is not
-// implemented.
+// an older sample never replaces a newer one (deletes included: their
+// events are remembered, in the replication log or, without replication,
+// until GCLifespan); puts and deletes on wildcard keys apply to every
+// stored key they cover and also override older puts that arrive later on
+// such keys; wildcard updates are forgotten after GCLifespan.
 package storage
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,8 +31,8 @@ type Config struct {
 	// KeyExpr is the key expression the storage subscribes to and answers
 	// queries on.
 	KeyExpr string `json:"key_expr"`
-	// StripPrefix, if set, must be a non-wildcard prefix of KeyExpr; zenoh's
-	// backends store keys without it. It changes nothing seen from outside.
+	// StripPrefix, if set, must be a non-wildcard prefix of KeyExpr; keys
+	// are stored (and replicated) without it.
 	StripPrefix string `json:"strip_prefix,omitempty"`
 	// Complete declares the queryable complete (it has every key under
 	// KeyExpr).
@@ -39,14 +41,63 @@ type Config struct {
 	// default 30s and 24h.
 	GCPeriod   time.Duration `json:"-"`
 	GCLifespan time.Duration `json:"-"`
+	// Replication, if set, aligns this storage with the other replicas of
+	// it (same KeyExpr, StripPrefix and replication settings).
+	Replication *ReplicationConfig `json:"-"`
 }
 
-type update struct {
-	kind     zenoh.SampleKind
+// ReplicationConfig is zenoh's storage "replication" section.
+type ReplicationConfig struct {
+	// Interval is how often digests are published (default 10s); time is
+	// cut into intervals of this length to compare replicas.
+	Interval time.Duration
+	// SubIntervals per interval (default 5).
+	SubIntervals int
+	// Hot and Warm are how many intervals the hot era (compared per
+	// sub-interval) and warm era (compared per interval) span: default 6
+	// and 30. Anything older is the cold era, compared as one fingerprint.
+	Hot, Warm uint64
+	// PropagationDelay is waited before each digest so that updates in
+	// flight reach every replica first (default 250ms); at most half the
+	// interval.
+	PropagationDelay time.Duration
+}
+
+func (r *ReplicationConfig) defaults() error {
+	if r.Interval <= 0 {
+		r.Interval = 10 * time.Second
+	}
+	if r.SubIntervals <= 0 {
+		r.SubIntervals = 5
+	}
+	if r.Hot == 0 {
+		r.Hot = 6
+	}
+	if r.Warm == 0 {
+		r.Warm = 30
+	}
+	if r.PropagationDelay <= 0 {
+		r.PropagationDelay = 250 * time.Millisecond
+	}
+	if r.Interval.Milliseconds() < int64(r.SubIntervals) {
+		return fmt.Errorf("storage: replication interval %v is shorter than %d ms", r.Interval, r.SubIntervals)
+	}
+	if r.Interval-r.PropagationDelay < r.PropagationDelay {
+		return fmt.Errorf("storage: replication propagation_delay %v is more than half the interval %v",
+			r.PropagationDelay, r.Interval)
+	}
+	return nil
+}
+
+type stored struct {
 	payload  []byte
 	encoding zenoh.Encoding
 	ts       zenoh.Timestamp
-	at       time.Time // when it arrived (garbage collection)
+}
+
+type update struct {
+	kind zenoh.SampleKind
+	stored
 }
 
 // Memory is a running in-memory storage.
@@ -55,13 +106,16 @@ type Memory struct {
 	cfg  Config
 	sub  *zenoh.Subscriber
 	qbl  *zenoh.Queryable
+	repl *replicator
 	stop chan struct{}
 	once sync.Once
 
 	mu       sync.Mutex
-	data     map[string]*update // concrete keys, deletes kept as tombstones
-	wildPuts map[string]*update
+	data     map[string]*stored // by stripped key ("" is the strip prefix itself)
+	wildPuts map[string]*update // by wildcard key expression
 	wildDels map[string]*update
+	latest   map[logKey]*event // recent events (drained into the log with replication)
+	log      *replLog          // nil without replication
 }
 
 // NewMemory starts a storage on s.
@@ -73,7 +127,7 @@ func NewMemory(s *zenoh.Session, cfg Config) (*Memory, error) {
 		if !keyexpr.IsConcrete(p) {
 			return nil, fmt.Errorf("storage: strip_prefix %q contains a wildcard", p)
 		}
-		if cfg.KeyExpr != p && !strings.HasPrefix(cfg.KeyExpr, p+"/") {
+		if !strings.HasPrefix(cfg.KeyExpr, p) {
 			return nil, fmt.Errorf("storage: strip_prefix %q is not a prefix of key_expr %q", p, cfg.KeyExpr)
 		}
 	}
@@ -84,7 +138,16 @@ func NewMemory(s *zenoh.Session, cfg Config) (*Memory, error) {
 		cfg.GCLifespan = 24 * time.Hour
 	}
 	m := &Memory{s: s, cfg: cfg, stop: make(chan struct{}),
-		data: map[string]*update{}, wildPuts: map[string]*update{}, wildDels: map[string]*update{}}
+		data: map[string]*stored{}, wildPuts: map[string]*update{}, wildDels: map[string]*update{},
+		latest: map[logKey]*event{}}
+	if cfg.Replication != nil {
+		rc := *cfg.Replication
+		if err := rc.defaults(); err != nil {
+			return nil, err
+		}
+		m.cfg.Replication = &rc
+		m.log = newReplLog(cfg.KeyExpr, cfg.StripPrefix, rc)
+	}
 	var err error
 	if m.sub, err = s.DeclareSubscriber(cfg.KeyExpr, m.onSample); err != nil {
 		return nil, err
@@ -92,6 +155,13 @@ func NewMemory(s *zenoh.Session, cfg Config) (*Memory, error) {
 	if m.qbl, err = s.DeclareQueryable(cfg.KeyExpr, m.onQuery, zenoh.WithComplete(cfg.Complete)); err != nil {
 		_ = m.sub.Undeclare()
 		return nil, err
+	}
+	if m.log != nil {
+		if m.repl, err = startReplication(m); err != nil {
+			_ = m.sub.Undeclare()
+			_ = m.qbl.Undeclare()
+			return nil, err
+		}
 	}
 	go m.gcLoop()
 	return m, nil
@@ -103,112 +173,220 @@ func (m *Memory) Close() error {
 	m.once.Do(func() {
 		close(m.stop)
 		err = errors.Join(m.sub.Undeclare(), m.qbl.Undeclare())
+		if m.repl != nil {
+			err = errors.Join(err, m.repl.close())
+		}
 	})
 	return err
 }
 
-// Len reports how many keys hold a value (tombstones excluded).
+// Len reports how many keys hold a value.
 func (m *Memory) Len() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	n := 0
-	for _, u := range m.data {
-		if u.kind == zenoh.SampleKindPut {
-			n++
-		}
-	}
-	return n
+	return len(m.data)
 }
 
-// newer reports whether a is a later timestamp than b (uhlc order: time,
-// then id).
-func newer(a, b zenoh.Timestamp) bool {
+// tsLess is uhlc's timestamp order: time, then the ID's 16 little-endian
+// bytes.
+func tsLess(a, b zenoh.Timestamp) bool {
 	if a.Time != b.Time {
-		return a.Time > b.Time
+		return a.Time < b.Time
 	}
-	return bytes.Compare(zidKey(a.ID), zidKey(b.ID)) > 0
+	x, y := idBytes(a.ID), idBytes(b.ID)
+	return string(x[:]) < string(y[:])
 }
 
-// zidKey is uhlc's ID order: the 16 little-endian bytes, zero padded.
-func zidKey(z zenoh.ZID) []byte {
+func tsEqual(a, b zenoh.Timestamp) bool { return a.Time == b.Time && idBytes(a.ID) == idBytes(b.ID) }
+
+// idBytes is a uhlc ID: the ZID's little-endian bytes, zero padded to 16.
+func idBytes(z zenoh.ZID) [16]byte {
 	var k [16]byte
 	copy(k[:], z.Bytes())
-	return k[:]
+	return k
+}
+
+// strip removes the strip prefix from a full key (zenoh's strip_prefix):
+// has is false when the key is the prefix itself.
+func (m *Memory) strip(full string) (key string, has bool, err error) {
+	p := m.cfg.StripPrefix
+	switch {
+	case p == "":
+		return full, true, nil
+	case full == p:
+		return "", false, nil
+	case strings.HasPrefix(full, p+"/"):
+		return full[len(p)+1:], true, nil
+	}
+	return "", false, fmt.Errorf("storage: %q does not start with strip_prefix %q", full, p)
+}
+
+// full puts the strip prefix back (zenoh's prefix).
+func (m *Memory) full(key string, has bool) string {
+	switch p := m.cfg.StripPrefix; {
+	case p == "":
+		return key
+	case !has:
+		return p
+	default:
+		return p + "/" + key
+	}
 }
 
 func (m *Memory) onSample(smp zenoh.Sample) {
-	u := &update{kind: smp.Kind, payload: smp.Payload, encoding: smp.Encoding, at: time.Now()}
+	ts := m.s.NewTimestamp()
 	if smp.Timestamp != nil {
-		u.ts = *smp.Timestamp
-	} else {
-		u.ts = m.s.NewTimestamp()
+		ts = *smp.Timestamp
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !keyexpr.IsConcrete(smp.KeyExpr) {
-		wild := m.wildPuts
-		if u.kind == zenoh.SampleKindDelete {
-			wild = m.wildDels
+	m.processLocked(smp.KeyExpr, smp.Kind, smp.Payload, smp.Encoding, ts)
+}
+
+// processLocked is zenoh's StorageService::process_sample.
+func (m *Memory) processLocked(ke string, kind zenoh.SampleKind, payload []byte, enc zenoh.Encoding, ts zenoh.Timestamp) {
+	act := actionOf(kind)
+	var keys []string
+	if !keyexpr.IsConcrete(ke) {
+		m.registerWildLocked(ke, kind, ts, payload, enc)
+		act = action{kind: actWildPut, wild: ke}
+		if kind == zenoh.SampleKindDelete {
+			act.kind = actWildDel
 		}
-		if prev := wild[smp.KeyExpr]; prev == nil || newer(u.ts, prev.ts) {
-			wild[smp.KeyExpr] = u
-		}
-		for key := range m.data {
-			if keyexpr.Intersect(smp.KeyExpr, key) {
-				m.applyLocked(key, u)
+		ev := newEvent(ke, true, ts, act)
+		m.latest[ev.logKey()] = ev
+		for k := range m.data {
+			if full := m.full(k, k != ""); keyexpr.Intersect(ke, full) {
+				keys = append(keys, full)
 			}
 		}
-		return
+		sort.Strings(keys)
+	} else {
+		keys = []string{ke}
 	}
-	if w := m.overridingLocked(smp.KeyExpr, u.ts); w != nil {
-		u = w
+	for _, k := range keys {
+		toStore := update{kind: kind, stored: stored{payload, enc, ts}}
+		if _, u := m.overridingLocked(k, ts, nil, actionOf(kind)); u != nil {
+			toStore = *u
+		}
+		sk, has, err := m.strip(k)
+		if err != nil {
+			continue
+		}
+		evAct := act
+		if keyexpr.IsConcrete(ke) {
+			evAct = actionOf(toStore.kind)
+		}
+		ev := newEvent(sk, has, toStore.ts, evAct)
+		if !m.isLatestLocked(ev) {
+			continue
+		}
+		if toStore.kind == zenoh.SampleKindPut {
+			st := toStore.stored
+			m.data[sk] = &st
+		} else {
+			delete(m.data, sk)
+		}
+		m.latest[ev.logKey()] = ev
 	}
-	m.applyLocked(smp.KeyExpr, u)
 }
 
-func (m *Memory) applyLocked(key string, u *update) {
-	if prev := m.data[key]; prev != nil && !newer(u.ts, prev.ts) {
-		return
+// isLatestLocked reports whether nothing newer than ev is known for its
+// key (zenoh's guard_cache_if_latest, with a newer cached event, deletes
+// included, winning).
+func (m *Memory) isLatestLocked(ev *event) bool {
+	if cached, ok := m.latest[ev.logKey()]; ok {
+		return tsLess(cached.ts, ev.ts)
 	}
-	m.data[key] = u
+	if m.log != nil {
+		return m.log.lookupNewer(&ev.eventMeta) == nil
+	}
+	if d, ok := m.data[ev.key]; ok {
+		return !tsLess(ev.ts, d.ts)
+	}
+	return true
 }
 
-// overridingLocked finds the wildcard update that wins over a sample on
-// key at ts: the earliest wildcard delete not older than it, else the
-// latest wildcard put not older than it.
-func (m *Memory) overridingLocked(key string, ts zenoh.Timestamp) *update {
-	var best *update
-	for k, d := range m.wildDels {
-		if keyexpr.Intersect(k, key) && !newer(ts, d.ts) && (best == nil || newer(best.ts, d.ts)) {
-			best = d
+func (m *Memory) registerWildLocked(ke string, kind zenoh.SampleKind, ts zenoh.Timestamp, payload []byte, enc zenoh.Encoding) {
+	u := &update{kind: kind, stored: stored{payload, enc, ts}}
+	if kind == zenoh.SampleKindPut {
+		m.wildPuts[ke] = u
+	} else {
+		m.wildDels[ke] = u
+	}
+}
+
+// overridingLocked is zenoh's overriding_wild_update: for a put, delete or
+// wildcard delete, the earliest wildcard delete on an intersecting key not
+// older than the event (or than its last non-wildcard update); else, for a
+// put or wildcard put, the latest wildcard put not older than it.
+func (m *Memory) overridingLocked(key string, ts zenoh.Timestamp, lastNonWild *zenoh.Timestamp, act action) (string, *update) {
+	if act.kind == actPut || act.kind == actDelete || act.kind == actWildDel {
+		lowest := ts
+		if lastNonWild != nil {
+			lowest = *lastNonWild
+		}
+		var best *update
+		var bestKe string
+		for _, k := range sortedKeys(m.wildDels) {
+			d := m.wildDels[k]
+			if keyexpr.Intersect(k, key) && !tsLess(d.ts, lowest) && (best == nil || tsLess(d.ts, best.ts)) {
+				best, bestKe = d, k
+			}
+		}
+		if best != nil {
+			return bestKe, best
 		}
 	}
-	if best != nil {
-		return best
-	}
-	for k, p := range m.wildPuts {
-		if keyexpr.Intersect(k, key) && !newer(ts, p.ts) && (best == nil || newer(p.ts, best.ts)) {
-			best = p
+	if act.kind == actPut || act.kind == actWildPut {
+		latest := ts
+		var best *update
+		var bestKe string
+		for _, k := range sortedKeys(m.wildPuts) {
+			p := m.wildPuts[k]
+			if keyexpr.Intersect(k, key) && !tsLess(p.ts, latest) {
+				latest, best, bestKe = p.ts, p, k
+			}
+		}
+		if best != nil {
+			return bestKe, best
 		}
 	}
-	return best
+	return "", nil
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
 }
 
 func (m *Memory) onQuery(q *zenoh.Query) {
 	type hit struct {
 		key string
-		u   *update
+		st  stored
 	}
 	var hits []hit
 	m.mu.Lock()
-	for key, u := range m.data {
-		if u.kind == zenoh.SampleKindPut && keyexpr.Intersect(q.KeyExpr(), key) {
-			hits = append(hits, hit{key, u})
+	if keyexpr.IsConcrete(q.KeyExpr()) {
+		if sk, _, err := m.strip(q.KeyExpr()); err == nil {
+			if st, ok := m.data[sk]; ok {
+				hits = append(hits, hit{q.KeyExpr(), *st})
+			}
+		}
+	} else {
+		for k, st := range m.data {
+			if full := m.full(k, k != ""); keyexpr.Intersect(q.KeyExpr(), full) {
+				hits = append(hits, hit{full, *st})
+			}
 		}
 	}
 	m.mu.Unlock()
 	for _, h := range hits {
-		_ = q.Reply(h.key, h.u.payload, zenoh.WithEncoding(h.u.encoding), zenoh.WithTimestamp(h.u.ts))
+		_ = q.Reply(h.key, h.st.payload, zenoh.WithEncoding(h.st.encoding), zenoh.WithTimestamp(h.st.ts))
 	}
 }
 
@@ -225,19 +403,24 @@ func (m *Memory) gcLoop() {
 	}
 }
 
+// gc forgets wildcard updates and (without replication) cached events
+// older than GCLifespan, by their timestamps.
 func (m *Memory) gc(now time.Time) {
+	limit := ntpMillis(zenohNTP(now)) - uint64(m.cfg.GCLifespan.Milliseconds())
+	old := func(ts zenoh.Timestamp) bool { return ntpMillis(ts.Time) < limit }
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	old := func(u *update) bool { return now.Sub(u.at) > m.cfg.GCLifespan }
-	for k, u := range m.data {
-		if u.kind == zenoh.SampleKindDelete && old(u) {
-			delete(m.data, k)
-		}
-	}
 	for _, w := range []map[string]*update{m.wildPuts, m.wildDels} {
 		for k, u := range w {
-			if old(u) {
+			if old(u.ts) {
 				delete(w, k)
+			}
+		}
+	}
+	if m.log == nil {
+		for k, ev := range m.latest {
+			if old(ev.ts) {
+				delete(m.latest, k)
 			}
 		}
 	}
