@@ -6,6 +6,19 @@
 //	plain     tcp to the host's port 7447 (zenohd, the Rust router)
 //	auth-lz4  tcp to 7460: a gozenohd with --compression --usrpwd-dict
 //	lowlat    tcp to 7461: a gozenohd with --lowlatency
+//	tls-rust  tls to 7463: zenohd (rustls), the server certificate signed by tlsCA
+//	mtls-go   tls to 7464: a gozenohd requiring a client certificate (tlsCert, tlsKey)
+//
+// The TLS profiles run when the CA (and, for mtls-go, the client
+// certificate and key) are given as base64 PEM:
+//
+//	-ldflags '-X main.tlsCA=... -X main.tlsCert=... -X main.tlsKey=...'
+//
+// -X main.only=tls-rust,mtls-go picks profiles, and -X main.debugMem=1
+// prints goroutines and heap after each session closes. (Each closed
+// connection keeps ~12 KB in the Wi-Fi stack, and a TLS session needs
+// ~12 KB more than plain TCP: three sessions in a row don't fit the
+// ~300 KB heap; run the TLS profiles on their own.)
 //
 // Wi-Fi settings come from tiny-knx-go's settings record (TKC1) in the last
 // flash block, as its Cardputer example stores them. The router host is set
@@ -18,11 +31,13 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
 	"machine"
 	"net"
+	"runtime"
 	"strings"
 	"time"
 
@@ -38,19 +53,61 @@ import (
 
 var hosts = "192.168.1.10" // comma-separated, set with -ldflags -X main.hosts=
 
+// Set with -ldflags -X (see above).
+var tlsCA, tlsCert, tlsKey, only, debugMem string
+
 type profile struct {
 	name string
-	port string
+	port string // proto/port
 	conf func(*zenoh.Config)
 }
 
 var profiles = []profile{
-	{"plain", "7447", func(*zenoh.Config) {}},
-	{"auth-lz4", "7460", func(c *zenoh.Config) {
+	{"plain", "tcp/7447", func(*zenoh.Config) {}},
+	{"auth-lz4", "tcp/7460", func(c *zenoh.Config) {
 		c.Compression = true
 		c.Auth = &transport.Auth{User: "board", Password: "board-test-pw"}
 	}},
-	{"lowlat", "7461", func(c *zenoh.Config) { c.LowLatency = true }},
+	{"lowlat", "tcp/7461", func(c *zenoh.Config) { c.LowLatency = true }},
+	{"tls-rust", "tls/7463", func(*zenoh.Config) {}},
+	{"mtls-go", "tls/7464", func(*zenoh.Config) {}},
+}
+
+func unb64(s string) []byte {
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		println("bad base64 build setting:", err.Error())
+	}
+	return b
+}
+
+// dial opens tcp/ and tls/ links (TLS 1.3 by package tls13), reporting the
+// handshake's time and memory.
+func dial(loc string, mtls bool) (transport.Link, error) {
+	l, err := link.Parse(loc)
+	if err != nil {
+		return nil, err
+	}
+	c, err := net.Dial("tcp", l.Address)
+	if err != nil || l.Protocol != "tls" {
+		return c, err
+	}
+	cfg := &link.TLSConfig{RootCACertificatePEM: unb64(tlsCA)}
+	if mtls {
+		cfg.ConnectCertificatePEM, cfg.ConnectPrivateKeyPEM = unb64(tlsCert), unb64(tlsKey)
+	}
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	start := time.Now()
+	tc, err := link.TLS13Client(c, loc, cfg)
+	if err != nil {
+		c.Close()
+		return nil, err
+	}
+	runtime.ReadMemStats(&m1)
+	println("tls: handshake", time.Since(start).Milliseconds(), "ms, allocated", m1.TotalAlloc-m0.TotalAlloc,
+		"bytes, heap in use", m1.HeapInuse)
+	return tc, nil
 }
 
 var wifi espnet.Esplink
@@ -135,17 +192,20 @@ func main() {
 
 	results := make([]string, len(profiles))
 	for i, pr := range profiles {
+		if only != "" && !strings.Contains(","+only+",", ","+pr.name+",") ||
+			strings.HasPrefix(pr.port, "tls/") && tlsCA == "" {
+			results[i] = "skipped"
+			continue
+		}
 		prefix := "board/cardputer/" + pr.name
+		proto, port, _ := strings.Cut(pr.port, "/")
+		mtls := pr.name == "mtls-go"
 		for try := 0; try < 5; try++ {
 			cfg := zenoh.Config{
-				Connect:   []string{"tcp/" + host + ":" + pr.port},
+				Connect:   []string{proto + "/" + host + ":" + port},
 				BatchSize: 4096,
 				Dial: func(loc string, _ time.Duration) (transport.Link, error) {
-					l, err := link.Parse(loc)
-					if err != nil {
-						return nil, err
-					}
-					return net.Dial("tcp", l.Address)
+					return dial(loc, mtls)
 				},
 			}
 			pr.conf(&cfg)
@@ -159,6 +219,15 @@ func main() {
 			}
 			n, err := agent.Run(s, prefix, func(m string) { println(pr.name+":", m) })
 			_ = s.Close()
+			if debugMem != "" {
+				for k := 0; k < 4; k++ {
+					time.Sleep(time.Duration(1+15*k) * time.Second)
+					runtime.GC()
+					var ms runtime.MemStats
+					runtime.ReadMemStats(&ms)
+					println("closed:", pr.name, "goroutines", runtime.NumGoroutine(), "heap in use", ms.HeapInuse)
+				}
+			}
 			if err == nil {
 				results[i] = "PASS"
 				break

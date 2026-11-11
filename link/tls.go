@@ -5,54 +5,13 @@ package link
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"time"
 
 	"github.com/shabunin/tiny-zenoh-go/transport"
 )
-
-// ErrTLSConfig reports missing or unreadable TLS material.
-var ErrTLSConfig = errors.New("link: tls configuration")
-
-// tlsMaterial resolves one PEM item: locator config (_raw, _base64, _file)
-// first, then the file named in the TLSConfig.
-func tlsMaterial(cfg map[string]string, key, file string) ([]byte, error) {
-	if v, ok := cfg[key+"_raw"]; ok {
-		return []byte(v), nil
-	}
-	if v, ok := cfg[key+"_base64"]; ok {
-		b, err := base64.StdEncoding.DecodeString(v)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %s_base64: %v", ErrTLSConfig, key, err)
-		}
-		return b, nil
-	}
-	if v, ok := cfg[key+"_file"]; ok {
-		file = v
-	}
-	if file == "" {
-		return nil, nil
-	}
-	b, err := os.ReadFile(file)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %v", ErrTLSConfig, key, err)
-	}
-	return b, nil
-}
-
-func tlsBool(cfg map[string]string, key string, def bool) bool {
-	switch cfg[key] {
-	case "true":
-		return true
-	case "false":
-		return false
-	}
-	return def
-}
 
 type tlsSettings struct {
 	roots      *x509.CertPool // nil: system roots
@@ -72,7 +31,7 @@ func tlsSettingsFor(l Locator, def *TLSConfig, listen bool) (*tlsSettings, error
 		mtls:       tlsBool(cfg, "enable_mtls", def.EnableMTLS),
 		verifyName: tlsBool(cfg, "verify_name_on_connect", !def.SkipNameVerification),
 	}
-	ca, err := tlsMaterial(cfg, "root_ca_certificate", def.RootCACertificate)
+	ca, err := tlsMaterial(cfg, "root_ca_certificate", def.RootCACertificate, def.RootCACertificatePEM)
 	if err != nil {
 		return nil, err
 	}
@@ -82,15 +41,17 @@ func tlsSettingsFor(l Locator, def *TLSConfig, listen bool) (*tlsSettings, error
 			return nil, fmt.Errorf("%w: no certificate in root_ca_certificate", ErrTLSConfig)
 		}
 	}
-	certKey, keyKey, certFile, keyFile := "connect_certificate", "connect_private_key", def.ConnectCertificate, def.ConnectPrivateKey
+	certKey, keyKey := "connect_certificate", "connect_private_key"
+	certFile, keyFile, certData, keyData := def.ConnectCertificate, def.ConnectPrivateKey, def.ConnectCertificatePEM, def.ConnectPrivateKeyPEM
 	if listen {
-		certKey, keyKey, certFile, keyFile = "listen_certificate", "listen_private_key", def.ListenCertificate, def.ListenPrivateKey
+		certKey, keyKey = "listen_certificate", "listen_private_key"
+		certFile, keyFile, certData, keyData = def.ListenCertificate, def.ListenPrivateKey, def.ListenCertificatePEM, def.ListenPrivateKeyPEM
 	}
-	certPEM, err := tlsMaterial(cfg, certKey, certFile)
+	certPEM, err := tlsMaterial(cfg, certKey, certFile, certData)
 	if err != nil {
 		return nil, err
 	}
-	keyPEM, err := tlsMaterial(cfg, keyKey, keyFile)
+	keyPEM, err := tlsMaterial(cfg, keyKey, keyFile, keyData)
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +176,7 @@ func (l *tlsListener) Locator() Locator { return l.loc }
 func tlsCommonName(l any) string {
 	c, ok := l.(*tls.Conn)
 	if !ok {
-		return ""
+		return tls13CommonName(l)
 	}
 	if st := c.ConnectionState(); len(st.PeerCertificates) > 0 {
 		return st.PeerCertificates[0].Subject.CommonName

@@ -23,11 +23,16 @@ func LocalInterfaces(l any) []string {
 	}
 	var ip net.IP
 	switch a := c.LocalAddr().(type) {
-	case *net.TCPAddr:
-		ip = a.IP
+	case *net.TCPAddr: // nil on TinyGo's netdev connections
+		if a != nil {
+			ip = a.IP
+		}
 	case *net.UDPAddr:
-		ip = a.IP
-	default:
+		if a != nil {
+			ip = a.IP
+		}
+	}
+	if ip == nil {
 		return nil
 	}
 	ifs, err := net.Interfaces()
@@ -54,17 +59,37 @@ func LocalInterfaces(l any) []string {
 // protocol proto, as far as it knows its addresses ("" otherwise).
 func Endpoints(l any, proto string) (src, dst string) {
 	if c, ok := l.(interface{ LocalAddr() net.Addr }); ok {
-		if a := c.LocalAddr(); a != nil && a.String() != "" {
-			src = proto + "/" + a.String()
+		if a := addrString(c.LocalAddr()); a != "" {
+			src = proto + "/" + a
 		}
 	}
 	if c, ok := l.(interface{ RemoteAddr() net.Addr }); ok {
-		if a := c.RemoteAddr(); a != nil && a.String() != "" {
-			dst = proto + "/" + a.String()
+		if a := addrString(c.RemoteAddr()); a != "" {
+			dst = proto + "/" + a
 		}
 	}
 	if c, ok := l.(interface{ Locators() (string, string) }); ok && src == "" && dst == "" {
 		src, dst = c.Locators()
 	}
 	return src, dst
+}
+
+// addrString is a's text, "" for none (including typed nil addresses).
+func addrString(a net.Addr) string {
+	switch v := a.(type) {
+	case nil:
+		return ""
+	case *net.TCPAddr:
+		if v == nil {
+			return ""
+		}
+	case *net.UDPAddr:
+		if v == nil {
+			return ""
+		}
+	}
+	if s := a.String(); s != "<nil>" {
+		return s
+	}
+	return ""
 }

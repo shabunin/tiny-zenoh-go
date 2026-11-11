@@ -108,6 +108,32 @@ s, _ := zenoh.Open(zenoh.Config{
 })
 ```
 
+**TLS on TinyGo.** TinyGo's `crypto/tls` is a stub, so package `tls13` is
+a small TLS 1.3 client of our own: X25519, AES-128/256-GCM, server
+certificates with ECDSA P-256/P-384, RSA or Ed25519 keys checked against
+configured roots, client certificates (mutual TLS), KeyUpdate. Boards turn
+it on for `tls/` locators with a blank import (builds without it don't carry
+its ~200 KB). There are no system roots, so give the CA, as PEM bytes when
+there are no files:
+
+```go
+import _ "github.com/shabunin/tiny-zenoh-go/link/tls13link"
+
+s, _ := zenoh.Open(zenoh.Config{
+    Connect: []string{"tls/192.168.1.10:7447"},
+    TLS:     &link.TLSConfig{RootCACertificatePEM: caPEM}, // + ConnectCertificatePEM / ConnectPrivateKeyPEM
+})
+```
+
+`link.TLS13Client(conn, locator, cfg)` runs it over a connection a
+`Config.Dial` made itself. On an ESP32-S3 (240 MHz) a handshake takes
+~340 ms with an ECDSA P-256 server certificate and ~460 ms with a client
+certificate, and allocates ~41 KB. The binary grows by ~200 KB of flash.
+Ed25519 is left out of TinyGo builds unless they use the `tls13_ed25519`
+build tag: its precomputed tables cost ~78 KB of RAM. There is no TLS 1.2,
+session resumption, HelloRetryRequest (servers must accept X25519) or
+server side.
+
 or embedded: `zenoh.Open(zenoh.Config{Mode: zenoh.ModeRouter})` — the router
 session can publish, subscribe and serve queries itself.
 
@@ -120,6 +146,7 @@ session can publish, subscribe and serve queries itself.
 | `protocol`       | ✅ | Scouting (`SCOUT`, `HELLO`) and the full transport message set: `INIT` `OPEN` `CLOSE` `KEEP_ALIVE` `FRAME` `FRAGMENT` `JOIN`; `PUSH` `REQUEST` `RESPONSE` `RESPONSE_FINAL` `DECLARE` (keyexpr/subscriber/queryable/token + undeclares, final) `INTEREST` `OAM`; `PUT` `DEL` `QUERY` `REPLY` `ERR`; extensions (QoS, Timestamp, SourceInfo, ResponderId, attachments, target, budget, timeout). |
 | `transport`      | ✅ | Unicast session over stream links (length-prefixed batches) or packet links (one batch per datagram, batch size capped at the link MTU), both sides of the handshake (`Open` and `Accept`, with duplicate/self rejection) + negotiation, stream framing, FRAME batching with SNs, FRAGMENT split/reassembly, keep-alive, lease expiry, CLOSE. **QoS** (INIT ext `QoS`/`QoSLink`, 8 priorities × reliable/best-effort SN channels, priority in FRAME/FRAGMENT); **compression** (INIT ext 0x6, batch header byte, own pure-Go LZ4 block codec in `internal/lz4`); **multilink** (`Config.MaxLinks`: INIT/OPEN ext 0x4 with zenoh's RSA-512 PKCS#1 key proof, one transport over several links with per-link batch size/compression/lease, zenoh-rust's link selection by reliability and priority range, link loss without session loss); **multicast** (`NewMulticast` over a `MulticastLink`: periodic `JOIN` with next SNs, per-sender SN windows and reassembly, sender leases, CLOSE); **low latency** (`Config.LowLatency`: INIT ext 0x5, every network message sent alone with no FRAME/SN/fragmentation, u32 LE length prefix on streams); **patch** (INIT ext 0x7: fragment start/drop markers). Imports no `net`. |
 | `link`           | ✅ TCP, UDP, UDP multicast, TLS, QUIC, WS, Unix, named pipes, vsock, serial | Locator parsing incl. `?metadata` / `#config`; TCP; UDP (MTU 65487 like zenoh on Linux, one listener socket demultiplexed per remote address); UDP multicast groups `udp/224.x.x.x:port#iface=<name>;ttl=<n>` (send socket bound to the interface, own datagrams filtered); TLS with zenoh's config keys (`root_ca_certificate`, `listen_*`/`connect_*` certificate & key as `_file`/`_base64`/`_raw`, `enable_mtls`, `verify_name_on_connect`); QUIC in `link/quic` (via `link.Register`; zenoh's variants chosen by ALPN from the locator metadata: single stream, multistream with a stream per priority (default), mixed reliability with best-effort traffic in QUIC datagrams `?mixed_rel=1`, datagrams only `?rel=0`); WebSocket `ws/host:port` (own minimal RFC 6455 code, one binary message per batch); Unix sockets `unixsock-stream/<path>` (flock'd `<path>.lock`, stale sockets replaced); named pipes `unixpipe/<path>` (zenoh's FIFO handshake: flock'd `<path>_uplink` request FIFO, DEADBEEF+suffix invitations, a dedicated FIFO pair per link, `#file_mask=`); VM sockets `vsock/<cid>:<port>` (Linux AF_VSOCK, `VMADDR_CID_*` names, host↔VM or `vsock_loopback`); serial `serial/<dev>#baudrate=N` (z-serial framing: COBS, CRC-32, I/A/R connect handshake, 1500-byte frames; Linux ttys opened raw with exclusive access; `link.NewSerial` wraps any byte stream, e.g. a TinyGo `machine.UART`). |
+| `tls13`          | ✅ client | TLS 1.3 client (RFC 8446) that builds with TinyGo, used by `link/tls13link`: X25519 key share, TLS_AES_128_GCM_SHA256 / TLS_AES_256_GCM_SHA384, own HKDF key schedule, record layer with concurrent Read/Write, KeyUpdate both ways (and before AES-GCM's record limit), alerts, close_notify; a minimal X.509 reader (names, validity, basicConstraints, key usage, extended key usage, unknown critical extensions rejected) and chain check against configured roots or a pinned certificate, SAN DNS (wildcards) / IP name check, validity skipped while a board's clock is unset; ECDSA P-256/P-384 verify and sign on own Montgomery field arithmetic (no allocations), RSA-PSS / PKCS #1 v1.5 via `crypto/rsa`, Ed25519; client certificates with PKCS #8, SEC 1 or PKCS #1 keys. |
 | `plugins`        | ✅ rest, storage (memory) | `plugins/rest`: zenoh-plugin-rest over any session (`rest.Serve(s, ":8000")`, `rest.Handler(s)`), JSON samples with zenoh's payload-to-JSON rules. `plugins/storage`: zenoh-plugin-storage-manager's in-memory volume (`storage.NewMemory(s, storage.Config{KeyExpr: "demo/**"})`) with **replication** (`Config.Replication`: zenoh's digest/aligner protocol — XXH3 fingerprints of a log cut into intervals and sub-intervals, hot/warm/cold eras, bincode digests on `@-digest/<zid>/<config hash>`, alignment queries to `@zid/<zid>/<config hash>/aligner`, initial alignment of an empty replica). Both in gozenohd. REST is not in TinyGo builds. |
 | `zext`           | ✅ | zenoh-ext **serialization** (`z_serialize` / `z_deserialize` format): fixed-width little-endian numbers incl. 128-bit, bool, LEB128 lengths, strings, bytes, sequences, maps, tuples as concatenation; `Serializer`/`Deserializer`, generic `WriteSlice`/`ReadMap`..., `Serialize(vals...)`/`Deserialize(b, ptrs...)` without reflection (TinyGo), `Marshaler`/`Unmarshaler` for structs. |
 | `shm`            | ✅ Linux | zenoh's POSIX shared memory, layout-compatible with zenoh-rust 1.x (SHM protocol v2): `/dev/shm/<id>.zenoh` metadata/data/auth segments, INIT/OPEN negotiation (challenges read from each other's auth segment), per-priority handoff counters, watchdog confirmation (50 ms) and validation (100 ms), refcounts and generations, garbage collection, orphan-segment cleanup. Enabled with `Config.SharedMemory` (`gozenohd --shm`): payloads ≥ 3 KiB to SHM-capable faces go through a 16 MiB pool; received SHM payloads are copied out. Stub returning `ErrUnsupported` elsewhere and on TinyGo. |
@@ -260,6 +287,14 @@ session can publish, subscribe and serve queries itself.
   heartbeat. Through zenohd and through the Go router.
 - **Low latency**: a Rust peer with `transport/unicast/lowlatency: true`
   (QoS off) exchanges publications and queries with a Go peer both ways.
+- **TLS 1.3 client** (`tls13`): against Go's `crypto/tls` (ECDSA P-256 and
+  P-384, RSA and Ed25519 server keys, chains through intermediates with RSA,
+  ECDSA and Ed25519 signatures, both cipher suites, client certificates of
+  every key type, untrusted / misnamed / expired / non-CA / wrong-usage
+  certificates rejected); against rustls through zenoh routers of the
+  Python binding (ECDSA and RSA-PSS server certificates, mutual TLS); and
+  OpenSSL 3.5 `s_server` asking for a KeyUpdate. A Go router and a Rust
+  router carry zenoh sessions dialed with it, including 500 KB payloads.
 - **Microcontrollers** (TinyGo 0.44): an M5StickC (ESP32) running
   `examples/tinyserial` over its USB-UART reaches a Rust client through
   `gozenohd -l serial//dev/ttyUSB1#baudrate=115200 -e tcp/<zenohd>` (counter
@@ -276,15 +311,18 @@ session can publish, subscribe and serve queries itself.
   about 93 KB of its 176 KB heap. The Cardputer runs it over Wi-Fi three
   times: against zenohd, against `gozenohd` with LZ4 and user/password, and
   with the low-latency transport. It uses about 170–195 KB of its 303 KB heap
-  after a GC. The device reports what was negotiated (`Session.Transports()`).
+  after a GC. Over TLS 1.3 (`tls13`) it passes against zenohd/rustls, and
+  against `gozenohd` with mutual TLS (each on its own boot: a TLS session
+  needs ~12 KB more heap than TCP, and the Wi-Fi stack keeps ~12 KB per
+  closed connection). The device reports what was negotiated (`Session.Transports()`).
 - **TinyGo**: TinyGo 0.44-built binaries publish to a Rust subscriber, both
   as a client (`examples/tinyput`) and as a peer directly connected to a Rust
   peer (`examples/tinypeer`), and as a client over UDP and over WebSocket
   to a Rust router.
   TinyGo limits: no multicast listening (they scout but don't answer
   SCOUTs), no UDP *listeners* (its `ReadFromUDP` reports no source address;
-  dialing UDP works), no TLS or QUIC (its `crypto/tls` is a stub), no Unix
-  sockets.
+  dialing UDP works), TLS as a TLS 1.3 client only (package `tls13`,
+  through `link/tls13link`), no QUIC, no Unix sockets.
 
 ## Running the tests
 
@@ -362,7 +400,8 @@ go run ./examples/zprobe                        # hex-dump a raw handshake
       gateways of clients and of peer subregions; router subregions (a
       gateway router runs one link-state mesh per region and announces
       each region's entities into the others as its own).
-- [x] **M7 — More links.** ✅ UDP, ✅ TLS (+ mTLS), ✅ QUIC (single
+- [x] **M7 — More links.** ✅ UDP, ✅ TLS (+ mTLS; TinyGo: own TLS 1.3
+      client), ✅ QUIC (single
       stream, multistream, mixed reliability, datagrams), ✅ WebSocket,
       ✅ Unix sockets, ✅ serial, ✅ named pipes (`unixpipe`), ✅ vsock.
       Not possible with quic-go: zenoh's
@@ -391,7 +430,9 @@ tiny-zenoh-go/
 ├── transport/        # unicast (QoS, compression, multilink) and multicast transports
 ├── internal/lz4/     # LZ4 block codec for batch compression
 ├── shm/              # zenoh shared memory (Linux)
-├── link/             # locators, dial/listen: tcp, udp, tls, ws, unixsock-stream; link/quic: quic
+├── link/             # locators, dial/listen: tcp, udp, tls, ws, unixsock-stream, unixpipe, vsock, serial;
+│                     # link/quic: quic; link/tls13link: tls/ for TinyGo
+├── tls13/            # TLS 1.3 client for TinyGo (X.509, ECDSA, key schedule, records)
 ├── zenoh/            # public API: Session (client/peer), pub/sub, queries, liveliness, Scout
 ├── zext/             # zenoh-ext serialization (z_serialize format)
 ├── plugins/          # rest (REST API), storage (storage manager, memory volume)

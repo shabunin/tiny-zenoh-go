@@ -1,6 +1,8 @@
 package link
 
 // TLSConfig configures "tls/" links, like zenoh's transport/link/tls section.
+// TinyGo builds dial with package tls13 (TLS 1.3 client only, a root CA
+// required: there are no system roots) and can't listen.
 // Paths name PEM files. Each setting can also be given per locator in its
 // config part with zenoh's keys, e.g.
 //
@@ -15,6 +17,13 @@ type TLSConfig struct {
 	ListenPrivateKey   string // server key
 	ConnectCertificate string // client certificate (mutual TLS)
 	ConnectPrivateKey  string // client key (mutual TLS)
+	// The same as PEM text, for systems without files (TinyGo boards);
+	// a path, when set, wins.
+	RootCACertificatePEM  []byte
+	ListenCertificatePEM  []byte
+	ListenPrivateKeyPEM   []byte
+	ConnectCertificatePEM []byte
+	ConnectPrivateKeyPEM  []byte
 	// EnableMTLS makes listeners require client certificates signed by
 	// RootCACertificate, and dialers present theirs.
 	EnableMTLS bool
