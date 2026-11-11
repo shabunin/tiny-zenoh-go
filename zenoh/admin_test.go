@@ -141,7 +141,16 @@ func adminCollect(t *testing.T, router string) adminView {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := io.ReadAll(zr); string(b) != m {
+	// The counters move between the two queries: compare the descriptors.
+	descs := func(m string) (out []string) {
+		for _, l := range strings.Split(m, "\n") {
+			if strings.HasPrefix(l, "#") {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+	if b, _ := io.ReadAll(zr); strings.Join(descs(string(b)), "\n") != strings.Join(descs(m), "\n") {
 		t.Errorf("gunzipped metrics %q, want %q", b, m)
 	}
 	return v

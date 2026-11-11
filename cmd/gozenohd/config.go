@@ -379,6 +379,18 @@ func applyConfig(tree map[string]any, cfg *zenoh.Config) (*pluginsConfig, error)
 					}
 				}
 			}
+		case "stats":
+			// zenoh-rust: stats/filters, per-key payload statistics.
+			var st struct {
+				Filters []struct {
+					Key string `json:"key"`
+				} `json:"filters"`
+			}
+			if err = decodeStrict(v, &st); err == nil {
+				for _, f := range st.Filters {
+					cfg.Stats.Filters = append(cfg.Stats.Filters, f.Key)
+				}
+			}
 		case "metadata":
 			// Re-encoded: zenoh-rust shows objects with sorted keys.
 			var m any

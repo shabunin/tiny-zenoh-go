@@ -1,0 +1,51 @@
+# HELP zenoh_build Zenoh build version.
+# HELP zenoh_transports_opened Count of transports currently opened.
+# HELP zenoh_links_opened Count of transports currently opened.
+# HELP zenoh_tx_bytes Count of transport messages bytes sent
+# UNIT zenoh_tx_bytes bytes
+# HELP zenoh_tx_per_transport_bytes Count of transport messages bytes sent (per transport)
+# UNIT zenoh_tx_per_transport_bytes bytes
+# HELP zenoh_tx_per_link_bytes Count of transport messages bytes sent (per link)
+# UNIT zenoh_tx_per_link_bytes bytes
+# HELP zenoh_tx_transport_message Count of transport messages sent
+# HELP zenoh_tx_transport_message_per_transport Count of transport messages sent (per transport)
+# HELP zenoh_tx_transport_message_per_link Count of transport messages sent (per link)
+# HELP zenoh_tx_network_message Count of network messages sent
+# HELP zenoh_tx_network_message_per_transport Count of network messages sent (per transport)
+# HELP zenoh_tx_network_message_per_link Count of network messages sent (per link)
+# HELP zenoh_tx_network_message_payload_bytes Histogram of network messages payload sent
+# UNIT zenoh_tx_network_message_payload_bytes bytes
+# HELP zenoh_tx_network_message_payload_per_transport_bytes Histogram of network messages payload sent (per transport)
+# UNIT zenoh_tx_network_message_payload_per_transport_bytes bytes
+# HELP zenoh_tx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while sent
+# UNIT zenoh_tx_network_message_dropped_payload_bytes bytes
+# HELP zenoh_tx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while sent (per transport)
+# UNIT zenoh_tx_network_message_dropped_payload_per_transport_bytes bytes
+# HELP zenoh_tx_network_message_payload_per_key_bytes Histogram of network messages payload sent per key
+# UNIT zenoh_tx_network_message_payload_per_key_bytes bytes
+# HELP zenoh_tx_network_message_payload_per_key_per_transport_bytes Histogram of network messages payload sent per key (per transport)
+# UNIT zenoh_tx_network_message_payload_per_key_per_transport_bytes bytes
+# HELP zenoh_rx_bytes Count of transport messages bytes received
+# UNIT zenoh_rx_bytes bytes
+# HELP zenoh_rx_per_transport_bytes Count of transport messages bytes received (per transport)
+# UNIT zenoh_rx_per_transport_bytes bytes
+# HELP zenoh_rx_per_link_bytes Count of transport messages bytes received (per link)
+# UNIT zenoh_rx_per_link_bytes bytes
+# HELP zenoh_rx_transport_message Count of transport messages received
+# HELP zenoh_rx_transport_message_per_transport Count of transport messages received (per transport)
+# HELP zenoh_rx_transport_message_per_link Count of transport messages received (per link)
+# HELP zenoh_rx_network_message Count of network messages received
+# HELP zenoh_rx_network_message_per_transport Count of network messages received (per transport)
+# HELP zenoh_rx_network_message_per_link Count of network messages received (per link)
+# HELP zenoh_rx_network_message_payload_bytes Histogram of network messages payload received
+# UNIT zenoh_rx_network_message_payload_bytes bytes
+# HELP zenoh_rx_network_message_payload_per_transport_bytes Histogram of network messages payload received (per transport)
+# UNIT zenoh_rx_network_message_payload_per_transport_bytes bytes
+# HELP zenoh_rx_network_message_dropped_payload_bytes Histogram of network messages payload dropped while received
+# UNIT zenoh_rx_network_message_dropped_payload_bytes bytes
+# HELP zenoh_rx_network_message_dropped_payload_per_transport_bytes Histogram of network messages payload dropped while received (per transport)
+# UNIT zenoh_rx_network_message_dropped_payload_per_transport_bytes bytes
+# HELP zenoh_rx_network_message_payload_per_key_bytes Histogram of network messages payload received per key
+# UNIT zenoh_rx_network_message_payload_per_key_bytes bytes
+# HELP zenoh_rx_network_message_payload_per_key_per_transport_bytes Histogram of network messages payload received per key (per transport)
+# UNIT zenoh_rx_network_message_payload_per_key_per_transport_bytes bytes

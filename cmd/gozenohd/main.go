@@ -69,7 +69,7 @@ func main() {
 	regionName := flag.String("region-name", "", "region name announced to the nodes we connect to")
 	gatewayFile := flag.String("gateway", "", "south subregions: JSON file with zenoh's gateway section")
 	configFile := flag.String("config", "", "zenoh config file (JSON5): its mode, id, listen, connect, scouting/multicast, "+
-		"downsampling, low_pass_filter, qos/network, timestamping, access_control, gateway, adminspace, metadata "+
+		"downsampling, low_pass_filter, qos/network, timestamping, access_control, gateway, adminspace, stats, metadata "+
 		"and plugins (rest, storage_manager with memory volumes) sections")
 	flag.StringVar(configFile, "c", "", "same as -config")
 	restPort := flag.String("rest-http-port", "", "enable the REST API: a port, <ip>:<port>, or none")

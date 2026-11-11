@@ -123,6 +123,29 @@ defer l.Undeclare()
 priorities, reliability). Callbacks run in order on the session's
 goroutines. Builds that never declare one don't link the code in.
 
+**Traffic statistics.** Like zenohd built with its `stats` feature, a
+session counts per link the bytes, transport messages and network messages
+(by priority, kind, SHM), and per transport the payload sizes of the data
+crossing it and of what it dropped (access control, downsampling, low-pass,
+no link):
+
+```go
+st := s.Stats()
+fmt.Println(st.Tx.Bytes, st.Rx.NetworkMessages, st.Rx.Dropped)
+for _, t := range st.Transports {
+    fmt.Println(t.Transport.ZID, t.Rx.Messages, t.Rx.PayloadBytes)
+}
+fmt.Print(s.Metrics(zenoh.MetricsOptions{})) // OpenMetrics, zenohd's names
+```
+
+Routers serve the same text at `@/<zid>/router/metrics` (Prometheus-ready
+with `?compression=false`; `per_transport`, `per_link`, `per_key`,
+`disconnected`, `descriptors` as zenohd) and add the counters to their
+admin JSON with `@/<zid>/router?_stats=true`. `Config.Stats.Filters` (zenohd
+`stats/filters`) adds per-key-expression payload series. Statistics are on
+by default; TinyGo builds leave them out (~40 KB of code) unless built with
+`-tags zenoh_stats`.
+
 **TLS on TinyGo.** TinyGo's `crypto/tls` is a stub, so package `tls13` is
 a small TLS 1.3 client of our own: X25519, AES-128/256-GCM, server
 certificates with ECDSA P-256/P-384, RSA or Ed25519 keys checked against
@@ -165,7 +188,7 @@ session can publish, subscribe and serve queries itself.
 | `plugins`        | ✅ rest, storage (memory) | `plugins/rest`: zenoh-plugin-rest over any session (`rest.Serve(s, ":8000")`, `rest.Handler(s)`), JSON samples with zenoh's payload-to-JSON rules. `plugins/storage`: zenoh-plugin-storage-manager's in-memory volume (`storage.NewMemory(s, storage.Config{KeyExpr: "demo/**"})`) with **replication** (`Config.Replication`: zenoh's digest/aligner protocol — XXH3 fingerprints of a log cut into intervals and sub-intervals, hot/warm/cold eras, bincode digests on `@-digest/<zid>/<config hash>`, alignment queries to `@zid/<zid>/<config hash>/aligner`, initial alignment of an empty replica). Both in gozenohd. REST is not in TinyGo builds. |
 | `zext`           | ✅ | zenoh-ext **serialization** (`z_serialize` / `z_deserialize` format): fixed-width little-endian numbers incl. 128-bit, bool, LEB128 lengths, strings, bytes, sequences, maps, tuples as concatenation; `Serializer`/`Deserializer`, generic `WriteSlice`/`ReadMap`..., `Serialize(vals...)`/`Deserialize(b, ptrs...)` without reflection (TinyGo), `Marshaler`/`Unmarshaler` for structs. |
 | `shm`            | ✅ Linux | zenoh's POSIX shared memory, layout-compatible with zenoh-rust 1.x (SHM protocol v2): `/dev/shm/<id>.zenoh` metadata/data/auth segments, INIT/OPEN negotiation (challenges read from each other's auth segment), per-priority handoff counters, watchdog confirmation (50 ms) and validation (100 ms), refcounts and generations, garbage collection, orphan-segment cleanup. Enabled with `Config.SharedMemory` (`gozenohd --shm`): payloads ≥ 3 KiB to SHM-capable faces go through a 16 MiB pool; received SHM payloads are copied out. Stub returning `ErrUnsupported` elsewhere and on TinyGo. |
-| `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, incl. *aggregate* interests); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`, with `Multihop` relaying link states across any number of hops), declaration push between peers, writer-side filtering, peers attached to routers); **regions** (zenoh 1.10: every node sorted into its north region or a south subregion it is the gateway of; routers gossip with their peers and don't relay inside a peer region; peers are gateways of their clients; custom subregions by role/ZID/interface/announced `RegionName` with `Gateway.South`, so a peer can be the gateway of a group of peers and a router the gateway of router subregions, each its own link-state mesh; one forwarding gateway per peer or router subregion when several serve it); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), **query cancellation** (`CancellationToken` + `WithCancellation` on gets, querier gets and liveliness gets, as zenoh's unstable API: local, stops replies, waits for running callbacks), matching status and matching listeners on publishers and queriers, **advanced pub/sub** (zenoh-ext compatible: `DeclareAdvancedPublisher` with cache, sequence numbers + heartbeats for miss detection, publisher detection; `DeclareAdvancedSubscriber` with history incl. late-joining publishers (`_max`, `_time` limits), in-order delivery, recovery of lost samples by gap queries / periodic queries / heartbeats, miss listeners, subscriber detection), `_anyke` replies, `_time` ranges (`ParseTimeRange`), source info on samples, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; **namespaces** (`Config.Namespace`: every key the session is given goes under `<ns>/`, every key it gives back loses it, traffic outside it is dropped; the admin space stays outside); **locality** (`WithAllowedOrigin` on subscribers and queryables, `WithAllowedDestination` on puts, publishers, gets and queriers: same session only, remote only, or both; session-local entities are not declared, matching status follows the destination); priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress); **interceptors** (zenoh's `downsampling`, `low_pass_filter` and `qos/network` sections as `Downsampling`, `LowPassFilter`, `QoSOverwrite`: per-rule rate limits, size limits on payload + attachment, priority / congestion control / express overwrite filtered by key, QoS and payload size; per face by interface, link protocol and ZID, ingress and/or egress) and **timestamping** (`Timestamping`: routers stamp PUTs that cross them, future timestamps replaced or dropped); **admin space** (`AdminSpace`, on by default in router mode: `@/<zid>/<mode>` with zid/version/`Metadata`/locators/sessions (links, region, router-link weights), `/metrics` (OpenMetrics, gzip), `/linkstate/<region>` (Graphviz graphs of every mesh and peer region), `/subscriber`, `/queryable`, `/token`, `/publisher`, `/querier` `/<key>` (who declared what), `/route/successor/src/<zid>/dst/<zid>`; and in every session the session-local `@/<zid>/session/transport/unicast/<zid>[/link/<id>]` with PUT/DELETE events as transports and links come and go, also queryable through its `@adv/…` form for advanced subscribers); **connectivity** (`Transports()` incl. multicast group members, `Links()`, and zenoh's transport / link events listeners: `DeclareTransportEventsListener`, `DeclareLinkEventsListener` with `WithHistory` and `WithLinkTransport`, opened/closed as PUT/DELETE, links withdrawn before their transport; linked in only when used). |
+| `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, incl. *aggregate* interests); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`, with `Multihop` relaying link states across any number of hops), declaration push between peers, writer-side filtering, peers attached to routers); **regions** (zenoh 1.10: every node sorted into its north region or a south subregion it is the gateway of; routers gossip with their peers and don't relay inside a peer region; peers are gateways of their clients; custom subregions by role/ZID/interface/announced `RegionName` with `Gateway.South`, so a peer can be the gateway of a group of peers and a router the gateway of router subregions, each its own link-state mesh; one forwarding gateway per peer or router subregion when several serve it); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), **query cancellation** (`CancellationToken` + `WithCancellation` on gets, querier gets and liveliness gets, as zenoh's unstable API: local, stops replies, waits for running callbacks), matching status and matching listeners on publishers and queriers, **advanced pub/sub** (zenoh-ext compatible: `DeclareAdvancedPublisher` with cache, sequence numbers + heartbeats for miss detection, publisher detection; `DeclareAdvancedSubscriber` with history incl. late-joining publishers (`_max`, `_time` limits), in-order delivery, recovery of lost samples by gap queries / periodic queries / heartbeats, miss listeners, subscriber detection), `_anyke` replies, `_time` ranges (`ParseTimeRange`), source info on samples, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; **namespaces** (`Config.Namespace`: every key the session is given goes under `<ns>/`, every key it gives back loses it, traffic outside it is dropped; the admin space stays outside); **locality** (`WithAllowedOrigin` on subscribers and queryables, `WithAllowedDestination` on puts, publishers, gets and queriers: same session only, remote only, or both; session-local entities are not declared, matching status follows the destination); priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress); **interceptors** (zenoh's `downsampling`, `low_pass_filter` and `qos/network` sections as `Downsampling`, `LowPassFilter`, `QoSOverwrite`: per-rule rate limits, size limits on payload + attachment, priority / congestion control / express overwrite filtered by key, QoS and payload size; per face by interface, link protocol and ZID, ingress and/or egress) and **timestamping** (`Timestamping`: routers stamp PUTs that cross them, future timestamps replaced or dropped); **admin space** (`AdminSpace`, on by default in router mode: `@/<zid>/<mode>` with zid/version/`Metadata`/locators/sessions (links, region, router-link weights), `/metrics` (OpenMetrics, gzip), `/linkstate/<region>` (Graphviz graphs of every mesh and peer region), `/subscriber`, `/queryable`, `/token`, `/publisher`, `/querier` `/<key>` (who declared what), `/route/successor/src/<zid>/dst/<zid>`; and in every session the session-local `@/<zid>/session/transport/unicast/<zid>[/link/<id>]` with PUT/DELETE events as transports and links come and go, also queryable through its `@adv/…` form for advanced subscribers); **connectivity** (`Transports()` incl. multicast group members, `Links()`, and zenoh's transport / link events listeners: `DeclareTransportEventsListener`, `DeclareLinkEventsListener` with `WithHistory` and `WithLinkTransport`, opened/closed as PUT/DELETE, links withdrawn before their transport; linked in only when used); **traffic statistics** (zenohd's `stats` feature: per-link bytes / transport / network messages, per-transport payload and dropped-payload histograms, per-key filters; `Stats()`, `Metrics()`, `/metrics` with zenohd's metric names and labels, `?_stats=true` admin JSON; TinyGo: `-tags zenoh_stats`). |
 
 ### Verified interop
 
@@ -247,6 +270,12 @@ session can publish, subscribe and serve queries itself.
   session entry, link-state graphs, metrics text. A Go router meshed with a
   Rust router shows the same graph edge weight and the same number of route
   successors as the Rust one, and reports the same link weights.
+- **Statistics**: against a zenoh-rust router built with its `stats`
+  feature, the same traffic gives the same metric families, help texts,
+  units and label sets, and the same network-message counts and payload
+  histograms (per kind, priority, key space and filter); `?_stats=true`
+  JSON has the same fields. Byte and transport-message counts differ by
+  design: zenoh-rust packs more messages into a batch.
 - **Regions**: a Rust router sorts Go peers into subregions by the names they
   announce, relays between subregions and not inside one, and refuses an
   unnamed peer. A Go peer gets "you are south of me" from a Rust peer
@@ -378,6 +407,10 @@ ZENOH_REPL=tcp/127.0.0.1:17470 go test -run Replication ./plugins/storage/
 (cd zenoh/testdata/zrs && cargo build --release)
 ZENOH_RS=$PWD/zenoh/testdata/zrs/target/release/zrs go test -run RustLink ./zenoh/
 
+# statistics against zenoh-rust built with its "stats" feature (zenohd releases lack it)
+(cd zenoh/testdata/zstatsd && cargo build --release)
+ZENOHD_STATS=$PWD/zenoh/testdata/zstatsd/target/release/zstatsd go test -run StatsRust ./zenoh/
+
 # router meshes: one or two zenohd routers not connected to each other
 docker run -d --name zenohd2 --net=host eclipse/zenoh -l tcp/127.0.0.1:7448 --no-multicast-scouting
 ZENOH_MESH=tcp/127.0.0.1:7447,tcp/127.0.0.1:7448 go test -run Mesh ./zenoh/
@@ -438,7 +471,8 @@ go run ./examples/zprobe                        # hex-dump a raw handshake
       ✅ matching status, ✅ advanced pub/sub (zenoh-ext), ✅ namespaces,
       ✅ locality (allowed origin / destination), ✅ zenoh-ext serialization,
       ✅ interceptors (downsampling, low-pass filter, QoS overwrite),
-      ✅ timestamping, ✅ admin space, ✅ query cancellation.
+      ✅ timestamping, ✅ admin space, ✅ query cancellation, ✅ connectivity
+      events, ✅ traffic statistics (`stats`).
 - [x] **M9 — Router plugins & config.** ✅ zenohd JSON5 config and
       command line, ✅ REST plugin, ✅ storage manager with the memory
       volume, ✅ storage replication (digests and alignment,
@@ -633,9 +667,20 @@ tiny-zenoh-go/
   routers/peers/clients order; entities of a south region also list the
   node itself in its own mode (`add_north_source`); publishers and queriers
   come from the future INTERESTs of the faces we are the gateway of; the
-  metrics text keeps zenoh's stray space after `# EOF`. Without plugins,
+  metrics text without statistics keeps zenoh's stray space after
+  `# EOF`. Without plugins,
   `plugins` is null. Admin-space writes to `config/**` are not supported.
   The session-local space is not visible to a session with a `Namespace`.
+- Statistics follow zenoh-stats: series appear on first use (counters of a
+  link from its start, network-message series on their first message); a
+  link's counters move to its transport (no link label) when it goes; a
+  closed transport stays a minute (`?disconnected=true`, `disconnected="true"`,
+  resumed if the same peer comes back), then joins label-less totals; label
+  values zenoh-rust leaves unset print as `""`. The histogram `le` label
+  comes right after the constant labels, as `prometheus_client` writes it.
+  We count bytes as sent on the wire (zenoh-rust: outgoing batches before
+  compression). A multicast group is one transport for all its senders
+  (zenoh-rust splits received traffic per sender).
 - Interceptors and access control form one chain, in zenoh-rust's order:
   downsampling, access control, QoS overwrite, low-pass filter. A query
   dropped on the way in is answered with a RESPONSE_FINAL, a dropped

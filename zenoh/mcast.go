@@ -26,6 +26,7 @@ type mcastGroup struct {
 	// Key-expression ids declared by each sender (by address); guarded by
 	// Session.mu.
 	exprs map[string]map[uint16]string
+	stats *statsTransport // nil if off
 }
 
 func (s *Session) openMulticast(ep string) error {
@@ -51,6 +52,7 @@ func (s *Session) openMulticast(ep string) error {
 		// Like zenoh-rust: min(batch size, 8192). Group members ignore the
 		// JOINs of nodes with another batch size (zenoh-pico uses 2048).
 		BatchSize: batch,
+		Stats:     s.stats != nil,
 	}, transport.MulticastCallbacks{
 		OnPeer: func(p *transport.MulticastPeer) {
 			if h := s.evHooks.Load(); h != nil {
@@ -70,15 +72,17 @@ func (s *Session) openMulticast(ep string) error {
 			if h := s.evHooks.Load(); h != nil {
 				h.groupDown(g)
 			}
+			s.statsGroupDown(g)
 		},
 	})
 	if err != nil {
 		return fmt.Errorf("zenoh: multicast %s: %w", ep, err)
 	}
-	g.tr = tr
 	s.mu.Lock()
+	g.tr = tr
 	s.mcast = append(s.mcast, g)
 	s.mu.Unlock()
+	s.statsGroupUp(g)
 	return nil
 }
 

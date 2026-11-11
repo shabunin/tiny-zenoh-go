@@ -192,6 +192,9 @@ type Config struct {
 	// Metadata is a JSON value the admin space shows (zenoh-rust
 	// "metadata"), e.g. []byte(`{"name":"strawberry"}`); nil shows null.
 	Metadata []byte
+	// Stats configures traffic statistics (zenoh-rust's "stats" feature
+	// and config section): see Session.Stats and Session.Metrics.
+	Stats StatsConfig
 }
 
 func (c *Config) setDefaults() {
@@ -285,7 +288,8 @@ type Session struct {
 	localTokens  map[uint32]*LivelinessToken
 	shm          *shm.Manager // nil without Config.SharedMemory
 	mlKey        *transport.MultiLinkKey
-	mcast        []*mcastGroup // multicast groups joined (Listen)
+	mcast        []*mcastGroup  // multicast groups joined (Listen)
+	stats        *statsRegistry // traffic statistics, nil if off
 
 	// Connectivity events (events.go). evMu orders announcements; evState
 	// and evListeners are guarded by mu.
@@ -340,6 +344,13 @@ func Open(cfg Config) (*Session, error) {
 		s.tsOn = *cfg.Timestamping.Enabled
 	}
 	s.tsDrop = cfg.Timestamping.DropFutureTimestamp
+	if on := statsDefault; cfg.Stats.Enabled == nil && on || cfg.Stats.Enabled != nil && *cfg.Stats.Enabled {
+		r, err := newStatsRegistry(cfg.Stats)
+		if err != nil {
+			return nil, fmt.Errorf("zenoh: stats: %w", err)
+		}
+		s.stats = r
+	}
 	if cfg.ACL != nil {
 		acl, err := newACL(cfg.ACL)
 		if err != nil {
@@ -697,6 +708,7 @@ func (s *Session) transportConfig(f *face) transport.Config {
 		Auth:         s.cfg.Auth,
 		RegionName:   s.cfg.RegionName,
 		Bound:        func(p transport.PeerInfo) (transport.Bound, error) { return s.boundFor(f, p) },
+		Stats:        s.stats != nil,
 	}
 }
 
@@ -839,6 +851,7 @@ func (s *Session) established(f *face, l transport.Link, tr *transport.Unicast, 
 	f.tr = tr
 	f.linkDone = tr.LinkDone(l)
 	f.shm = shmLink(tr)
+	s.statsUp(f)
 	s.setupACL(f, l, tr)
 	s.setupInterceptors(f)
 	if f.acl != nil || f.icpt != nil {

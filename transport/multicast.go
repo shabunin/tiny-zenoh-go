@@ -52,6 +52,8 @@ type MulticastConfig struct {
 	MaxPeers int
 	// MaxMessageSize bounds a reassembled message. Default 16 MiB.
 	MaxMessageSize int
+	// Stats keeps traffic counters for the group (Multicast.Stats).
+	Stats bool
 }
 
 // MulticastPeer is a remote node seen on the group.
@@ -100,7 +102,13 @@ type Multicast struct {
 	closed    atomic.Bool
 	closeOnce sync.Once
 	done      chan struct{}
+
+	stats *LinkStats // nil without MulticastConfig.Stats
 }
+
+// Stats are the group's traffic counters, all senders together (nil
+// without MulticastConfig.Stats).
+func (m *Multicast) Stats() *LinkStats { return m.stats }
 
 // NewMulticast starts a multicast transport on link: it sends a first JOIN
 // and starts the receive and JOIN goroutines.
@@ -134,6 +142,9 @@ func NewMulticast(link MulticastLink, cfg MulticastConfig, cb MulticastCallbacks
 		snMask: snMask(protocol.DefaultResolution.FrameSNBits()),
 		peers:  map[string]*mcastPeer{},
 		done:   make(chan struct{}),
+	}
+	if cfg.Stats {
+		m.stats = &LinkStats{}
 	}
 	isn := rand.Uint64() & m.snMask
 	for p := range m.txSN {
@@ -200,6 +211,10 @@ func (m *Multicast) flushLocked() error {
 		return ErrBatchSize
 	}
 	_, err := m.link.Write(b)
+	if err == nil {
+		m.stats.addBytes(Tx, len(b))
+		m.stats.addTransport(Tx)
+	}
 	return err
 }
 
@@ -284,6 +299,7 @@ func (m *Multicast) Send(reliable bool, msgs ...Encoder) error {
 			}
 			prio = mp
 		}
+		m.stats.addNetwork(Tx, msg)
 		mark := p.Len()
 		msg.Encode(p)
 		if p.Len() <= capacity {
@@ -342,6 +358,7 @@ func (m *Multicast) rxLoop() {
 			return
 		}
 		if n > 0 {
+			m.stats.addBytes(Rx, n)
 			m.handleBatch(src, buf[:n])
 		}
 	}
@@ -393,6 +410,9 @@ func (m *Multicast) handleBatch(src string, batch []byte) {
 	for r.Remaining() > 0 {
 		hdr, _ := r.PeekByte()
 		var err error
+		if codec.MsgID(hdr) <= protocol.IDJoin {
+			m.stats.addTransport(Rx)
+		}
 		switch codec.MsgID(hdr) {
 		case protocol.IDFrame:
 			if p == nil {
@@ -453,6 +473,7 @@ func (m *Multicast) handleJoin(src string, p *mcastPeer, j *protocol.Join) *mcas
 	np.lastRx.Store(time.Now().UnixNano())
 	np.rx.init(snMask(j.Resolution.FrameSNBits()), j.QoS != nil, m.cfg.MaxMessageSize,
 		func(msg protocol.Message, reliable bool) error {
+			m.stats.addNetwork(Rx, msg)
 			if m.cb.OnMessage != nil {
 				m.cb.OnMessage(&np.info, msg, reliable)
 			}

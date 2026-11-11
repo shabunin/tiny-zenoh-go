@@ -251,35 +251,57 @@ func (f *face) adminLinks() []adminLink {
 }
 
 func (s *Session) adminLocal(q *Query, prefix string) {
+	if !keyexpr.Intersect(q.KeyExpr(), prefix) {
+		return
+	}
+	// ?_stats (any value but false) adds the traffic statistics, as
+	// zenoh-rust's merge_stats.
+	var st *adminStats
+	if v, ok := Param(q.Parameters(), "_stats"); ok && v != "false" && s.stats != nil {
+		st = s.adminStats()
+	}
 	var sessions []string
 	faces := s.faceList()
 	sort.Slice(faces, func(i, j int) bool { return faces[i].zid.String() < faces[j].zid.String() })
 	for _, f := range faces {
 		var links []string
 		for _, l := range f.adminLinks() {
-			links = append(links, jsonObj(jsonField{"dst", jsonStr(l.dst)}, jsonField{"src", jsonStr(l.src)}))
+			fs := []jsonField{{"dst", jsonStr(l.dst)}, {"src", jsonStr(l.src)}}
+			if st != nil {
+				fs = append(fs, st.linkField(f.zid.String(), l.src, l.dst))
+			}
+			links = append(links, jsonObj(fs...))
 		}
-		sessions = append(sessions, jsonObj(
-			jsonField{"links", jsonArr(links)},
-			jsonField{"peer", jsonStr(f.zid.String())},
-			jsonField{"region", jsonStr(regionName(f.region))},
-			jsonField{"shm", jsonBool(f.shm != nil)},
-			jsonField{"weight", s.adminWeight(f)},
-			jsonField{"whatami", jsonStr(f.whatami.String())},
-		))
+		fs := []jsonField{
+			{"links", jsonArr(links)},
+			{"peer", jsonStr(f.zid.String())},
+			{"region", jsonStr(regionName(f.region))},
+			{"shm", jsonBool(f.shm != nil)},
+		}
+		if st != nil {
+			fs = append(fs, st.sessionFields(s.stats.filters, f.zid.String())...)
+		}
+		fs = append(fs, jsonField{"weight", s.adminWeight(f)}, jsonField{"whatami", jsonStr(f.whatami.String())})
+		sessions = append(sessions, jsonObj(fs...))
 	}
 	meta := "null"
 	if len(s.cfg.Metadata) > 0 {
 		meta = string(s.cfg.Metadata)
 	}
-	body := jsonObj(
-		jsonField{"locators", jsonStrs(s.Locators())},
-		jsonField{"metadata", meta},
-		jsonField{"plugins", "null"},
-		jsonField{"sessions", jsonArr(sessions)},
-		jsonField{"version", jsonStr(versionString())},
-		jsonField{"zid", jsonStr(s.zid.String())},
-	)
+	fs := []jsonField{
+		{"locators", jsonStrs(s.Locators())},
+		{"metadata", meta},
+		{"plugins", "null"},
+		{"sessions", jsonArr(sessions)},
+	}
+	if st != nil {
+		fs = append(fs, jsonField{"stats", st.root})
+		if st.rootFiltered != "" {
+			fs = append(fs, jsonField{"stats_filtered", st.rootFiltered})
+		}
+	}
+	fs = append(fs, jsonField{"version", jsonStr(versionString())}, jsonField{"zid", jsonStr(s.zid.String())})
+	body := jsonObj(fs...)
 	adminReply(q, prefix, []byte(body), EncodingApplicationJSON)
 }
 
@@ -321,15 +343,12 @@ func (s *Session) adminMetrics(q *Query, prefix string) {
 	if !keyexpr.Intersect(q.KeyExpr(), prefix) {
 		return
 	}
-	// zenoh-rust without its "stats" feature: the build info only (with
-	// its stray space after "# EOF").
-	m := "# HELP zenoh_build Zenoh build version.\n" +
-		"# TYPE zenoh_build info\n" +
-		"zenoh_build_info{local_id=\"" + s.zid.String() + "\",local_whatami=\"" + s.cfg.Mode.String() +
-		"\",version=\"" + versionString() + "\"} 1\n" +
-		"# EOF\n "
 	params := q.Parameters()
-	if v, _ := Param(params, "descriptors"); v == "false" {
+	is := func(k, v string) bool { x, _ := Param(params, k); return x == v }
+	opts := MetricsOptions{NoPerTransport: is("per_transport", "false"), NoPerLink: is("per_link", "false"),
+		NoPerKey: is("per_key", "false"), Disconnected: is("disconnected", "true")}
+	m := s.metrics(opts)
+	if is("descriptors", "false") {
 		var b strings.Builder
 		for _, l := range strings.SplitAfter(m, "\n") {
 			if l != "" && !strings.HasPrefix(l, "#") {
@@ -717,6 +736,7 @@ func (s *Session) adminFaceUp(f *face) {
 	s.mu.Lock()
 	f.published = append([]adminLink(nil), links...)
 	s.mu.Unlock()
+	s.statsLinks(f, nil, links)
 	if h := s.evHooks.Load(); h != nil && f.tr != nil {
 		h.faceUp(f, links)
 	}
@@ -741,6 +761,7 @@ func (s *Session) adminLinksChanged(f *face) {
 	old := f.published
 	f.published = append([]adminLink(nil), now...)
 	s.mu.Unlock()
+	s.statsLinks(f, old, now)
 	if h := s.evHooks.Load(); h != nil {
 		h.faceLinks(f, now)
 	}
@@ -769,6 +790,7 @@ func (s *Session) adminLinksChanged(f *face) {
 
 // adminFaceDown publishes the end of a transport and its links.
 func (s *Session) adminFaceDown(f *face, links []adminLink) {
+	s.statsDown(f, links)
 	if h := s.evHooks.Load(); h != nil {
 		h.faceDown(f)
 	}

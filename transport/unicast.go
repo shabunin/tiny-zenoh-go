@@ -97,6 +97,9 @@ type Config struct {
 	// peer stands on; anything but BoundNone is told to the peer
 	// (open::ext::RemoteBound). An error aborts the handshake.
 	Bound func(PeerInfo) (Bound, error)
+
+	// Stats keeps traffic counters per link (see LinkStats, LinkInfo.Stats).
+	Stats bool
 }
 
 func (c *Config) setDefaults() {
@@ -174,6 +177,7 @@ type tlink struct {
 
 	rxBuf          []byte
 	lastRx, lastTx atomic.Int64
+	stats          *LinkStats // nil: not counting (set before the link starts)
 
 	// prioW: per-priority streams (PriorityLink), nil when not in use;
 	// priorities other than Control write through prioAsync.
@@ -255,8 +259,9 @@ type Unicast struct {
 	txPrio    protocol.Priority // priority of txBatch, for per-priority streams
 	txPayload codec.Writer
 
-	rxMu sync.Mutex // links receive concurrently
-	rx   rxState
+	rxMu   sync.Mutex // links receive concurrently
+	rxLink *tlink     // the link whose batch is being handled (guarded by rxMu)
+	rx     rxState
 
 	ext HandshakeExt
 	// patch is the negotiated zenoh patch level (INIT ext 0x7).
@@ -361,6 +366,9 @@ func bestEffortCompanion(l *tlink) *tlink {
 }
 
 func (t *Unicast) start(l *tlink) {
+	if t.cfg.Stats {
+		l.stats = &LinkStats{}
+	}
 	now := time.Now().UnixNano()
 	l.lastRx.Store(now)
 	l.lastTx.Store(now)
@@ -981,6 +989,10 @@ func (t *Unicast) flushBatchLocked(l *tlink) error {
 		return err
 	}
 	l.lastTx.Store(time.Now().UnixNano())
+	if st := l.stats; st != nil {
+		st.addBytes(Tx, len(b))
+		st.addTransport(Tx)
+	}
 	return nil
 }
 
@@ -1066,6 +1078,11 @@ func (t *Unicast) Send(reliable bool, msgs ...Encoder) error {
 		return ErrClosed
 	}
 	if t.lowLatency {
+		if st := links[0].stats; st != nil {
+			for _, m := range msgs {
+				st.addNetwork(Tx, m)
+			}
+		}
 		return t.sendLowLatencyLocked(links[0], msgs)
 	}
 
@@ -1089,6 +1106,7 @@ func (t *Unicast) Send(reliable bool, msgs ...Encoder) error {
 			}
 			cur, prio, capacity = ml, mp, t.frameCapacity(ml)
 		}
+		cur.stats.addNetwork(Tx, m)
 		mark := p.Len()
 		m.Encode(p)
 		if p.Len() <= capacity {
@@ -1178,12 +1196,14 @@ func (t *Unicast) rxLoop(l *tlink, r io.Reader, buf []byte) {
 		batch, err := l.readBatch(r, buf)
 		if err == nil {
 			l.lastRx.Store(time.Now().UnixNano())
+			l.stats.addBytes(Rx, l.prefix+len(batch))
 			if l.compress {
 				batch, err = l.decompress(batch, &zbuf)
 			}
 		}
 		if err == nil {
 			t.rxMu.Lock()
+			t.rxLink = l
 			if l.lowLatency {
 				err = t.handleLowLatency(batch)
 			} else {
@@ -1202,6 +1222,7 @@ func (t *Unicast) handleBatch(batch []byte) error {
 	r := codec.NewReader(batch)
 	for r.Remaining() > 0 {
 		hdr, _ := r.PeekByte()
+		t.rxStats().addTransport(Rx)
 		switch codec.MsgID(hdr) {
 		case protocol.IDFrame:
 			if err := t.rx.frame(r); err != nil {
@@ -1236,7 +1257,16 @@ func (t *Unicast) handleBatch(batch []byte) error {
 	return nil
 }
 
+// rxStats are the counters of the link being read (nil if none).
+func (t *Unicast) rxStats() *LinkStats {
+	if t.rxLink == nil {
+		return nil
+	}
+	return t.rxLink.stats
+}
+
 func (t *Unicast) deliver(m protocol.Message, reliable bool) error {
+	t.rxStats().addNetwork(Rx, m)
 	if t.cb.OnMessage == nil {
 		return nil
 	}
@@ -1375,6 +1405,8 @@ type LinkInfo struct {
 	Streamed bool // a byte stream (length-prefixed batches), not packets
 	Reliable bool
 	MTU      int // the link's packet size limit, 0 for streams
+	// Stats are the link's traffic counters (nil without Config.Stats).
+	Stats *LinkStats
 	// HasRange: the link carries only priorities PrioLo..PrioHi (QUIC
 	// per-priority links).
 	HasRange       bool
@@ -1388,7 +1420,7 @@ func (t *Unicast) LinkInfos() []LinkInfo {
 	out := make([]LinkInfo, 0, len(t.links))
 	for _, l := range t.links {
 		li := LinkInfo{Link: l.link, Streamed: l.prefix > 0, Reliable: l.reliable,
-			HasRange: l.hasRange, PrioLo: l.prioLo, PrioHi: l.prioHi}
+			HasRange: l.hasRange, PrioLo: l.prioLo, PrioHi: l.prioHi, Stats: l.stats}
 		if p, ok := l.link.(PacketLink); ok {
 			li.MTU = p.MTU()
 		}

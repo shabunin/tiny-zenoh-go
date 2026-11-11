@@ -483,6 +483,7 @@ func (f *face) aclEgress(msgs []transport.Encoder) []transport.Encoder {
 			continue
 		}
 		if we == nil {
+			f.statsDrop(transport.Tx, dropACL, m)
 			f.refused(m)
 			continue
 		}
@@ -494,6 +495,7 @@ func (f *face) aclEgress(msgs []transport.Encoder) []transport.Encoder {
 		if ok && a.check(1, msg, key) {
 			out = append(out, m)
 		} else {
+			f.statsDrop(transport.Tx, dropACL, m)
 			f.refused(m)
 		}
 	}

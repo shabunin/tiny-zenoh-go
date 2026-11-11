@@ -71,6 +71,7 @@ func (t *Unicast) handleLowLatency(b []byte) error {
 	r := codec.NewReader(b)
 	for r.Remaining() > 0 {
 		hdr, _ := r.PeekByte()
+		t.rxStats().addTransport(Rx)
 		switch codec.MsgID(hdr) {
 		case protocol.IDKeepAlive:
 			if _, err := protocol.DecodeTransport(r); err != nil {

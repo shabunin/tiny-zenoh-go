@@ -1,6 +1,7 @@
 package zenoh
 
 import (
+	"errors"
 	"sync"
 
 	"github.com/shabunin/tiny-zenoh-go/keyexpr"
@@ -64,6 +65,8 @@ type face struct {
 	// published are the links the session admin space announced (guarded
 	// by s.mu).
 	published []adminLink
+	// stats are the face's traffic statistics (nil if off).
+	stats *statsTransport
 
 	ready     chan struct{}   // closed when tr is usable (or the handshake failed)
 	linkDone  <-chan struct{} // closed when the link this face was made on is gone
@@ -115,7 +118,17 @@ func (f *face) send(reliable bool, msgs ...transport.Encoder) error {
 		msgs, sent = f.toShm(msgs)
 		defer sent()
 	}
-	return f.tr.Send(reliable, msgs...)
+	if f.stats == nil {
+		return f.tr.Send(reliable, msgs...)
+	}
+	f.observeTx(msgs)
+	err := f.tr.Send(reliable, msgs...)
+	if errors.Is(err, transport.ErrClosed) {
+		for _, m := range msgs {
+			f.statsDrop(transport.Tx, dropNoLink, m)
+		}
+	}
+	return err
 }
 
 func (f *face) close() {
@@ -311,6 +324,7 @@ func (f *face) wantsQueryLocked(key string, target QueryTarget) bool {
 
 func (f *face) onMessage(m protocol.Message, reliable bool) error {
 	<-f.ready
+	shm := f.stats != nil && transport.IsShm(m)
 	if err := f.unshm(m); err != nil {
 		return nil // unreadable shared-memory payload: drop, as zenoh-rust does
 	}
@@ -319,6 +333,9 @@ func (f *face) onMessage(m protocol.Message, reliable bool) error {
 		if m, ok = f.interceptIngress(m, reliable); !ok {
 			return nil // access control or an interceptor: dropped
 		}
+	}
+	if f.stats != nil {
+		f.observeRx(m, shm)
 	}
 	return f.dispatch(m, reliable)
 }

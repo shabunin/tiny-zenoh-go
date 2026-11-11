@@ -820,15 +820,22 @@ func (e *qosEntry) apply(m any, cls msgClass, k *msgKey, reliable bool) any {
 // timeout.
 func (f *face) interceptIngress(m protocol.Message, reliable bool) (protocol.Message, bool) {
 	fi := f.icpt
-	ok := fi == nil || fi.interceptPre(f, 0, m)
-	ok = ok && (f.acl == nil || f.aclIngress(m))
+	ok, reason := true, uint8(dropDownsampling)
+	if fi != nil {
+		ok = fi.interceptPre(f, 0, m)
+	}
+	if ok && f.acl != nil {
+		ok, reason = f.aclIngress(m), dropACL
+	}
 	if ok && fi != nil {
 		var out any
 		if out, ok = fi.interceptPost(f, 0, m, reliable); ok {
 			m = out.(protocol.Message)
 		}
+		reason = dropLowPass
 	}
 	if !ok {
+		f.statsDrop(transport.Rx, reason, m)
 		switch m := m.(type) {
 		case *protocol.Request:
 			_ = f.tr.Send(true, &protocol.ResponseFinal{RequestID: m.ID, QoS: m.QoS})
@@ -876,6 +883,7 @@ func (f *face) interceptEgress(msgs []transport.Encoder, reliable bool) []transp
 			if fi.interceptPre(f, 1, m) {
 				out = append(out, m)
 			} else {
+				f.statsDrop(transport.Tx, dropDownsampling, m)
 				f.refused(m)
 			}
 		}
@@ -890,6 +898,7 @@ func (f *face) interceptEgress(msgs []transport.Encoder, reliable bool) []transp
 			if nm, ok := fi.interceptPost(f, 1, m, reliable); ok {
 				out = append(out, nm.(transport.Encoder))
 			} else {
+				f.statsDrop(transport.Tx, dropLowPass, m)
 				f.refused(m)
 			}
 		}

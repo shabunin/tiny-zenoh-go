@@ -69,6 +69,7 @@ func TestConfigTree(t *testing.T) {
 			`link:{tx:{lease:5000,batch_size:8192},tls:{root_ca_certificate:"ca.pem",verify_name_on_connect:false}},` +
 			`shared_memory:{enabled:true},auth:{usrpwd:{user:"u",password:"p"}}}`,
 		`region_name:"r1"`, `queries_default_timeout:2500`, `namespace:"ns"`,
+		`stats:{filters:[{key:"a/**"},{key:"b/*"}]}`,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +81,8 @@ func TestConfigTree(t *testing.T) {
 	if !cfg.LowLatency || cfg.MaxLinks != 3 || !cfg.DisableQoS || !cfg.Compression || cfg.Lease != 5*time.Second ||
 		cfg.BatchSize != 8192 || cfg.TLS == nil || cfg.TLS.RootCACertificate != "ca.pem" || !cfg.TLS.SkipNameVerification ||
 		cfg.SharedMemory == nil || cfg.Auth == nil || cfg.Auth.User != "u" || cfg.Auth.Password != "p" ||
-		cfg.RegionName != "r1" || cfg.QueryTimeout != 2500*time.Millisecond || cfg.Namespace != "ns" {
+		cfg.RegionName != "r1" || cfg.QueryTimeout != 2500*time.Millisecond || cfg.Namespace != "ns" ||
+		len(cfg.Stats.Filters) != 2 || cfg.Stats.Filters[1] != "b/*" {
 		t.Fatalf("transport etc.: %+v", cfg)
 	}
 
