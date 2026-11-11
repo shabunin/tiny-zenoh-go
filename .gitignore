@@ -1,0 +1,6 @@
+# binaries
+/gozenohd
+*.test
+*.out
+*.bin
+*.elf
