@@ -49,6 +49,7 @@ type getOptions struct {
 	body          *protocol.QueryBody
 	attachment    []byte
 	destination   Locality
+	cancel        *CancellationToken
 }
 
 // GetOption customizes a Get or a querier.
@@ -78,6 +79,7 @@ func WithPayload(payload []byte, enc Encoding) GetOption {
 func WithQueryAttachment(b []byte) GetOption { return getFn(func(o *getOptions) { o.attachment = b }) }
 
 type pendingQuery struct {
+	qid     uint32 // guarded by Session.mu
 	key     string
 	querier uint32 // the querier's interest id, 0 for Session.Get
 	anyKey  bool   // "_anyke": accept replies on any key
@@ -219,6 +221,20 @@ func (s *Session) get(k *keyexpr.Key, params string, o *getOptions, qr *Querier,
 		latest: map[string]Reply{}, mono: map[string]*Timestamp{},
 		faces: map[*face]bool{}, local: o.destination != LocalityRemote,
 	}
+	if o.cancel != nil {
+		var ok bool
+		pq.cb, pq.onDone, ok = o.cancel.bind(cb, done, func() {
+			s.mu.Lock()
+			if s.queries[pq.qid] == pq {
+				delete(s.queries, pq.qid)
+			}
+			s.mu.Unlock()
+			pq.finish() // its callback no longer delivers anything
+		})
+		if !ok {
+			return ErrCancelled
+		}
+	}
 	s.mu.Lock()
 	if s.closed.Load() {
 		s.mu.Unlock()
@@ -234,6 +250,7 @@ func (s *Session) get(k *keyexpr.Key, params string, o *getOptions, qr *Querier,
 	}
 	qid := s.nextQID
 	s.nextQID++
+	pq.qid = qid
 	if o.destination != LocalitySessionLocal {
 		for _, f := range s.faces {
 			if f.wantsQueryLocked(k.String(), o.target) {

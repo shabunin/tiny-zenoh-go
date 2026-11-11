@@ -3,6 +3,10 @@ package zenoh
 import (
 	"testing"
 	"time"
+
+	"github.com/shabunin/tiny-zenoh-go/link"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // openRouter starts a tiny-zenoh-go router on loopback.
@@ -136,5 +140,75 @@ func TestGoRouterInterestUpdates(t *testing.T) {
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Errorf("query not released (%v)", time.Since(start))
+	}
+}
+
+// TestRouterAggregateInterest: a raw client sends an aggregate
+// Current+Future INTEREST (what zenoh-pico's publishers and queriers send)
+// and must get one declaration on the interest's own key while matching
+// entities exist, undeclared when the last one goes, like zenoh-rust.
+func TestRouterAggregateInterest(t *testing.T) {
+	r := openRouter(t)
+	pfx := uniq(t)
+	l, err := link.Dial(r.Locators()[0], 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decls := make(chan *protocol.Declare, 16)
+	tr, err := transport.Open(l, transport.Config{ZID: protocol.ZID(NewZID()), WhatAmI: protocol.Client},
+		transport.Callbacks{OnMessage: func(m protocol.Message, _ bool) error {
+			if d, ok := m.(*protocol.Declare); ok {
+				decls <- d
+			}
+			return nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+	next := func() *protocol.Declare {
+		t.Helper()
+		select {
+		case d := <-decls:
+			return d
+		case <-time.After(3 * time.Second):
+			t.Fatal("timeout waiting for a DECLARE")
+			return nil
+		}
+	}
+
+	s := clientOf(t, r)
+	sub1, _ := s.DeclareSubscriber(pfx+"/**", func(Sample) {})
+	sub2, _ := s.DeclareSubscriber(pfx+"/a/*", func(Sample) {})
+	settle()
+	key := pfx + "/a/b"
+	_ = tr.Send(true, &protocol.Interest{ID: 5, Mode: protocol.InterestCurrentFuture,
+		Options:  protocol.InterestKeyExprs | protocol.InterestSubscribers | protocol.InterestAggregate,
+		WireExpr: &protocol.WireExpr{Suffix: key}, QoS: protocol.QoSDeclare})
+
+	d := next()
+	ds, ok := d.Body.(*protocol.DeclareSubscriber)
+	if !ok || ds.WireExpr.Suffix != key || !d.HasInterestID || d.InterestID != 5 {
+		t.Fatalf("want one D_SUBSCRIBER on %s for interest 5, got %+v", key, d)
+	}
+	if d := next(); func() bool { _, ok := d.Body.(*protocol.DeclareFinal); return !ok }() {
+		t.Fatalf("want D_FINAL, got %+v", d)
+	}
+	_ = sub1.Undeclare() // sub2 still matches: nothing changes
+	settle()
+	_ = sub2.Undeclare()
+	u, ok := next().Body.(*protocol.UndeclareSubscriber)
+	if !ok || u.ID != ds.ID {
+		t.Fatalf("want U_SUBSCRIBER %d, got %+v", ds.ID, u)
+	}
+	sub3, _ := s.DeclareSubscriber(key, func(Sample) {})
+	defer sub3.Undeclare()
+	if ds, ok := next().Body.(*protocol.DeclareSubscriber); !ok || ds.WireExpr.Suffix != key {
+		t.Fatalf("want D_SUBSCRIBER on %s again, got %+v", key, ds)
+	}
+	select {
+	case d := <-decls:
+		t.Errorf("unexpected %+v", d)
+	case <-time.After(300 * time.Millisecond):
 	}
 }

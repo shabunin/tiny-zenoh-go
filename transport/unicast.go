@@ -259,6 +259,8 @@ type Unicast struct {
 	rx   rxState
 
 	ext HandshakeExt
+	// patch is the negotiated zenoh patch level (INIT ext 0x7).
+	patch uint64
 
 	// Handshake state.
 	hs *tlink    // the link the handshake runs on
@@ -581,6 +583,7 @@ func (t *Unicast) openHandshake() error {
 	if t.cfg.LowLatency {
 		syn.Exts = append(syn.Exts, llExt())
 	}
+	syn.Exts = append(syn.Exts, patchExt(patchCurrent))
 	syn.Exts = addExt(syn.Exts, t.mlInitSyn())
 	syn.Exts = addExt(syn.Exts, t.authInitSyn())
 	syn.Exts = addExt(syn.Exts, t.regionNameExt())
@@ -636,6 +639,7 @@ func (t *Unicast) openHandshake() error {
 	}
 	t.lowLatency = t.cfg.LowLatency && findExt(ack.Exts, extLowLatency) != nil
 	useCompression := t.cfg.Compression && findExt(ack.Exts, extCompression) != nil && !t.lowLatency
+	t.patch = negotiatePatch(ack.Exts)
 
 	res, batch := t.cfg.Resolution, l.propose
 	if ack.HasParams {
@@ -794,6 +798,9 @@ func (t *Unicast) acceptHandshake() error {
 	useCompression := t.cfg.Compression && findExt(syn.Exts, extCompression) != nil && !t.lowLatency
 	if useCompression {
 		ack.Exts = append(ack.Exts, protocol.Extension{ID: extCompression, Enc: protocol.ExtUnit})
+	}
+	if t.patch = negotiatePatch(syn.Exts); t.patch != 0 {
+		ack.Exts = append(ack.Exts, patchExt(t.patch))
 	}
 	ack.Exts = addExt(ack.Exts, t.mlAcceptInitAck())
 	ack.Exts = addExt(ack.Exts, t.authAcceptInitAck())
@@ -1129,15 +1136,25 @@ func (t *Unicast) sendFrameLocked(l *tlink, prio protocol.Priority, reliable boo
 
 func (t *Unicast) sendFragmentsLocked(l *tlink, prio protocol.Priority, reliable bool, msg []byte, capacity int) error {
 	exts := qosExts(prio)
+	first := t.patch >= patchFragmentMarkers
 	for len(msg) > 0 {
-		n := min(capacity, len(msg))
+		fexts, fcap := exts, capacity
+		if first {
+			// Patched peers get the start of each message marked, so a
+			// receiver that lost the tail of the previous one resyncs.
+			fexts = append(append([]protocol.Extension(nil), exts...),
+				protocol.Extension{ID: extFragFirst, Enc: protocol.ExtUnit})
+			fcap--
+			first = false
+		}
+		n := min(fcap, len(msg))
 		t.startBatchLocked(l)
 		t.setStreamPrioLocked(prio)
 		f := protocol.Fragment{
 			Reliable: reliable,
 			More:     n < len(msg),
 			SN:       t.nextSNLocked(prio, reliable),
-			Exts:     exts,
+			Exts:     fexts,
 			Payload:  msg[:n],
 		}
 		f.Encode(&t.txBatch)

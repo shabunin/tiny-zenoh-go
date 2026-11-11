@@ -128,7 +128,9 @@ type Config struct {
 	// Lease is the session lease announced to other nodes. Default 10s.
 	Lease time.Duration
 	// BatchSize is the largest batch we accept. Default 65535; lower it on
-	// memory-constrained targets.
+	// memory-constrained targets. Multicast groups use min(BatchSize, 8192),
+	// and all members of a group must agree on it (2048 to join zenoh-pico
+	// nodes with their default build).
 	BatchSize uint16
 	// QueryTimeout is the default Get timeout. Default 10s.
 	QueryTimeout time.Duration

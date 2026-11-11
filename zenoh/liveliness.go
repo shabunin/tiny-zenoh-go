@@ -202,6 +202,21 @@ func (l Liveliness) Get(key string, opts ...GetOption) (<-chan Reply, error) {
 	f := newFifo[Reply]()
 	id := l.interestID()
 	g := &livGet{key: k.String(), cb: f.push, done: f.close, faces: map[*face]bool{}}
+	if o.cancel != nil {
+		var ok bool
+		g.cb, g.done, ok = o.cancel.bind(f.push, f.close, func() {
+			s.mu.Lock()
+			if s.livGets[id] == g {
+				delete(s.livGets, id)
+			}
+			s.mu.Unlock()
+			g.finish()
+		})
+		if !ok {
+			f.close()
+			return nil, ErrCancelled
+		}
+	}
 	s.mu.Lock()
 	if s.closed.Load() {
 		s.mu.Unlock()

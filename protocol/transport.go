@@ -103,7 +103,9 @@ func decodeInit(r *codec.Reader, hdr byte) (*Init, error) {
 		}
 		m.Cookie = append([]byte(nil), cookie...)
 	}
-	if codec.HasZ(hdr) {
+	// zenoh-pico 1.10 listeners set Z on an INIT ACK whose patch extension
+	// they then leave out (when the SYN had none): accept the empty list.
+	if codec.HasZ(hdr) && r.Remaining() > 0 {
 		if m.Exts, err = ReadExtensions(r); err != nil {
 			return nil, err
 		}

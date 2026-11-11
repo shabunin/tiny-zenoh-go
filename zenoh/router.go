@@ -53,10 +53,21 @@ type remoteInterest struct {
 	mode protocol.InterestMode
 	opts protocol.InterestOptions
 	key  string // "" = every key
+
+	// aggregate: the face wants one declaration on key itself (with the
+	// interest's id) while anything matching it exists, instead of the
+	// matching entities (zenoh-pico's publishers and queriers ask so, and
+	// count only declarations whose key equals theirs). Not for tokens.
+	aggregate bool
+	agg       [nKinds]*declared // what we declared for it (future mode)
 }
 
 func (i *remoteInterest) matches(k declKind, key string) bool {
 	return i.opts&k.option() != 0 && (i.key == "" || keyexpr.Intersect(i.key, key))
+}
+
+func (i *remoteInterest) future() bool {
+	return i.mode == protocol.InterestFuture || i.mode == protocol.InterestCurrentFuture
 }
 
 // declared is an aggregated entity we declared to a face.
@@ -301,6 +312,52 @@ func (s *Session) routerUpdateLocked(k declKind, key string, out outbox) {
 			have.complete = complete
 			out.add(f, declMsg(k, have.id, key, complete, nil))
 		}
+		if !relay {
+			s.aggregateUpdateLocked(f, k, key, out)
+		}
+	}
+}
+
+// aggregateLocked reports whether any entity of kind k visible to f
+// intersects aggKey, and for queryables whether one of them is complete and
+// includes aggKey (zenoh-rust's QueryableInfoType::aggregate).
+func (s *Session) aggregateLocked(k declKind, aggKey string, f *face) (present, complete bool) {
+	for _, key := range s.keysLocked(k, aggKey, f) {
+		present = true
+		if k != kindQbl {
+			break
+		}
+		if _, c := s.sourcesLocked(k, key, f); c && keyexpr.Include(key, aggKey) {
+			complete = true
+			break
+		}
+	}
+	return present, complete
+}
+
+// aggregateUpdateLocked keeps f's future aggregate interests matching
+// (k, key) up to date: their key is declared while a match exists.
+func (s *Session) aggregateUpdateLocked(f *face, k declKind, key string, out outbox) {
+	for id, in := range f.router.interests {
+		if !in.aggregate || !in.future() || !in.matches(k, key) {
+			continue
+		}
+		present, complete := s.aggregateLocked(k, in.key, f)
+		have := in.agg[k]
+		switch {
+		case have != nil && !present:
+			in.agg[k] = nil
+			out.add(f, undeclMsg(k, have.id, in.key))
+		case present && have == nil:
+			f.router.nextID++
+			in.agg[k] = &declared{id: f.router.nextID, complete: complete}
+			iid := id
+			out.add(f, declMsg(k, in.agg[k].id, in.key, complete, &iid))
+		case present && k == kindQbl && have.complete != complete:
+			have.complete = complete
+			iid := id
+			out.add(f, declMsg(k, have.id, in.key, complete, &iid))
+		}
 	}
 }
 
@@ -336,7 +393,7 @@ func (s *Session) relayedLocked(f *face, interest *uint32) []transport.Encoder {
 
 func (f *face) futureInterestLocked(k declKind, key string) bool {
 	for _, i := range f.router.interests {
-		if (i.mode == protocol.InterestFuture || i.mode == protocol.InterestCurrentFuture) && i.matches(k, key) {
+		if i.future() && !i.aggregate && i.matches(k, key) {
 			return true
 		}
 	}
@@ -358,6 +415,7 @@ func (s *Session) routerInterest(f *face, m *protocol.Interest) {
 			return
 		}
 		in.key = key
+		in.aggregate = m.Options&protocol.InterestAggregate != 0
 	}
 	future := m.Mode == protocol.InterestFuture || m.Mode == protocol.InterestCurrentFuture
 	current := m.Mode == protocol.InterestCurrent || m.Mode == protocol.InterestCurrentFuture
@@ -382,6 +440,25 @@ func (s *Session) answerInterest(f *face, m *protocol.Interest, in *remoteIntere
 		id := m.ID
 		for k := declKind(0); k < nKinds; k++ {
 			if in.opts&k.option() == 0 {
+				continue
+			}
+			if in.aggregate {
+				if k == kindToken {
+					continue // illegal, zenoh-rust ignores it too
+				}
+				present, complete := s.aggregateLocked(k, in.key, f)
+				if !present {
+					continue
+				}
+				var did uint32 // zenoh-rust: id 0 for a current-only aggregate
+				if future {
+					if in.agg[k] == nil {
+						rs.nextID++
+						in.agg[k] = &declared{id: rs.nextID, complete: complete}
+					}
+					did = in.agg[k].id
+				}
+				msgs = append(msgs, declMsg(k, did, in.key, complete, &id))
 				continue
 			}
 			for _, key := range s.keysLocked(k, in.key, f) {

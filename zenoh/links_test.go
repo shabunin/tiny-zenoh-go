@@ -247,3 +247,64 @@ func mergeTLS(c linkCase) *link.TLSConfig {
 	m.ListenCertificate, m.ListenPrivateKey = c.srv.ListenCertificate, c.srv.ListenPrivateKey
 	return &m
 }
+
+// TestGoOnlyLinks: links the official Rust builds leave out by default
+// (zenoh's transport_unixpipe and transport_vsock features), between Go
+// nodes: a router listening on the link, clients exchanging data and
+// queries through it, and a client going away cleanly.
+func TestGoOnlyLinks(t *testing.T) {
+	for _, proto := range []string{"unixpipe", "vsock"} {
+		t.Run(proto, func(t *testing.T) {
+			listen := "unixpipe/" + filepath.Join(t.TempDir(), "zp")
+			if proto == "vsock" {
+				listen = "vsock/VMADDR_CID_ANY:VMADDR_PORT_ANY"
+			}
+			r, err := Open(Config{Mode: ModeRouter, Listen: []string{listen}, Scouting: ScoutingConfig{Disable: true}})
+			if err != nil {
+				t.Skip(err)
+			}
+			defer r.Close()
+			loc := r.Locators()[0]
+			if proto == "vsock" {
+				_, port, _ := strings.Cut(strings.TrimPrefix(loc, "vsock/"), ":")
+				loc = "vsock/VMADDR_CID_LOCAL:" + port
+			}
+			a, err := Open(Config{Connect: []string{loc}})
+			if err != nil {
+				t.Skip(err) // vsock without the loopback transport
+			}
+			defer a.Close()
+			b, err := Open(Config{Connect: []string{loc}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pfx := uniq(t)
+			sink := newSink()
+			sub, _ := a.DeclareSubscriber(pfx+"/**", sink.handler)
+			defer sub.Undeclare()
+			q, _ := a.DeclareQueryable(pfx+"/q", func(q *Query) { _ = q.Reply(pfx+"/q", []byte("over "+proto)) })
+			defer q.Undeclare()
+			settle()
+			big := make([]byte, 200_000)
+			for i := range big {
+				big[i] = byte(i)
+			}
+			_ = b.Put(pfx+"/x", big)
+			if got := sink.wait(t, 1); len(got[0].Payload) != len(big) || got[0].Payload[1234] != big[1234] {
+				t.Errorf("got %d bytes", len(got[0].Payload))
+			}
+			ch, _ := b.Get(pfx+"/q", WithTimeout(3*time.Second))
+			var replies []string
+			for rep := range ch {
+				if rep.Sample != nil {
+					replies = append(replies, string(rep.Sample.Payload))
+				}
+			}
+			if len(replies) != 1 || replies[0] != "over "+proto {
+				t.Errorf("replies %v", replies)
+			}
+			_ = b.Close()
+			waitFor(t, "router to drop the closed client", func() bool { return len(r.faceList()) == 1 })
+		})
+	}
+}

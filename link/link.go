@@ -136,7 +136,8 @@ func Dial(locator string, timeout time.Duration) (transport.Link, error) {
 	return DialWith(locator, timeout, Options{})
 }
 
-// DialWith opens a link to a locator: tcp, udp, tls, ws, unixsock-stream, or
+// DialWith opens a link to a locator: tcp, udp, tls, ws, unixsock-stream,
+// unixpipe, vsock, serial, or
 // a registered protocol.
 func DialWith(locator string, timeout time.Duration, o Options) (transport.Link, error) {
 	l, err := Parse(locator)
@@ -161,6 +162,10 @@ func DialWith(locator string, timeout time.Duration, o Options) (transport.Link,
 		return dialWS(l, timeout)
 	case "unixsock-stream":
 		return dialUnix(l, timeout)
+	case "unixpipe":
+		return dialPipe(l, timeout)
+	case "vsock":
+		return dialVsock(l, timeout)
 	case "serial":
 		return dialSerial(l, timeout)
 	default:
@@ -230,6 +235,10 @@ func ListenWith(locator string, o Options) (Listener, error) {
 		return listenWS(l, bound)
 	case "unixsock-stream":
 		return listenUnix(l, bound)
+	case "unixpipe":
+		return listenPipe(l, bound)
+	case "vsock":
+		return listenVsock(l, bound)
 	case "serial":
 		return listenSerial(l, bound)
 	default:

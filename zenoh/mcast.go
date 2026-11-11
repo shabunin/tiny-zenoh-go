@@ -32,6 +32,9 @@ func (s *Session) openMulticast(ep string) error {
 		ZID:     s.zid,
 		WhatAmI: s.cfg.Mode.whatAmI(),
 		Lease:   s.cfg.Lease,
+		// Like zenoh-rust: min(batch size, 8192). Group members ignore the
+		// JOINs of nodes with another batch size (zenoh-pico uses 2048).
+		BatchSize: min(s.cfg.BatchSize, protocol.MulticastBatchSize),
 	}, transport.MulticastCallbacks{
 		OnMessage: func(p *transport.MulticastPeer, m protocol.Message, _ bool) { s.mcastMessage(g, p, m) },
 		OnPeerGone: func(p *transport.MulticastPeer, _ error) {
