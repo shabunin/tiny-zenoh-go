@@ -175,6 +175,17 @@ session can publish, subscribe and serve queries itself.
   publications, queries answered by the device, LED driven by puts); an
   M5Stack Cardputer (ESP32-S3) on Wi-Fi connects to `zenohd` directly over
   TCP. Serial framing matches z-serial's byte vectors.
+- **Board tests** (`examples/boardtest`): a scripted run on the device against
+  a zenoh-rust harness (`host.py`) passes on both boards. It covers a querier
+  with matching status, a publisher waiting for a matching subscriber,
+  an advanced publisher serving a late zenoh-ext subscriber its history and
+  heartbeat, an advanced subscriber fetching a Rust publisher's history, and
+  liveliness tokens, gets and subscribers both ways. The M5StickC runs it over
+  serial with LZ4 and user/password authentication (through `gozenohd`), using
+  about 93 KB of its 176 KB heap. The Cardputer runs it over Wi-Fi three
+  times: against zenohd, against `gozenohd` with LZ4 and user/password, and
+  with the low-latency transport. It uses about 170–195 KB of its 303 KB heap
+  after a GC. The device reports what was negotiated (`Session.Transports()`).
 - **TinyGo**: TinyGo 0.44-built binaries publish to a Rust subscriber, both
   as a client (`examples/tinyput`) and as a peer directly connected to a Rust
   peer (`examples/tinypeer`), and as a client over UDP and over WebSocket
@@ -205,6 +216,11 @@ docker run -d --name zenohd2 --net=host eclipse/zenoh -l tcp/127.0.0.1:7448 --no
 ZENOH_MESH=tcp/127.0.0.1:7447,tcp/127.0.0.1:7448 go test -run Mesh ./zenoh/
 
 tinygo build -o /dev/null ./examples/tinyput    # TinyGo builds the full API
+
+# on a board: see examples/boardtest/{stickc,cardputer}/main.go for the
+# routers each needs, then
+python examples/boardtest/host.py tcp/127.0.0.1:7447 board/stickc/serial
+go run ./examples/boardtest/sim tcp/127.0.0.1:7447 board/sim/plain   # same run on the PC
 go run ./examples/zprobe                        # hex-dump a raw handshake
 ```
 
@@ -255,7 +271,8 @@ gozenoh/
 ├── link/             # locators, dial/listen: tcp, udp, tls, ws, unixsock-stream; link/quic: quic
 ├── zenoh/            # public API: Session (client/peer), pub/sub, queries, liveliness, Scout
 ├── cmd/gozenohd/      # pure-Go router
-└── examples/         # zprobe, tinycheck, tinyput, tinypeer, tinyserial
+└── examples/         # zprobe, tinycheck, tinyput, tinypeer, tinyserial,
+                      # boardtest (device test agent, Rust harness, StickC/Cardputer firmware)
 ```
 
 ## Design principles

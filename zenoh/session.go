@@ -415,6 +415,42 @@ func (s *Session) zidsOf(w protocol.WhatAmI) []ZID {
 	return out
 }
 
+// TransportInfo describes what was negotiated with a connected node.
+type TransportInfo struct {
+	ZID         ZID
+	WhatAmI     WhatAmI
+	Proto       string // protocol of the link the transport was made on
+	Links       int
+	BatchSize   int
+	QoS         bool
+	LowLatency  bool
+	Compression bool
+	MultiLink   bool
+	SharedMem   bool
+	AuthUser    string // the user the node authenticated as, if any
+}
+
+// Transports describes the unicast transports to the nodes we are
+// connected to (zenoh-rust: session.info().transports()).
+func (s *Session) Transports() []TransportInfo {
+	var out []TransportInfo
+	for _, f := range s.faceList() {
+		select {
+		case <-f.ready:
+		default:
+			continue
+		}
+		if f.tr == nil {
+			continue
+		}
+		out = append(out, TransportInfo{ZID: f.zid, WhatAmI: f.whatami, Proto: f.proto,
+			Links: f.tr.Links(), BatchSize: f.tr.BatchSize(), QoS: f.tr.QoS(),
+			LowLatency: f.tr.LowLatency(), Compression: f.tr.Compression(),
+			MultiLink: f.tr.MultiLink(), SharedMem: f.shm != nil, AuthUser: f.tr.AuthUser()})
+	}
+	return out
+}
+
 // Locators returns the locators this session listens on (peer mode), with
 // unspecified addresses expanded to the host's interface addresses.
 func (s *Session) Locators() []string {
