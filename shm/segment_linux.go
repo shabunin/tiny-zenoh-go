@@ -51,6 +51,13 @@ func createSegment(maxID uint64, size int) (*segment, error) {
 			_ = syscall.Close(fd)
 			continue
 		}
+		if unlinked(fd) {
+			// A cleanup unlinked the name between our create and our
+			// lock: the inode is detached, publishing its id would make
+			// peers open another file (or none). Pick another id.
+			_ = syscall.Close(fd)
+			continue
+		}
 		if err := syscall.Ftruncate(fd, int64(size)); err != nil {
 			_ = syscall.Unlink(path)
 			_ = syscall.Close(fd)
@@ -78,8 +85,10 @@ func openSegment(id uint64) (*segment, error) {
 		_ = syscall.Close(fd)
 		return nil, errSegmentGone // being torn down by its last user
 	}
+	// Holding a lock on an unlinked inode doesn't make its name valid again:
+	// a cleanup may have won before we took the lock.
 	var st syscall.Stat_t
-	if err := syscall.Fstat(fd, &st); err != nil || st.Size <= 0 || st.Size > 1<<40 {
+	if err := syscall.Fstat(fd, &st); err != nil || st.Nlink == 0 || st.Size <= 0 || st.Size > 1<<40 {
 		_ = syscall.Close(fd)
 		return nil, errSegmentGone
 	}
@@ -108,10 +117,27 @@ func (s *segment) close() {
 		_ = syscall.Munmap(s.mem)
 		s.mem = nil
 	}
-	if syscall.Flock(s.fd, syscall.LOCK_EX|syscall.LOCK_NB) == nil {
-		_ = syscall.Unlink(segPath(s.id))
-	}
+	unlinkLocked(s.fd, s.id)
 	_ = syscall.Close(s.fd)
+}
+
+// unlinked reports whether fd's inode no longer has a name.
+func unlinked(fd int) bool {
+	var st syscall.Stat_t
+	return syscall.Fstat(fd, &st) == nil && st.Nlink == 0
+}
+
+// unlinkLocked removes segment id's name if fd (open on it) gets the
+// exclusive lock, i.e. nobody else uses it. The lock is kept until fd is
+// closed, after the unlink, so that no opener can lock the inode in between;
+// and if another cleanup unlinked the inode before we got the lock, the name
+// may already be a new segment's, which must not be removed through a stale
+// fd (zenoh-rust #2873).
+func unlinkLocked(fd int, id uint64) {
+	if syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB) != nil || unlinked(fd) {
+		return
+	}
+	_ = syscall.Unlink(segPath(id))
 }
 
 func (s *segment) u32(off int) *uint32 { return (*uint32)(unsafe.Pointer(&s.mem[off])) }
@@ -141,9 +167,7 @@ func cleanupOrphans() {
 			if err != nil {
 				continue
 			}
-			if syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB) == nil {
-				_ = syscall.Unlink(segPath(id))
-			}
+			unlinkLocked(fd, id)
 			_ = syscall.Close(fd)
 		}
 	})
