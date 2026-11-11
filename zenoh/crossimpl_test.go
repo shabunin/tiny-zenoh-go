@@ -30,6 +30,7 @@ type peerEvent struct {
 	Shm        bool            `json:"shm"`
 	Priority   int             `json:"priority"`
 	Matching   *bool           `json:"matching"`
+	Miss       int             `json:"miss"`
 }
 
 type peerEventInner struct {

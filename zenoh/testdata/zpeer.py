@@ -17,6 +17,11 @@ usage: zpeer.py <router | json-config> <mode> <args...>
   querier <key>             declared querier: one get, print replies
   matching <pub|querier|querier-complete> <key> <secs>
                             print {"matching": bool} on each matching status change
+  advpub <key> <n> <secs>   advanced publisher (cache 10, miss detection with
+                            0.3s heartbeat, publisher detection): n puts "adv-<i>", ready, wait
+  advsub <key> <n> <hist|hb>  advanced subscriber (hist: history of late publishers,
+                            max 10, recovery with 1s periodic queries; hb: heartbeat recovery),
+                            print n samples and {"miss": n} events
   token <key> <secs>        hold a liveliness token
   livsub <key> <n>          liveliness subscriber with history, print n events
   bigsub <key> <n>          print size/sha256/shm of n samples
@@ -197,6 +202,41 @@ def main():
         time.sleep(secs)
         lst.undeclare()
         ent.undeclare()
+    elif mode == "advpub":
+        import zenoh.ext as zx
+        key, n, secs = args[0], int(args[1]), float(args[2])
+        pub = zx.declare_advanced_publisher(
+            s, key, cache=zx.CacheConfig(10),
+            sample_miss_detection=zx.MissDetectionConfig(heartbeat=0.3, sporadic_heartbeat=None),
+            publisher_detection=True)
+        for i in range(n):
+            pub.put(f"adv-{i}".encode())
+        emit(ready=True)
+        time.sleep(secs)
+        pub.undeclare()
+    elif mode == "advsub":
+        import zenoh.ext as zx
+        key, n, kind = args[0], int(args[1]), args[2]
+        count = [0]
+
+        def on_sample(smp):
+            emit(**sample_dict(smp))
+            count[0] += 1
+            if count[0] >= n:
+                done.set()
+
+        history = zx.HistoryConfig(detect_late_publishers=True, max_samples=10) if kind == "hist" else None
+        if kind == "hb":
+            recovery = zx.RecoveryConfig(periodic_queries=None, heartbeat=True)
+        else:  # the binding wants one of the two; gaps trigger queries anyway
+            import datetime
+            recovery = zx.RecoveryConfig(periodic_queries=datetime.timedelta(seconds=1), heartbeat=None)
+        sub = zx.declare_advanced_subscriber(s, key, on_sample, history=history, recovery=recovery)
+        ml = sub.sample_miss_listener(lambda m: emit(miss=m.nb))
+        emit(ready=True)
+        done.wait(30)
+        ml.undeclare()
+        sub.undeclare()
     elif mode == "token":
         key, secs = args[0], float(args[1])
         t = s.liveliness().declare_token(key)

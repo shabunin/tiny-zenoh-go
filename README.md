@@ -98,7 +98,7 @@ session can publish, subscribe and serve queries itself.
 | `transport`      | ✅ | Unicast session over stream links (length-prefixed batches) or packet links (one batch per datagram, batch size capped at the link MTU), both sides of the handshake (`Open` and `Accept`, with duplicate/self rejection) + negotiation, stream framing, FRAME batching with SNs, FRAGMENT split/reassembly, keep-alive, lease expiry, CLOSE. **QoS** (INIT ext `QoS`/`QoSLink`, 8 priorities × reliable/best-effort SN channels, priority in FRAME/FRAGMENT); **compression** (INIT ext 0x6, batch header byte, own pure-Go LZ4 block codec in `internal/lz4`); **multilink** (`Config.MaxLinks`: INIT/OPEN ext 0x4 with zenoh's RSA-512 PKCS#1 key proof, one transport over several links with per-link batch size/compression/lease, zenoh-rust's link selection by reliability and priority range, link loss without session loss); **multicast** (`NewMulticast` over a `MulticastLink`: periodic `JOIN` with next SNs, per-sender SN windows and reassembly, sender leases, CLOSE); **low latency** (`Config.LowLatency`: INIT ext 0x5, every network message sent alone with no FRAME/SN/fragmentation, u32 LE length prefix on streams). Imports no `net`. |
 | `link`           | ✅ TCP, UDP, UDP multicast, TLS, QUIC, WS, Unix, serial | Locator parsing incl. `?metadata` / `#config`; TCP; UDP (MTU 65487 like zenoh on Linux, one listener socket demultiplexed per remote address); UDP multicast groups `udp/224.x.x.x:port#iface=<name>;ttl=<n>` (send socket bound to the interface, own datagrams filtered); TLS with zenoh's config keys (`root_ca_certificate`, `listen_*`/`connect_*` certificate & key as `_file`/`_base64`/`_raw`, `enable_mtls`, `verify_name_on_connect`); QUIC in `link/quic` (ALPN `zenoh`/`hq-29`, one bidirectional stream, via `link.Register`); WebSocket `ws/host:port` (own minimal RFC 6455 code, one binary message per batch); Unix sockets `unixsock-stream/<path>` (flock'd `<path>.lock`, stale sockets replaced); serial `serial/<dev>#baudrate=N` (z-serial framing: COBS, CRC-32, I/A/R connect handshake, 1500-byte frames; Linux ttys opened raw with exclusive access; `link.NewSerial` wraps any byte stream, e.g. a TinyGo `machine.UART`). |
 | `shm`            | ✅ Linux | zenoh's POSIX shared memory, layout-compatible with zenoh-rust 1.x (SHM protocol v2): `/dev/shm/<id>.zenoh` metadata/data/auth segments, INIT/OPEN negotiation (challenges read from each other's auth segment), per-priority handoff counters, watchdog confirmation (50 ms) and validation (100 ms), refcounts and generations, garbage collection, orphan-segment cleanup. Enabled with `Config.SharedMemory` (`gozenohd --shm`): payloads ≥ 3 KiB to SHM-capable faces go through a 16 MiB pool; received SHM payloads are copied out. Stub returning `ErrUnsupported` elsewhere and on TinyGo. |
-| `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, admin space `@/<zid>/router`); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`), declaration push between peers, writer-side filtering, peers attached to routers); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), matching status and matching listeners on publishers and queriers, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress). |
+| `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, admin space `@/<zid>/router`); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`), declaration push between peers, writer-side filtering, peers attached to routers); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), matching status and matching listeners on publishers and queriers, **advanced pub/sub** (zenoh-ext compatible: `DeclareAdvancedPublisher` with cache, sequence numbers + heartbeats for miss detection, publisher detection; `DeclareAdvancedSubscriber` with history incl. late-joining publishers (`_max`, `_time` limits), in-order delivery, recovery of lost samples by gap queries / periodic queries / heartbeats, miss listeners, subscriber detection), `_anyke` replies, `_time` ranges (`ParseTimeRange`), source info on samples, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress). |
 
 ### Verified interop
 
@@ -160,6 +160,13 @@ session can publish, subscribe and serve queries itself.
   peer) see Rust subscribers and queryables come and go; Rust publishers
   and queriers (incl. `ALL_COMPLETE` targets) see Go subscribers and
   complete queryables, through both routers and peer to peer.
+- **Advanced pub/sub**: a Rust `AdvancedSubscriber` (history of late
+  publishers, recovery) gets a Go `AdvancedPublisher`'s cached samples and
+  recovers samples we drop on purpose from our cache, in order and without
+  reported misses; a Rust heartbeat-only subscriber fetches everything up to
+  our heartbeat's sequence number. A Go `AdvancedSubscriber` gets a Rust
+  publisher's history (late-publisher detection) and recovers from its
+  heartbeat. Through zenohd and through the Go router.
 - **Low latency**: a Rust peer with `transport/unicast/lowlatency: true`
   (QoS off) exchanges publications and queries with a Go peer both ways.
 - **Microcontrollers** (TinyGo 0.44): an M5StickC (ESP32) running
@@ -230,11 +237,10 @@ go run ./examples/zprobe                        # hex-dump a raw handshake
       single-stream protocol), ✅ WebSocket, ✅ Unix sockets; still QUIC
       multi-stream / mixed reliability, zenoh's "reliable UDP" (plaintext
       QUIC). ✅ serial.
-- [ ] **M8 — Advanced.** Still advanced pub/sub (cache/recovery).
-      ✅ shared memory (Linux), ✅ QoS negotiation & priorities,
-      ✅ compression, ✅ multilink, ✅ authentication (usrpwd, pubkey),
-      ✅ access control, ✅ low-latency transport, ✅ querier,
-      ✅ matching status.
+- [x] **M8 — Advanced.** ✅ shared memory (Linux), ✅ QoS negotiation &
+      priorities, ✅ compression, ✅ multilink, ✅ authentication (usrpwd,
+      pubkey), ✅ access control, ✅ low-latency transport, ✅ querier,
+      ✅ matching status, ✅ advanced pub/sub (zenoh-ext).
 
 ## Package layout
 
@@ -368,6 +374,18 @@ gozenoh/
   interest. For an `ALL_COMPLETE` querier only a *complete* queryable whose
   key *includes* the querier's key counts. A listener declared while
   matching is told so at once.
+- Chunks starting with `@` are *verbatim*: `*`, `$*` and `**` never match
+  them, only the identical chunk does (`a/**` does not cover `a/@adv/x`).
+  zenoh-ext relies on it to keep its `@adv` traffic away from subscribers.
+- Advanced pub/sub is plain zenoh traffic under `K/@adv/pub/<zid>/<eid>/<meta>`
+  (`uhlc` for `<eid>` when samples are ordered by timestamp, `_` for no
+  metadata): the publisher's cache is a queryable there answering
+  `_sn=a..b`, `_max=n` and `_time=[..]` with the cached samples on key `K`
+  (so subscribers query with `_anyke`, which lets replies use keys outside
+  the query's), its liveliness token has the same key, and its heartbeat
+  publishes the last sequence number as a u32 LE there. Samples carry the
+  SourceInfo extension `{zid, eid, sn}`, sn counting from 0. A subscriber
+  with no state that hears a heartbeat asks for everything up to it.
 - Low latency (INIT ext `0x5`, both sides must ask): zenoh-rust refuses it
   together with QoS, so `Config.LowLatency` turns QoS off; messages are
   never batched or fragmented, so each must fit the batch size, and
