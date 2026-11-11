@@ -33,6 +33,19 @@ type peerEvent struct {
 	Miss       int             `json:"miss"`
 	Zser       json.RawMessage `json:"zser"` // zsersub
 	ZserErr    *string         `json:"zser_err"`
+	// events mode
+	Ev          string  `json:"ev"`
+	ZID         string  `json:"zid"`
+	WhatAmI     string  `json:"whatami"`
+	QoS         bool    `json:"qos"`
+	Multicast   bool    `json:"multicast"`
+	Src         string  `json:"src"`
+	Dst         string  `json:"dst"`
+	Group       *string `json:"group"`
+	MTU         int     `json:"mtu"`
+	Streamed    bool    `json:"streamed"`
+	Priorities  []int   `json:"priorities"`
+	Reliability *string `json:"reliability"`
 }
 
 type peerEventInner struct {

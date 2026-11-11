@@ -286,6 +286,13 @@ type Session struct {
 	shm          *shm.Manager // nil without Config.SharedMemory
 	mlKey        *transport.MultiLinkKey
 	mcast        []*mcastGroup // multicast groups joined (Listen)
+
+	// Connectivity events (events.go). evMu orders announcements; evState
+	// and evListeners are guarded by mu.
+	evMu        sync.Mutex
+	evHooks     atomic.Pointer[evHooks]
+	evListeners []*EventsListener // in declaration order
+	evState     []*evEntry        // announced transports, in order
 }
 
 // Open starts a session. In client mode it connects to the first reachable
@@ -494,10 +501,15 @@ type TransportInfo struct {
 	Region     Region
 	Gateway    bool
 	RegionName string
+	// Multicast: a node heard on one of our multicast groups (zenoh-rust
+	// Transport::is_multicast); only ZID, WhatAmI, Proto, Links, BatchSize
+	// and QoS are set.
+	Multicast bool
 }
 
-// Transports describes the unicast transports to the nodes we are
-// connected to (zenoh-rust: session.info().transports()).
+// Transports describes the transports to the nodes we are connected to:
+// unicast ones, then the members of our multicast groups (zenoh-rust:
+// session.info().transports()).
 func (s *Session) Transports() []TransportInfo {
 	var out []TransportInfo
 	for _, f := range s.faceList() {
@@ -509,14 +521,9 @@ func (s *Session) Transports() []TransportInfo {
 		if f.tr == nil {
 			continue
 		}
-		out = append(out, TransportInfo{ZID: f.zid, WhatAmI: f.whatami, Proto: f.proto,
-			Links: f.tr.Links(), BatchSize: f.tr.BatchSize(), QoS: f.tr.QoS(),
-			LowLatency: f.tr.LowLatency(), Compression: f.tr.Compression(),
-			MultiLink: f.tr.MultiLink(), SharedMem: f.shm != nil, AuthUser: f.tr.AuthUser(),
-			PriorityStreams: f.tr.PriorityStreams(), Region: f.region,
-			Gateway: f.remoteBound == BoundSouth, RegionName: f.regionName})
+		out = append(out, f.transportInfo())
 	}
-	return out
+	return append(out, s.mcastTransports()...)
 }
 
 // Locators returns the locators this session listens on (peer mode), with

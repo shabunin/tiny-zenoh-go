@@ -2,6 +2,7 @@ package zenoh
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/shabunin/tiny-zenoh-go/link"
 	"github.com/shabunin/tiny-zenoh-go/protocol"
@@ -17,6 +18,11 @@ import (
 
 type mcastGroup struct {
 	tr *transport.Multicast
+	// For connectivity events: the group locator, our sender locator, the
+	// link MTU and the batch size.
+	locator, src string
+	mtu          int
+	batch        int
 	// Key-expression ids declared by each sender (by address); guarded by
 	// Session.mu.
 	exprs map[string]map[uint16]string
@@ -27,20 +33,43 @@ func (s *Session) openMulticast(ep string) error {
 	if err != nil {
 		return fmt.Errorf("zenoh: multicast %s: %w", ep, err)
 	}
-	g := &mcastGroup{exprs: map[string]map[uint16]string{}}
+	batch := min(s.cfg.BatchSize, protocol.MulticastBatchSize)
+	g := &mcastGroup{exprs: map[string]map[uint16]string{}, locator: ep, mtu: l.MTU(), batch: int(batch)}
+	if i := strings.IndexByte(ep, '#'); i >= 0 {
+		g.locator = ep[:i] // without the link configuration
+	}
+	if g.mtu > 0 && g.mtu < g.batch {
+		g.batch = g.mtu
+	}
+	if a, ok := l.(interface{ LocalAddr() string }); ok {
+		g.src = "udp/" + a.LocalAddr()
+	}
 	tr, err := transport.NewMulticast(l, transport.MulticastConfig{
 		ZID:     s.zid,
 		WhatAmI: s.cfg.Mode.whatAmI(),
 		Lease:   s.cfg.Lease,
 		// Like zenoh-rust: min(batch size, 8192). Group members ignore the
 		// JOINs of nodes with another batch size (zenoh-pico uses 2048).
-		BatchSize: min(s.cfg.BatchSize, protocol.MulticastBatchSize),
+		BatchSize: batch,
 	}, transport.MulticastCallbacks{
+		OnPeer: func(p *transport.MulticastPeer) {
+			if h := s.evHooks.Load(); h != nil {
+				h.member(g, p, true)
+			}
+		},
 		OnMessage: func(p *transport.MulticastPeer, m protocol.Message, _ bool) { s.mcastMessage(g, p, m) },
 		OnPeerGone: func(p *transport.MulticastPeer, _ error) {
 			s.mu.Lock()
 			delete(g.exprs, p.Addr)
 			s.mu.Unlock()
+			if h := s.evHooks.Load(); h != nil {
+				h.member(g, p, false)
+			}
+		},
+		OnClose: func(error) {
+			if h := s.evHooks.Load(); h != nil {
+				h.groupDown(g)
+			}
 		},
 	})
 	if err != nil {

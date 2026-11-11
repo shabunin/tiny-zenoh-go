@@ -638,38 +638,32 @@ func (f *face) adminTransportJSON() string {
 	)
 }
 
-func (f *face) adminLinkJSON(l adminLink) string {
-	mtu := l.info.MTU
-	if mtu == 0 {
-		mtu = 65480 // zenoh-rust's TCP link MTU
+func (f *face) adminLinkJSON(l adminLink) string { return linkJSON(f.linkOf(l)) }
+
+// linkJSON is a link as zenoh-rust's admin space shows it.
+func linkJSON(k Link) string {
+	auth, group := "null", "null"
+	if k.AuthIdentifier != "" {
+		auth = jsonStr(k.AuthIdentifier)
 	}
-	ifaces := link.LocalInterfaces(l.info.Link)
-	if ifaces == nil {
-		ifaces = []string{}
-	}
-	auth := "null"
-	if cn := link.PeerCommonName(l.info.Link); cn != "" {
-		auth = jsonStr(cn)
+	if k.Group != "" {
+		group = jsonStr(k.Group)
 	}
 	fields := []jsonField{
-		{"src", jsonStr(l.src)},
-		{"dst", jsonStr(l.dst)},
-		{"group", "null"},
-		{"mtu", strconv.Itoa(mtu)},
-		{"is_streamed", jsonBool(l.info.Streamed)},
-		{"interfaces", jsonStrs(ifaces)},
+		{"src", jsonStr(k.Src)},
+		{"dst", jsonStr(k.Dst)},
+		{"group", group},
+		{"mtu", strconv.Itoa(k.MTU)},
+		{"is_streamed", jsonBool(k.Streamed)},
+		{"interfaces", jsonStrs(k.Interfaces)},
 		{"auth_identifier", auth},
 	}
-	if f.tr != nil && f.tr.QoS() {
-		lo, hi := protocol.PriorityControl, protocol.PriorityBackground
-		if l.info.HasRange {
-			lo, hi = l.info.PrioLo, l.info.PrioHi
-		}
+	if p := k.Priorities; p != nil {
 		fields = append(fields, jsonField{"priorities", jsonObj(
-			jsonField{"start", jsonStr(rustPriorityNames[lo&7])}, jsonField{"end", jsonStr(rustPriorityNames[hi&7])})})
+			jsonField{"start", jsonStr(rustPriorityNames[p.Start&7])}, jsonField{"end", jsonStr(rustPriorityNames[p.End&7])})})
 	}
 	rel := "BestEffort"
-	if l.info.Reliable {
+	if k.Reliability == Reliable {
 		rel = "Reliable"
 	}
 	fields = append(fields, jsonField{"reliability", jsonStr(rel)})
@@ -723,6 +717,9 @@ func (s *Session) adminFaceUp(f *face) {
 	s.mu.Lock()
 	f.published = append([]adminLink(nil), links...)
 	s.mu.Unlock()
+	if h := s.evHooks.Load(); h != nil && f.tr != nil {
+		h.faceUp(f, links)
+	}
 	if !s.adminWatched(tk + "/**") {
 		return
 	}
@@ -744,6 +741,9 @@ func (s *Session) adminLinksChanged(f *face) {
 	old := f.published
 	f.published = append([]adminLink(nil), now...)
 	s.mu.Unlock()
+	if h := s.evHooks.Load(); h != nil {
+		h.faceLinks(f, now)
+	}
 	if !s.adminWatched(tk + "/link/*") {
 		return
 	}
@@ -769,6 +769,9 @@ func (s *Session) adminLinksChanged(f *face) {
 
 // adminFaceDown publishes the end of a transport and its links.
 func (s *Session) adminFaceDown(f *face, links []adminLink) {
+	if h := s.evHooks.Load(); h != nil {
+		h.faceDown(f)
+	}
 	tk := "/transport/unicast/" + f.zid.String()
 	if !s.adminWatched(tk + "/**") {
 		return

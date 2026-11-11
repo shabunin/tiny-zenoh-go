@@ -32,6 +32,8 @@ usage: zpeer.py <router | json-config> <mode> <args...>
   bigget <selector> <size>  get with a pattern body; print reply digests
   zsersub <key>             deserialize one zenoh-ext tuple sample, print it
   zserpub <key>             publish one zenoh-ext serialized tuple
+  events <secs>             print {"zid": ...}, then transport and link events
+                            (with history) for secs seconds
 """
 import hashlib
 import json
@@ -275,6 +277,31 @@ def main():
             emit(ready=True)
             done.wait(10)
             h.undeclare()
+    elif mode == "events":
+        secs = float(args[0])
+        emit(zid=str(s.zid()))
+        kind = lambda k: "DELETE" if k == zenoh.SampleKind.DELETE else "PUT"
+
+        def on_transport(ev):
+            t = ev.transport
+            emit(ev="transport", kind=kind(ev.kind), zid=str(t.zid), whatami=str(t.whatami),
+                 qos=t.is_qos, multicast=t.is_multicast, shm=t.is_shm)
+
+        def on_link(ev):
+            l = ev.link
+            pr = l.priorities
+            emit(ev="link", kind=kind(ev.kind), zid=str(l.zid), src=str(l.src), dst=str(l.dst),
+                 group=str(l.group) if l.group is not None else None, mtu=l.mtu,
+                 streamed=l.is_streamed, interfaces=list(l.interfaces), auth=l.auth_identifier,
+                 priorities=[int(pr[0]), int(pr[1])] if pr is not None else None,
+                 reliability=str(l.reliability) if l.reliability is not None else None)
+
+        lt = s.info.declare_transport_events_listener(on_transport, history=True)
+        ll = s.info.declare_link_events_listener(on_link, history=True)
+        emit(ready=True)
+        time.sleep(secs)
+        lt.undeclare()
+        ll.undeclare()
     elif mode == "token":
         key, secs = args[0], float(args[1])
         t = s.liveliness().declare_token(key)
