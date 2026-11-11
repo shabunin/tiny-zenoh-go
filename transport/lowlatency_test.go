@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 func llNode(t *testing.T, ll bool) *mlNode {

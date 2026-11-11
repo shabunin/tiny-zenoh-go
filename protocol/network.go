@@ -1,7 +1,7 @@
 package protocol
 
 import (
-	"github.com/shabunin/gozenoh/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
 
 // Network messages travel inside FRAMEs. Layouts follow zenoh-rust's codec

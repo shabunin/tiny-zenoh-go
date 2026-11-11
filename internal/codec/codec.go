@@ -14,9 +14,9 @@ import "errors"
 // Errors returned by Reader.
 var (
 	// ErrShortBuffer means a read ran past the end of the buffer.
-	ErrShortBuffer = errors.New("gozenoh/codec: buffer underrun")
+	ErrShortBuffer = errors.New("tiny-zenoh-go/codec: buffer underrun")
 	// ErrVarintTooLong means a VLE value did not terminate within 9 bytes.
-	ErrVarintTooLong = errors.New("gozenoh/codec: varint too long")
+	ErrVarintTooLong = errors.New("tiny-zenoh-go/codec: varint too long")
 )
 
 // Common message-header byte layout (primitives §"Message Header Byte"):

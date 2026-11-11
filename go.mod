@@ -1,4 +1,4 @@
-module github.com/shabunin/gozenoh
+module github.com/shabunin/tiny-zenoh-go
 
 go 1.26.10
 

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // setupQoS is setup with a router that answers INIT with ackExts.

@@ -1,4 +1,4 @@
-// Package zenoh is the user-facing API of gozenoh: a pure-Go Zenoh client and
+// Package zenoh is the user-facing API of tiny-zenoh-go: a pure-Go Zenoh client and
 // peer.
 //
 //	s, err := zenoh.Open(zenoh.Config{Connect: []string{"tcp/127.0.0.1:7447"}})
@@ -28,11 +28,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/shabunin/gozenoh/keyexpr"
-	"github.com/shabunin/gozenoh/link"
-	"github.com/shabunin/gozenoh/protocol"
-	"github.com/shabunin/gozenoh/shm"
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/keyexpr"
+	"github.com/shabunin/tiny-zenoh-go/link"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
+	"github.com/shabunin/tiny-zenoh-go/shm"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // ErrSessionClosed is returned by operations on a closed session.

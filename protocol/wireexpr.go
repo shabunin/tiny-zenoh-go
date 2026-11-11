@@ -1,6 +1,6 @@
 package protocol
 
-import "github.com/shabunin/gozenoh/internal/codec"
+import "github.com/shabunin/tiny-zenoh-go/internal/codec"
 
 // WireExpr is a key expression as carried inside a network message. Instead of
 // repeating the full text every time, Zenoh lets peers declare a numeric

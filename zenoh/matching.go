@@ -3,8 +3,8 @@ package zenoh
 import (
 	"errors"
 
-	"github.com/shabunin/gozenoh/keyexpr"
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/keyexpr"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Matching status (zenoh-rust api/matching.rs). A publisher matches when some

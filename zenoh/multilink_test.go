@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shabunin/gozenoh/link"
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/link"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 func openMLPeer(t *testing.T, maxLinks int, listen []string, connect ...string) *Session {

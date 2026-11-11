@@ -1,7 +1,7 @@
 package protocol
 
 import (
-	"github.com/shabunin/gozenoh/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
 
 // Data sub-messages: the payload-carrying bodies of PUSH, REQUEST and RESPONSE.

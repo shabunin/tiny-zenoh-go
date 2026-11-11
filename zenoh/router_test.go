@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// openRouter starts a gozenoh router on loopback.
+// openRouter starts a tiny-zenoh-go router on loopback.
 func openRouter(t *testing.T) *Session {
 	t.Helper()
 	r, err := Open(Config{Mode: ModeRouter, Listen: []string{"tcp/127.0.0.1:0"},

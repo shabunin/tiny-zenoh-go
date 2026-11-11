@@ -12,7 +12,7 @@ import (
 	"errors"
 	"io"
 
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Link is a connection between two Zenoh nodes: by default a reliable,

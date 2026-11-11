@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shabunin/gozenoh/internal/codec"
-	"github.com/shabunin/gozenoh/link"
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/link"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Hello describes a node found by scouting.

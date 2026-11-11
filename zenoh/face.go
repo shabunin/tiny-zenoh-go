@@ -3,10 +3,10 @@ package zenoh
 import (
 	"sync"
 
-	"github.com/shabunin/gozenoh/keyexpr"
-	"github.com/shabunin/gozenoh/protocol"
-	"github.com/shabunin/gozenoh/shm"
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/keyexpr"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
+	"github.com/shabunin/tiny-zenoh-go/shm"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // initialInterestID is the implicit interest under which zenoh peers push all

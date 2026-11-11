@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shabunin/gozenoh/link"
+	"github.com/shabunin/tiny-zenoh-go/link"
 )
 
 // mcastLocator returns a fresh group locator on the default interface; the

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shabunin/gozenoh/zenoh"
+	"github.com/shabunin/tiny-zenoh-go/zenoh"
 )
 
 // ErrNoHarness means no harness subscribed to the run's status in time.

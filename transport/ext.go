@@ -1,6 +1,6 @@
 package transport
 
-import "github.com/shabunin/gozenoh/protocol"
+import "github.com/shabunin/tiny-zenoh-go/protocol"
 
 // HandshakeExt runs an optional extension exchange inside the INIT/OPEN
 // handshake (zenoh's shared-memory negotiation is one). A fresh value is made

@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/shabunin/gozenoh/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
 
 func netRoundTrip(t *testing.T, m Message) {

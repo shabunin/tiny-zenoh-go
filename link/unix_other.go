@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 var errNoUnix = errors.New("link: unixsock-stream is not available on this platform")

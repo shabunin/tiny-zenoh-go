@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // UDP links (zenoh-rust io/zenoh-links/zenoh-link-udp): one batch per

@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // Unix domain stream sockets, "unixsock-stream/<path>" (zenoh-rust

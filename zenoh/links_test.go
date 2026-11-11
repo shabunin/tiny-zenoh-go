@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shabunin/gozenoh/internal/testcert"
-	"github.com/shabunin/gozenoh/link"
-	_ "github.com/shabunin/gozenoh/link/quic"
+	"github.com/shabunin/tiny-zenoh-go/internal/testcert"
+	"github.com/shabunin/tiny-zenoh-go/link"
+	_ "github.com/shabunin/tiny-zenoh-go/link/quic"
 )
 
 // Sessions over UDP and TLS links, Go to Go and Go to Rust.

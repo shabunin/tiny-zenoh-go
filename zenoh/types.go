@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Re-exported protocol types.

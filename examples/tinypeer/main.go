@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/shabunin/gozenoh/zenoh"
+	"github.com/shabunin/tiny-zenoh-go/zenoh"
 )
 
 func main() {

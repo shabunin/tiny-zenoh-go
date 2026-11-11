@@ -29,7 +29,7 @@ func Write(dir string) (Files, error) {
 	}
 	now := time.Now()
 	caTmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "gozenoh test CA"},
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "tiny-zenoh-go test CA"},
 		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour),
 		IsCA: true, BasicConstraintsValid: true,
 		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,

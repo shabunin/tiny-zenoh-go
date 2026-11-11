@@ -3,7 +3,7 @@ package protocol
 import (
 	"errors"
 
-	"github.com/shabunin/gozenoh/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
 
 // ErrReservedExtEnc is returned when an extension uses the reserved ENC value.

@@ -3,7 +3,7 @@
 package shm
 
 import (
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Manager is unavailable on this platform.

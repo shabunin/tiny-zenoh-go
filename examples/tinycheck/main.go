@@ -1,4 +1,4 @@
-// Command tinycheck is a minimal program that exercises the gozenoh core
+// Command tinycheck is a minimal program that exercises the tiny-zenoh-go core
 // packages. Its purpose is to prove that the codec and keyexpr packages compile
 // and run under TinyGo (no reflection, no unsupported stdlib):
 //
@@ -7,8 +7,8 @@
 package main
 
 import (
-	"github.com/shabunin/gozenoh/internal/codec"
-	"github.com/shabunin/gozenoh/keyexpr"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/keyexpr"
 )
 
 func main() {
@@ -31,5 +31,5 @@ func main() {
 	if !keyexpr.Intersect("a/*/c", "a/b/c") {
 		panic("keyexpr intersect failed")
 	}
-	println("gozenoh core OK:", n, s)
+	println("tiny-zenoh-go core OK:", n, s)
 }

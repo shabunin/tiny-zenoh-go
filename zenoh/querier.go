@@ -1,7 +1,7 @@
 package zenoh
 
 import (
-	"github.com/shabunin/gozenoh/keyexpr"
+	"github.com/shabunin/tiny-zenoh-go/keyexpr"
 )
 
 // Querier sends queries repeatedly on one key expression, with fixed target,

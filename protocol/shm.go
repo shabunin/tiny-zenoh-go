@@ -3,7 +3,7 @@ package protocol
 import (
 	"errors"
 
-	"github.com/shabunin/gozenoh/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
 
 // Shared-memory payloads (zenoh-rust commons/zenoh-codec/src/core/shm.rs and

@@ -3,7 +3,7 @@ package protocol
 import (
 	"errors"
 
-	"github.com/shabunin/gozenoh/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
 
 // ErrUnknownMessage is returned by the decoders for an unrecognized ID.

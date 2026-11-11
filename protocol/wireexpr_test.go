@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/shabunin/gozenoh/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
 
 func TestWireExprRoundTrip(t *testing.T) {

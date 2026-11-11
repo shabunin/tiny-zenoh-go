@@ -3,7 +3,7 @@ package transport
 import (
 	"fmt"
 
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // QoS negotiation (zenoh-rust io/zenoh-transport/src/unicast/establishment/

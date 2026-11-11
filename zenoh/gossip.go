@@ -1,8 +1,8 @@
 package zenoh
 
 import (
-	"github.com/shabunin/gozenoh/link"
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/link"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Gossip scouting between peers (zenoh-rust zenoh/src/net/protocol/gossip.rs,

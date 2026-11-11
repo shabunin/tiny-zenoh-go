@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Peer-mode cross tests: gozenoh peers against Rust Zenoh peers, directly
+// Peer-mode cross tests: tiny-zenoh-go peers against Rust Zenoh peers, directly
 // (no router). Need ZENOH_PY (see crossimpl_test.go).
 
 func freeLocator(t *testing.T) string {

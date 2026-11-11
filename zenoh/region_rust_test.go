@@ -61,7 +61,7 @@ func TestRegionsRustRouterByName(t *testing.T) {
 			map[string]any{"filters": []any{map[string]any{"region_names": []string{"red"}}}},
 			map[string]any{"filters": []any{map[string]any{"region_names": []string{"blue"}}}},
 		}},
-	}), true, "token", "gozenoh/test/regions/hold", "60")
+	}), true, "token", "tiny-zenoh-go/test/regions/hold", "60")
 	red := openRegionNode(t, regionOpts{mode: ModePeer, name: "red"}, l)
 	blue := openRegionNode(t, regionOpts{mode: ModePeer, name: "blue"}, l)
 	red2 := openRegionNode(t, regionOpts{mode: ModePeer, name: "red"}, l)
@@ -101,7 +101,7 @@ func TestRegionsRustPeerGateway(t *testing.T) {
 		"scouting/multicast/enabled": false,
 		"gateway": map[string]any{"south": []any{map[string]any{"filters": []any{
 			map[string]any{"modes": []string{"peer"}, "region_names": []string{"cell"}}}}}},
-	}), true, "token", "gozenoh/test/regions/hold", "60")
+	}), true, "token", "tiny-zenoh-go/test/regions/hold", "60")
 	s := openRegionNode(t, regionOpts{mode: ModePeer, name: "cell"}, l)
 	n := openRegionNode(t, regionOpts{mode: ModePeer}, l)
 	waitFor(t, "attached", func() bool { return len(s.PeersZID()) == 1 && len(n.PeersZID()) == 1 })

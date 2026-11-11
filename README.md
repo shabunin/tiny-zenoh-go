@@ -1,4 +1,4 @@
-# gozenoh
+# tiny-zenoh-go
 
 A pure-Go implementation of the [Zenoh](https://zenoh.io) protocol — no cgo, no
 Rust, no C bindings. The whole stack, including the public `zenoh` API, also
@@ -7,7 +7,7 @@ outside the standard library; the optional QUIC link (`link/quic`) uses the
 pure-Go [quic-go](https://github.com/quic-go/quic-go).
 
 > **Status: client, peer and router networks work with real Zenoh.**
-> A gozenoh session connects to `zenohd` as a client, runs as a peer talking
+> A tiny-zenoh-go session connects to `zenohd` as a client, runs as a peer talking
 > directly to other peers (Go or Rust), or runs as a **router** (`gozenohd`)
 > that Rust and Go clients and peers attach to — found by multicast scouting —
 > and that joins router meshes with other gozenohd and `zenohd` routers.
@@ -72,7 +72,7 @@ go run ./cmd/gozenohd -l udp/0.0.0.0:7447 -l tls/0.0.0.0:7448 --tls-cert srv.pem
 ```
 
 QUIC uses the same TLS settings; enable it with a blank import:
-`import _ "github.com/shabunin/gozenoh/link/quic"` (gozenohd already does,
+`import _ "github.com/shabunin/tiny-zenoh-go/link/quic"` (gozenohd already does,
 `-l quic/0.0.0.0:7447 --tls-cert … --tls-key …`).
 
 TLS for a session — or put zenoh's keys in the locator itself
@@ -102,9 +102,9 @@ session can publish, subscribe and serve queries itself.
 
 ### Verified interop
 
-- **gozenoh ↔ zenohd**: pub/sub, publisher key-expr ids, 300 KB fragmented
+- **tiny-zenoh-go ↔ zenohd**: pub/sub, publisher key-expr ids, 300 KB fragmented
   payloads, queries with error replies, the router's admin space, liveliness.
-- **gozenoh ↔ Rust Zenoh** (via the official Python binding through zenohd):
+- **tiny-zenoh-go ↔ Rust Zenoh** (via the official Python binding through zenohd):
   Go→Rust and Rust→Go pub/sub (encoding schema, attachments, delete),
   Go `Get` → Rust queryable and Rust `get` → Go queryable (incl. error
   replies), liveliness tokens both ways (history + delete on undeclare).
@@ -234,7 +234,7 @@ python -m venv zpy && zpy/bin/pip install 'eclipse-zenoh~=1.10.0'
 export ZENOH_PY=$PWD/zpy/bin/python
 
 ZENOH_MULTICAST=1 go test -race -count=1 ./...   # ZENOH_MULTICAST: also test scouting + multicast groups
-ZENOH_ROUTER=go ZENOH_PY=... go test ./zenoh/    # same suites, gozenoh as the router
+ZENOH_ROUTER=go ZENOH_PY=... go test ./zenoh/    # same suites, tiny-zenoh-go as the router
 
 # router meshes: one or two zenohd routers not connected to each other
 docker run -d --name zenohd2 --net=host eclipse/zenoh -l tcp/127.0.0.1:7448 --no-multicast-scouting
@@ -296,7 +296,7 @@ go run ./examples/zprobe                        # hex-dump a raw handshake
 ## Package layout
 
 ```
-gozenoh/
+tiny-zenoh-go/
 ├── internal/codec/   # wire primitives (VLE, framing, headers)
 ├── keyexpr/          # key expressions (match/intersect/include, canon)
 ├── protocol/         # every message type + extensions, encode/decode
@@ -334,13 +334,13 @@ gozenoh/
   Gateways learn this from the peer's gossip. The rule doesn't cover
   everything: if a peer publishes to routers `a1` and `b2`, a subscriber
   on `a1` gets each sample twice (once directly, once through `b2` and the
-  mesh), and gozenoh does the same.
+  mesh), and tiny-zenoh-go does the same.
 - A gateway router keeps a separate link-state mesh per router region (a
   south mesh flags it as a gateway in its link state). The routers south
   of it see an ordinary router; it announces into each mesh, as their
   source, what it knows from outside that mesh. Two gateways between the
   same meshes must not re-announce what they learnt from each other, or a
-  declaration would keep itself alive after its source left; gozenoh skips
+  declaration would keep itself alive after its source left; tiny-zenoh-go skips
   sources that are themselves nodes of the target mesh. Data
   crosses at the highest-ZID gateway of the subregion unless it entered
   the mesh network at a gateway (its own session, clients, peers), which
@@ -424,7 +424,7 @@ gozenoh/
   confirmed until the receiver decrements the sender's handoff counter for
   that priority. zenoh-rust **mlocks** its pool and silently stops sending
   SHM if that fails: its 16 MiB default exceeds the common 8 MiB
-  `RLIMIT_MEMLOCK`. gozenoh's mlock is best effort.
+  `RLIMIT_MEMLOCK`. tiny-zenoh-go's mlock is best effort.
 - Serial frames are `COBS(flags | len u16 LE | payload | CRC-32 LE) 0x00`.
   The CRC is computed the reflected way but with the *unreflected*
   polynomial 0x04C11DB7 (Go: `crc32.MakeTable(0x04C11DB7)`), so it is not
@@ -442,7 +442,7 @@ gozenoh/
   a transport only when a handshake *completes*, so if a dialer refuses its
   own link as a duplicate after OPEN, the peer has already set up that
   transport, and tearing it down can take the other, good, link with it.
-  gozenoh refuses duplicates right after INIT ACK (unless multilink needs
+  tiny-zenoh-go refuses duplicates right after INIT ACK (unless multilink needs
   the key proof from OPEN). Between two Go nodes the smaller ZID also waits
   ~1 s before dialing, else each could keep its own handshake and refuse
   the other's, leaving no link.

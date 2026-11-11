@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/shabunin/gozenoh/internal/codec"
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Errors reported by the transport (via Open or Callbacks.OnClose).

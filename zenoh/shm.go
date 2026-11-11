@@ -4,9 +4,9 @@ import (
 	"errors"
 	"sync/atomic"
 
-	"github.com/shabunin/gozenoh/protocol"
-	"github.com/shabunin/gozenoh/shm"
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
+	"github.com/shabunin/tiny-zenoh-go/shm"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // Shared memory (Config.SharedMemory): payloads to and from same-host nodes

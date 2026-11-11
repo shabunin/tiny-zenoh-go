@@ -3,8 +3,8 @@ package zenoh
 import (
 	"sync"
 
-	"github.com/shabunin/gozenoh/keyexpr"
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/keyexpr"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 func (s *Session) dispatchSample(smp Sample) {

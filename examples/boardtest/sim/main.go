@@ -8,9 +8,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/shabunin/gozenoh/examples/boardtest/agent"
-	"github.com/shabunin/gozenoh/transport"
-	"github.com/shabunin/gozenoh/zenoh"
+	"github.com/shabunin/tiny-zenoh-go/examples/boardtest/agent"
+	"github.com/shabunin/tiny-zenoh-go/transport"
+	"github.com/shabunin/tiny-zenoh-go/zenoh"
 )
 
 func main() {

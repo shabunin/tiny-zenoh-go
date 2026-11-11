@@ -32,8 +32,8 @@ package shm
 import (
 	"errors"
 
-	"github.com/shabunin/gozenoh/protocol"
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // ErrUnsupported is returned by New where shared memory is not implemented.

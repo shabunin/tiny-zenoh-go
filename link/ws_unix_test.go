@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 func TestWebSocket(t *testing.T) {

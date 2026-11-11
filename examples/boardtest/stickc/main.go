@@ -16,10 +16,10 @@ import (
 	"machine"
 	"time"
 
-	"github.com/shabunin/gozenoh/examples/boardtest/agent"
-	"github.com/shabunin/gozenoh/link"
-	"github.com/shabunin/gozenoh/transport"
-	"github.com/shabunin/gozenoh/zenoh"
+	"github.com/shabunin/tiny-zenoh-go/examples/boardtest/agent"
+	"github.com/shabunin/tiny-zenoh-go/link"
+	"github.com/shabunin/tiny-zenoh-go/transport"
+	"github.com/shabunin/tiny-zenoh-go/zenoh"
 )
 
 type uartPort struct{ u *machine.UART }

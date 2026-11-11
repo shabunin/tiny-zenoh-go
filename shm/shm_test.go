@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 func pair(t *testing.T, reliable bool) (*Manager, *Manager, *Link, *Link) {

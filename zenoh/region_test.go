@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // regionOf follows zenoh-rust compute_region_of.

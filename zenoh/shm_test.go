@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shabunin/gozenoh/shm"
+	"github.com/shabunin/tiny-zenoh-go/shm"
 )
 
 // pattern matches zpeer.py's pattern().

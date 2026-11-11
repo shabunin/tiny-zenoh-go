@@ -5,7 +5,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // memPrioLink is an in-memory PriorityLink: a pipe for Control and one pipe

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"math"
 
-	"github.com/shabunin/gozenoh/internal/codec"
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Router link-state network, mirroring zenoh-rust's

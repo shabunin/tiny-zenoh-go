@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shabunin/gozenoh/internal/testcert"
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/internal/testcert"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 func TestParseConfig(t *testing.T) {

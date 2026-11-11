@@ -3,8 +3,8 @@ package transport
 import (
 	"fmt"
 
-	"github.com/shabunin/gozenoh/internal/codec"
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // rxState is the receive side of one sender: a sequence-number window and

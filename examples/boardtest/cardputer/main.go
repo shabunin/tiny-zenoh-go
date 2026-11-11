@@ -30,10 +30,10 @@ import (
 	nl "tinygo.org/x/drivers/netlink"
 	espnet "tinygo.org/x/espradio/netlink"
 
-	"github.com/shabunin/gozenoh/examples/boardtest/agent"
-	"github.com/shabunin/gozenoh/link"
-	"github.com/shabunin/gozenoh/transport"
-	"github.com/shabunin/gozenoh/zenoh"
+	"github.com/shabunin/tiny-zenoh-go/examples/boardtest/agent"
+	"github.com/shabunin/tiny-zenoh-go/link"
+	"github.com/shabunin/tiny-zenoh-go/transport"
+	"github.com/shabunin/tiny-zenoh-go/zenoh"
 )
 
 var hosts = "192.168.1.10" // comma-separated, set with -ldflags -X main.hosts=

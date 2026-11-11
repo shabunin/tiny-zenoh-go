@@ -6,10 +6,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/shabunin/gozenoh/keyexpr"
-	"github.com/shabunin/gozenoh/link"
-	"github.com/shabunin/gozenoh/protocol"
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/keyexpr"
+	"github.com/shabunin/tiny-zenoh-go/link"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // Access control (zenoh-rust zenoh/src/net/routing/interceptor/

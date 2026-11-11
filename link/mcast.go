@@ -5,7 +5,7 @@ import (
 	"net"
 	"strconv"
 
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // Multicast links, "udp/<group>:<port>#iface=<name>;ttl=<n>" (zenoh-rust

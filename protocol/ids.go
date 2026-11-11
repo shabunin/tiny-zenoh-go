@@ -5,7 +5,7 @@
 // The package is pure data + codec and TinyGo-compatible; it performs no I/O.
 package protocol
 
-import "github.com/shabunin/gozenoh/internal/codec"
+import "github.com/shabunin/tiny-zenoh-go/internal/codec"
 
 // ProtocolVersion is the Zenoh wire version proposed in INIT.
 //

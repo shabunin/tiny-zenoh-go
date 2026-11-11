@@ -24,12 +24,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/shabunin/gozenoh/link"
-	_ "github.com/shabunin/gozenoh/link/quic" // quic/ locators (not in TinyGo builds)
-	"github.com/shabunin/gozenoh/protocol"
-	"github.com/shabunin/gozenoh/shm"
-	"github.com/shabunin/gozenoh/transport"
-	"github.com/shabunin/gozenoh/zenoh"
+	"github.com/shabunin/tiny-zenoh-go/link"
+	_ "github.com/shabunin/tiny-zenoh-go/link/quic" // quic/ locators (not in TinyGo builds)
+	"github.com/shabunin/tiny-zenoh-go/protocol"
+	"github.com/shabunin/tiny-zenoh-go/shm"
+	"github.com/shabunin/tiny-zenoh-go/transport"
+	"github.com/shabunin/tiny-zenoh-go/zenoh"
 )
 
 type list []string

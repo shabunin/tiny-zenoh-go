@@ -3,7 +3,7 @@ package protocol
 import (
 	"errors"
 
-	"github.com/shabunin/gozenoh/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
 
 // Scouting message ids. Scouting messages travel alone in a UDP datagram

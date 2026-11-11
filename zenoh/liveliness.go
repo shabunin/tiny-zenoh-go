@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shabunin/gozenoh/keyexpr"
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/keyexpr"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Liveliness gives access to liveliness tokens: lightweight presence markers

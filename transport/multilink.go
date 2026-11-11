@@ -9,8 +9,8 @@ import (
 	"math/big"
 	"math/rand/v2"
 
-	"github.com/shabunin/gozenoh/internal/codec"
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Multilink (zenoh-rust io/zenoh-transport/src/unicast/establishment/ext/

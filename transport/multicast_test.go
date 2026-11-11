@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // hub is an in-memory multicast group.

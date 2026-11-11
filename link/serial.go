@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // Serial links, "serial/<device>#baudrate=<n>" (zenoh-rust's z-serial crate

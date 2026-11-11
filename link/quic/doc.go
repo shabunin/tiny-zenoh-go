@@ -2,7 +2,7 @@
 // zenoh-rust's QUIC links (io/zenoh-links/zenoh-link-quic and
 // zenoh-link-quic_datagram). Import it for its side effect:
 //
-//	import _ "github.com/shabunin/gozenoh/link/quic"
+//	import _ "github.com/shabunin/tiny-zenoh-go/link/quic"
 //
 // The variant is chosen through ALPN, from the locator's metadata, as in
 // zenoh-rust:

@@ -1,6 +1,6 @@
 package zenoh
 
-import "github.com/shabunin/gozenoh/protocol"
+import "github.com/shabunin/tiny-zenoh-go/protocol"
 
 // Multihop gossip (zenoh-rust scouting/gossip/multihop: true). A peer runs
 // the same link-state graph as the router mesh (protocol/network.rs with

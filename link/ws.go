@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // WebSocket links, "ws/host:port" (zenoh-rust io/zenoh-links/zenoh-link-ws):

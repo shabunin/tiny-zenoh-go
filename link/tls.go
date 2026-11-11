@@ -12,7 +12,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // ErrTLSConfig reports missing or unreadable TLS material.

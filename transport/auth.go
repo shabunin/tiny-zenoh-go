@@ -10,8 +10,8 @@ import (
 	"math/rand/v2"
 	"strings"
 
-	"github.com/shabunin/gozenoh/internal/codec"
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Handshake authentication (zenoh-rust io/zenoh-transport/src/unicast/

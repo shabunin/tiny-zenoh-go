@@ -11,9 +11,9 @@ import (
 
 	quicgo "github.com/quic-go/quic-go"
 
-	"github.com/shabunin/gozenoh/link"
-	"github.com/shabunin/gozenoh/protocol"
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/link"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // ALPN protocols (zenoh-link-commons quic/utils.rs).

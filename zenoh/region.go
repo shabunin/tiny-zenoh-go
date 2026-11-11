@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/shabunin/gozenoh/protocol"
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // Regions (zenoh 1.10, zenoh/src/net/runtime/region.rs and routing/gateway.rs).

@@ -1,7 +1,7 @@
-"""Reference Zenoh peer for gozenoh cross-implementation tests.
+"""Reference Zenoh peer for tiny-zenoh-go cross-implementation tests.
 
 Drives the official eclipse-zenoh Python binding (the Rust Zenoh stack) so Go
-tests can check that gozenoh interoperates with it in both directions.
+tests can check that tiny-zenoh-go interoperates with it in both directions.
 Prints one JSON object per event on stdout; prints {"ready": true} once its
 entities are declared.
 

@@ -14,7 +14,7 @@ import (
 //	docker run -d --name zenohd -p 7447:7447 eclipse/zenoh
 //	ZENOH_ROUTER=tcp/127.0.0.1:7447 go test ./zenoh/
 //
-// ZENOH_ROUTER=go runs them against an in-process gozenoh router instead.
+// ZENOH_ROUTER=go runs them against an in-process tiny-zenoh-go router instead.
 func routerLocator(t *testing.T) string {
 	t.Helper()
 	loc := os.Getenv("ZENOH_ROUTER")
@@ -36,7 +36,7 @@ var goRouter struct {
 	err  error
 }
 
-// goRouterLocator starts (once per test binary) a gozenoh router on loopback.
+// goRouterLocator starts (once per test binary) a tiny-zenoh-go router on loopback.
 func goRouterLocator(t *testing.T) string {
 	goRouter.once.Do(func() {
 		goRouter.s, goRouter.err = Open(Config{Mode: ModeRouter,
@@ -60,7 +60,7 @@ func openSession(t *testing.T) *Session {
 
 // uniq returns a key prefix unique to this test run.
 func uniq(t *testing.T) string {
-	return fmt.Sprintf("gozenoh/test/%s/%d", t.Name(), time.Now().UnixNano())
+	return fmt.Sprintf("tiny-zenoh-go/test/%s/%d", t.Name(), time.Now().UnixNano())
 }
 
 type sampleSink struct {

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shabunin/gozenoh/keyexpr"
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/keyexpr"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // HistoryConfig asks advanced publishers' caches for past samples.

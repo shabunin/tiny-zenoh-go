@@ -9,7 +9,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 func authNode(t *testing.T, a *Auth) *mlNode {

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // ErrUnsupportedProtocol is returned for a locator whose protocol has no dialer.

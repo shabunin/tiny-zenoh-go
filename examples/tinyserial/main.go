@@ -1,6 +1,6 @@
 //go:build tinygo
 
-// tinyserial runs a gozenoh client on a microcontroller whose only link is
+// tinyserial runs a tiny-zenoh-go client on a microcontroller whose only link is
 // its UART (e.g. the USB-serial bridge of an ESP32 board), using zenoh's
 // serial framing. On the host, a router listens on the serial port:
 //
@@ -17,9 +17,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/shabunin/gozenoh/link"
-	"github.com/shabunin/gozenoh/transport"
-	"github.com/shabunin/gozenoh/zenoh"
+	"github.com/shabunin/tiny-zenoh-go/link"
+	"github.com/shabunin/tiny-zenoh-go/transport"
+	"github.com/shabunin/tiny-zenoh-go/zenoh"
 )
 
 const name = "stickc"

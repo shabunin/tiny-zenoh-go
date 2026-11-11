@@ -4,7 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/shabunin/gozenoh/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
 
 // Errors shared by network/data message decoders.

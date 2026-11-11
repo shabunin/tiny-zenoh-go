@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Cross-implementation tests: gozenoh against the official Rust Zenoh stack,
+// Cross-implementation tests: tiny-zenoh-go against the official Rust Zenoh stack,
 // driven through its Python binding (testdata/zpeer.py).
 //
 //	ZENOH_ROUTER=tcp/127.0.0.1:7447 ZENOH_PY=/path/to/python-with-eclipse-zenoh \

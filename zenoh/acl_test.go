@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // Access control. The same configuration runs on a zenoh-rust router and on

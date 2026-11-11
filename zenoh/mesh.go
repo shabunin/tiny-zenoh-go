@@ -3,8 +3,8 @@ package zenoh
 import (
 	"slices"
 
-	"github.com/shabunin/gozenoh/keyexpr"
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/keyexpr"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Router-to-router routing (zenoh-rust's router hat,

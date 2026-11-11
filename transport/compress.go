@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sync/atomic"
 
-	"github.com/shabunin/gozenoh/internal/lz4"
+	"github.com/shabunin/tiny-zenoh-go/internal/lz4"
 )
 
 // Batch compression (zenoh-rust io/zenoh-transport/src/common/batch.rs).

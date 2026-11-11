@@ -4,8 +4,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shabunin/gozenoh/protocol"
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // A gateway that has a gateway of its own (a peer serving clients while

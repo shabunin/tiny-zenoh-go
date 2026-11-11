@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Router subregions: a gateway router keeps one router mesh per region.
@@ -199,7 +199,7 @@ func TestRouterSubregionRustGateway(t *testing.T) {
 			map[string]any{"filters": []any{map[string]any{"modes": []string{"router"}, "region_names": []string{"cell"}}}},
 			map[string]any{"filters": []any{map[string]any{"modes": []string{"client"}}}},
 		}},
-	}), true, "token", "gozenoh/test/subregion/hold", "60")
+	}), true, "token", "tiny-zenoh-go/test/subregion/hold", "60")
 	n := regionRouter(t, "", "", nil, l)
 	s1 := regionRouter(t, "", "cell", nil, l)
 	s2 := regionRouter(t, "", "cell", nil, loc(s1))
@@ -250,7 +250,7 @@ func TestRouterSubregionGoGatewayRust(t *testing.T) {
 		return c
 	}
 	s1conf := router("cell", loc(g))
-	startRust(t, jsonConf(s1conf), true, "token", "gozenoh/test/subregion/s1", "60")
+	startRust(t, jsonConf(s1conf), true, "token", "tiny-zenoh-go/test/subregion/s1", "60")
 	s1loc := s1conf["listen/endpoints"].([]string)[0]
 	cell := Region{South: true, ID: 0, Mode: protocol.Router}
 	waitFor(t, "s1", func() bool {

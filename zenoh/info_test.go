@@ -3,7 +3,7 @@ package zenoh
 import (
 	"testing"
 
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 func TestTransports(t *testing.T) {

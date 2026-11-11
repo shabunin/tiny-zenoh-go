@@ -3,7 +3,7 @@ package protocol
 import (
 	"errors"
 
-	"github.com/shabunin/gozenoh/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
 
 // ErrZIDLength is returned when a ZID is not between 1 and 16 bytes, or is all

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/shabunin/gozenoh/transport"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // TinyGo's crypto/tls has no TLS implementation for these targets.
