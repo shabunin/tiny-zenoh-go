@@ -54,6 +54,8 @@ type face struct {
 	proto string
 	// acl is the face's access control state (nil: no access control).
 	acl *faceACL
+	// icpt are the face's interceptors (nil: none).
+	icpt *faceInterceptors
 
 	ready     chan struct{}   // closed when tr is usable (or the handshake failed)
 	linkDone  <-chan struct{} // closed when the link this face was made on is gone
@@ -95,8 +97,8 @@ func (f *face) send(reliable bool, msgs ...transport.Encoder) error {
 	if f.tr == nil {
 		return transport.ErrClosed
 	}
-	if f.acl != nil {
-		if msgs = f.aclEgress(msgs); len(msgs) == 0 {
+	if f.acl != nil || f.icpt != nil {
+		if msgs = f.interceptEgress(msgs, reliable); len(msgs) == 0 {
 			return nil
 		}
 	}
@@ -296,18 +298,29 @@ func (f *face) wantsQueryLocked(key string, target QueryTarget) bool {
 
 func (f *face) onMessage(m protocol.Message, reliable bool) error {
 	<-f.ready
-	s := f.s
 	if err := f.unshm(m); err != nil {
 		return nil // unreadable shared-memory payload: drop, as zenoh-rust does
 	}
-	if f.acl != nil && !f.aclIngress(m) {
-		return nil // access control: dropped
+	if f.acl != nil || f.icpt != nil {
+		var ok bool
+		if m, ok = f.interceptIngress(m, reliable); !ok {
+			return nil // access control or an interceptor: dropped
+		}
 	}
+	return f.dispatch(m, reliable)
+}
+
+// dispatch processes a message from f that may be processed.
+func (f *face) dispatch(m protocol.Message, reliable bool) error {
+	s := f.s
 	switch m := m.(type) {
 	case *protocol.Push:
 		key, ok := f.resolve(m.WireExpr)
 		if !ok {
 			return nil // unknown mapping: drop, as zenoh-rust does
+		}
+		if p, isPut := m.Body.(*protocol.Put); isPut && s.tsOn && !s.stampIngress(p) {
+			return nil // timestamp from the future
 		}
 		s.dispatchSample(sampleFromBody(key, m.Body, m.QoS), false)
 		if s.cfg.Mode != ModeClient {

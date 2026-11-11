@@ -176,6 +176,15 @@ type Config struct {
 	// ACL, if set, enables access control (zenoh-rust access_control): which
 	// messages may be received from and sent to which nodes.
 	ACL *ACLConfig
+	// Downsampling, LowPassFilter and QoSOverwrite configure interceptors
+	// on the data crossing the node's links (zenoh-rust "downsampling",
+	// "low_pass_filter" and "qos/network").
+	Downsampling  []DownsamplingConfig
+	LowPassFilter []LowPassFilterConfig
+	QoSOverwrite  []QoSOverwriteConfig
+	// Timestamping configures timestamping (by default enabled in router
+	// mode only).
+	Timestamping TimestampingConfig
 }
 
 func (c *Config) setDefaults() {
@@ -261,6 +270,8 @@ type Session struct {
 	southNets    map[Region]*lsNetwork            // our south peer subregions
 	upstream     *upstreamInterest                // what our gateways tell us, for our south faces
 	acl          *aclEnforcer                     // access control, nil if off
+	icpt         *interceptors                    // downsampling, low-pass, QoS overwrite; nil if none
+	tsOn, tsDrop bool                             // timestamping, and dropping future timestamps
 	livSubs      map[uint32]*LivelinessSubscriber // by interest id
 	livGets      map[uint32]*livGet               // by interest id
 	matchers     map[uint32]*matcher              // publishers/queriers by interest id
@@ -305,6 +316,16 @@ func Open(cfg Config) (*Session, error) {
 	if cfg.Mode == ModeRouter {
 		s.meshForLocked(North)
 	}
+	icpt, err := newInterceptors(cfg.Downsampling, cfg.LowPassFilter, cfg.QoSOverwrite)
+	if err != nil {
+		return nil, err
+	}
+	s.icpt = icpt
+	s.tsOn = cfg.Mode == ModeRouter
+	if cfg.Timestamping.Enabled != nil {
+		s.tsOn = *cfg.Timestamping.Enabled
+	}
+	s.tsDrop = cfg.Timestamping.DropFutureTimestamp
 	if cfg.ACL != nil {
 		acl, err := newACL(cfg.ACL)
 		if err != nil {
@@ -786,8 +807,9 @@ func (s *Session) established(f *face, l transport.Link, tr *transport.Unicast, 
 	f.linkDone = tr.LinkDone(l)
 	f.shm = shmLink(tr)
 	s.setupACL(f, l, tr)
-	if f.acl != nil {
-		f.initial = f.aclEgress(f.initial)
+	s.setupInterceptors(f)
+	if f.acl != nil || f.icpt != nil {
+		f.initial = f.interceptEgress(f.initial, true)
 	}
 	if len(f.initial) > 0 {
 		_ = tr.Send(true, f.initial...)

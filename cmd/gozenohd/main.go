@@ -6,6 +6,7 @@
 //	gozenohd -l quic/0.0.0.0:7447 --tls-cert srv.pem --tls-key srv.key
 //	gozenohd -l tls/0.0.0.0:7447 --tls-cert srv.pem --tls-key srv.key [--tls-ca ca.pem --tls-mtls]
 //	gozenohd -e tcp/10.0.0.5:7447            # join another router (gozenohd or zenohd)
+//	gozenohd -config zenoh.json              # downsampling, low_pass_filter, qos/network, timestamping, ...
 //
 // Clients and peers attach to it; it routes publications, queries and
 // liveliness between them, answers multicast scouting so they can find it,
@@ -65,6 +66,8 @@ func main() {
 	aclFile := flag.String("acl", "", "access control: JSON file with zenoh's access_control section")
 	regionName := flag.String("region-name", "", "region name announced to the nodes we connect to")
 	gatewayFile := flag.String("gateway", "", "south subregions: JSON file with zenoh's gateway section")
+	configFile := flag.String("config", "", "JSON zenoh config file: its downsampling, low_pass_filter, qos/network, "+
+		"timestamping, access_control and gateway sections")
 	flag.Parse()
 
 	cfg := zenoh.Config{
@@ -92,6 +95,12 @@ func main() {
 	cfg.RegionName = *regionName
 	if *gatewayFile != "" {
 		if cfg.Gateway, err = loadGateway(*gatewayFile); err != nil {
+			fmt.Fprintln(os.Stderr, "gozenohd:", err)
+			os.Exit(2)
+		}
+	}
+	if *configFile != "" {
+		if err = loadConfig(*configFile, &cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "gozenohd:", err)
 			os.Exit(2)
 		}
@@ -191,14 +200,20 @@ func loadACL(file string) (*zenoh.ACLConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	acl, err := decodeACL(b)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", file, err)
+	}
+	return acl, nil
+}
+
+func decodeACL(b []byte) (*zenoh.ACLConfig, error) {
 	var c struct {
 		Enabled *bool `json:"enabled"`
 		zenoh.ACLConfig
 	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&c); err != nil {
-		return nil, fmt.Errorf("%s: %w", file, err)
+	if err := decodeStrict(b, &c); err != nil {
+		return nil, err
 	}
 	if c.Enabled != nil && !*c.Enabled {
 		return nil, nil
@@ -210,23 +225,29 @@ func loadACL(file string) (*zenoh.ACLConfig, error) {
 // {"south": "auto"} or {"south": [{"filters": [{"modes": [...], "zids":
 // [...], "interfaces": [...], "region_names": [...], "negated": bool}]}]}.
 func loadGateway(file string) (zenoh.GatewayConfig, error) {
-	var gc zenoh.GatewayConfig
 	b, err := os.ReadFile(file)
 	if err != nil {
-		return gc, err
+		return zenoh.GatewayConfig{}, err
 	}
+	gc, err := decodeGateway(b)
+	if err != nil {
+		return gc, fmt.Errorf("%s: %w", file, err)
+	}
+	return gc, nil
+}
+
+func decodeGateway(b []byte) (zenoh.GatewayConfig, error) {
+	var gc zenoh.GatewayConfig
 	var c struct {
 		South json.RawMessage `json:"south"`
 	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&c); err != nil {
-		return gc, fmt.Errorf("%s: %w", file, err)
+	if err := decodeStrict(b, &c); err != nil {
+		return gc, err
 	}
 	var preset string
 	if len(c.South) == 0 || json.Unmarshal(c.South, &preset) == nil {
 		if preset != "" && preset != "auto" {
-			return gc, fmt.Errorf("%s: unknown gateway preset %q", file, preset)
+			return gc, fmt.Errorf("unknown gateway preset %q", preset)
 		}
 		return gc, nil
 	}
@@ -239,10 +260,8 @@ func loadGateway(file string) (zenoh.GatewayConfig, error) {
 			Negated     bool     `json:"negated"`
 		} `json:"filters"`
 	}
-	dec = json.NewDecoder(bytes.NewReader(c.South))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&subs); err != nil {
-		return gc, fmt.Errorf("%s: south: %w", file, err)
+	if err := decodeStrict(c.South, &subs); err != nil {
+		return gc, fmt.Errorf("south: %w", err)
 	}
 	gc.South = []zenoh.Subregion{}
 	for _, sr := range subs {
@@ -260,13 +279,13 @@ func loadGateway(file string) (zenoh.GatewayConfig, error) {
 					case "client":
 						gf.Modes |= zenoh.MatchClient
 					default:
-						return gc, fmt.Errorf("%s: unknown mode %q", file, m)
+						return gc, fmt.Errorf("unknown mode %q", m)
 					}
 				}
 				for _, z := range f.ZIDs {
 					zid, err := protocol.ParseZID(z)
 					if err != nil {
-						return gc, fmt.Errorf("%s: zid %q: %w", file, z, err)
+						return gc, fmt.Errorf("zid %q: %w", z, err)
 					}
 					gf.ZIDs = append(gf.ZIDs, zid)
 				}
@@ -276,4 +295,82 @@ func loadGateway(file string) (zenoh.GatewayConfig, error) {
 		gc.South = append(gc.South, out)
 	}
 	return gc, nil
+}
+
+func decodeStrict(b []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	return dec.Decode(v)
+}
+
+// loadConfig reads a zenoh configuration file (plain JSON, not JSON5) and
+// applies the sections gozenohd understands; it warns about the others.
+func loadConfig(file string, cfg *zenoh.Config) error {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return err
+	}
+	var sections map[string]json.RawMessage
+	if err := json.Unmarshal(b, &sections); err != nil {
+		return fmt.Errorf("%s: %w", file, err)
+	}
+	for name, v := range sections {
+		switch name {
+		case "downsampling":
+			err = decodeStrict(v, &cfg.Downsampling)
+		case "low_pass_filter":
+			err = decodeStrict(v, &cfg.LowPassFilter)
+		case "qos":
+			var q struct {
+				Network     []zenoh.QoSOverwriteConfig `json:"network"`
+				Publication json.RawMessage            `json:"publication"`
+			}
+			if err = decodeStrict(v, &q); err == nil {
+				cfg.QoSOverwrite = q.Network
+				if len(q.Publication) > 0 && string(q.Publication) != "[]" {
+					fmt.Fprintf(os.Stderr, "gozenohd: %s: ignoring qos/publication\n", file)
+				}
+			}
+		case "timestamping":
+			var ts struct {
+				Enabled             json.RawMessage `json:"enabled"`
+				DropFutureTimestamp bool            `json:"drop_future_timestamp"`
+			}
+			if err = decodeStrict(v, &ts); err == nil {
+				cfg.Timestamping.DropFutureTimestamp = ts.DropFutureTimestamp
+				cfg.Timestamping.Enabled, err = routerValue(ts.Enabled)
+			}
+		case "access_control":
+			cfg.ACL, err = decodeACL(v)
+		case "gateway":
+			cfg.Gateway, err = decodeGateway(v)
+		default:
+			fmt.Fprintf(os.Stderr, "gozenohd: %s: ignoring section %q\n", file, name)
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %s: %w", file, name, err)
+		}
+	}
+	return nil
+}
+
+// routerValue reads a zenoh mode-dependent bool (a bool, or {"router":
+// bool, "peer": bool, "client": bool}) for router mode (nil: unset).
+func routerValue(v json.RawMessage) (*bool, error) {
+	if len(v) == 0 || string(v) == "null" {
+		return nil, nil
+	}
+	var b bool
+	if json.Unmarshal(v, &b) == nil {
+		return &b, nil
+	}
+	var m struct {
+		Router *bool `json:"router"`
+		Peer   *bool `json:"peer"`
+		Client *bool `json:"client"`
+	}
+	if err := decodeStrict(v, &m); err != nil {
+		return nil, err
+	}
+	return m.Router, nil
 }

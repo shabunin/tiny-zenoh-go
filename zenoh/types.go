@@ -302,6 +302,21 @@ type hlc struct {
 	last uint64
 }
 
+// update takes a received timestamp into account: it reports false, leaving
+// the clock alone, if t is more than hlcMaxDelta ahead of our time.
+func (h *hlc) update(t uint64) bool {
+	now := protocol.NTP64FromTime(time.Now())
+	if t > now && t-now > hlcMaxDelta {
+		return false
+	}
+	h.mu.Lock()
+	if t > h.last {
+		h.last = t
+	}
+	h.mu.Unlock()
+	return true
+}
+
 func (h *hlc) now() uint64 {
 	t := protocol.NTP64FromTime(time.Now())
 	h.mu.Lock()

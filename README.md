@@ -69,6 +69,8 @@ go run ./cmd/gozenohd                     # listens on tcp/0.0.0.0:7447, answers
 go run ./cmd/gozenohd -l tcp/0.0.0.0:7447 -i 1234abcd --no-multicast-scouting
 go run ./cmd/gozenohd -l tcp/0.0.0.0:7449 -e tcp/10.0.0.5:7447   # join a zenohd mesh
 go run ./cmd/gozenohd -l udp/0.0.0.0:7447 -l tls/0.0.0.0:7448 --tls-cert srv.pem --tls-key srv.key
+go run ./cmd/gozenohd -config zenoh.json  # downsampling, low_pass_filter, qos/network, timestamping,
+                                          # access_control, gateway sections of a JSON zenoh config
 ```
 
 QUIC uses the same TLS settings; enable it with a blank import:
@@ -99,7 +101,7 @@ session can publish, subscribe and serve queries itself.
 | `link`           | ✅ TCP, UDP, UDP multicast, TLS, QUIC, WS, Unix, serial | Locator parsing incl. `?metadata` / `#config`; TCP; UDP (MTU 65487 like zenoh on Linux, one listener socket demultiplexed per remote address); UDP multicast groups `udp/224.x.x.x:port#iface=<name>;ttl=<n>` (send socket bound to the interface, own datagrams filtered); TLS with zenoh's config keys (`root_ca_certificate`, `listen_*`/`connect_*` certificate & key as `_file`/`_base64`/`_raw`, `enable_mtls`, `verify_name_on_connect`); QUIC in `link/quic` (via `link.Register`; zenoh's variants chosen by ALPN from the locator metadata: single stream, multistream with a stream per priority (default), mixed reliability with best-effort traffic in QUIC datagrams `?mixed_rel=1`, datagrams only `?rel=0`); WebSocket `ws/host:port` (own minimal RFC 6455 code, one binary message per batch); Unix sockets `unixsock-stream/<path>` (flock'd `<path>.lock`, stale sockets replaced); serial `serial/<dev>#baudrate=N` (z-serial framing: COBS, CRC-32, I/A/R connect handshake, 1500-byte frames; Linux ttys opened raw with exclusive access; `link.NewSerial` wraps any byte stream, e.g. a TinyGo `machine.UART`). |
 | `zext`           | ✅ | zenoh-ext **serialization** (`z_serialize` / `z_deserialize` format): fixed-width little-endian numbers incl. 128-bit, bool, LEB128 lengths, strings, bytes, sequences, maps, tuples as concatenation; `Serializer`/`Deserializer`, generic `WriteSlice`/`ReadMap`..., `Serialize(vals...)`/`Deserialize(b, ptrs...)` without reflection (TinyGo), `Marshaler`/`Unmarshaler` for structs. |
 | `shm`            | ✅ Linux | zenoh's POSIX shared memory, layout-compatible with zenoh-rust 1.x (SHM protocol v2): `/dev/shm/<id>.zenoh` metadata/data/auth segments, INIT/OPEN negotiation (challenges read from each other's auth segment), per-priority handoff counters, watchdog confirmation (50 ms) and validation (100 ms), refcounts and generations, garbage collection, orphan-segment cleanup. Enabled with `Config.SharedMemory` (`gozenohd --shm`): payloads ≥ 3 KiB to SHM-capable faces go through a 16 MiB pool; received SHM payloads are copied out. Stub returning `ErrUnsupported` elsewhere and on TinyGo. |
-| `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, admin space `@/<zid>/router`); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`, with `Multihop` relaying link states across any number of hops), declaration push between peers, writer-side filtering, peers attached to routers); **regions** (zenoh 1.10: every node sorted into its north region or a south subregion it is the gateway of; routers gossip with their peers and don't relay inside a peer region; peers are gateways of their clients; custom subregions by role/ZID/interface/announced `RegionName` with `Gateway.South`, so a peer can be the gateway of a group of peers and a router the gateway of router subregions, each its own link-state mesh; one forwarding gateway per peer or router subregion when several serve it); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), matching status and matching listeners on publishers and queriers, **advanced pub/sub** (zenoh-ext compatible: `DeclareAdvancedPublisher` with cache, sequence numbers + heartbeats for miss detection, publisher detection; `DeclareAdvancedSubscriber` with history incl. late-joining publishers (`_max`, `_time` limits), in-order delivery, recovery of lost samples by gap queries / periodic queries / heartbeats, miss listeners, subscriber detection), `_anyke` replies, `_time` ranges (`ParseTimeRange`), source info on samples, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; **namespaces** (`Config.Namespace`: every key the session is given goes under `<ns>/`, every key it gives back loses it, traffic outside it is dropped; the admin space stays outside); **locality** (`WithAllowedOrigin` on subscribers and queryables, `WithAllowedDestination` on puts, publishers, gets and queriers: same session only, remote only, or both; session-local entities are not declared, matching status follows the destination); priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress). |
+| `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, admin space `@/<zid>/router`); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`, with `Multihop` relaying link states across any number of hops), declaration push between peers, writer-side filtering, peers attached to routers); **regions** (zenoh 1.10: every node sorted into its north region or a south subregion it is the gateway of; routers gossip with their peers and don't relay inside a peer region; peers are gateways of their clients; custom subregions by role/ZID/interface/announced `RegionName` with `Gateway.South`, so a peer can be the gateway of a group of peers and a router the gateway of router subregions, each its own link-state mesh; one forwarding gateway per peer or router subregion when several serve it); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), matching status and matching listeners on publishers and queriers, **advanced pub/sub** (zenoh-ext compatible: `DeclareAdvancedPublisher` with cache, sequence numbers + heartbeats for miss detection, publisher detection; `DeclareAdvancedSubscriber` with history incl. late-joining publishers (`_max`, `_time` limits), in-order delivery, recovery of lost samples by gap queries / periodic queries / heartbeats, miss listeners, subscriber detection), `_anyke` replies, `_time` ranges (`ParseTimeRange`), source info on samples, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; **namespaces** (`Config.Namespace`: every key the session is given goes under `<ns>/`, every key it gives back loses it, traffic outside it is dropped; the admin space stays outside); **locality** (`WithAllowedOrigin` on subscribers and queryables, `WithAllowedDestination` on puts, publishers, gets and queriers: same session only, remote only, or both; session-local entities are not declared, matching status follows the destination); priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress); **interceptors** (zenoh's `downsampling`, `low_pass_filter` and `qos/network` sections as `Downsampling`, `LowPassFilter`, `QoSOverwrite`: per-rule rate limits, size limits on payload + attachment, priority / congestion control / express overwrite filtered by key, QoS and payload size; per face by interface, link protocol and ZID, ingress and/or egress) and **timestamping** (`Timestamping`: routers stamp PUTs that cross them, future timestamps replaced or dropped). |
 
 ### Verified interop
 
@@ -143,6 +145,14 @@ session can publish, subscribe and serve queries itself.
   list[u8], f32)` serialized by `zext` is read by Python's `z_deserialize`,
   and the one Python's `z_serialize` writes is byte-for-byte what `zext`
   writes; zenoh-ext's own binary test vectors pass too.
+- **Interceptors**: one configuration (Go structs, given to zenoh-rust as
+  its JSON config sections) produces the same results on a Rust router and
+  on a Go router: downsampling at 2 Hz and 0 Hz, low-pass limits on puts,
+  queries and replies (a dropped query ends at once, not at the timeout),
+  priority set / incremented / set only for a given priority or payload
+  size range / not applied on a non-matching link protocol, express set,
+  router timestamps on unstamped puts, future timestamps replaced or
+  (`drop_future_timestamp`) dropped, no timestamps when disabled.
 - **Regions**: a Rust router sorts Go peers into subregions by the names they
   announce, relays between subregions and not inside one, and refuses an
   unnamed peer. A Go peer gets "you are south of me" from a Rust peer
@@ -300,7 +310,9 @@ go run ./examples/zprobe                        # hex-dump a raw handshake
       priorities, ✅ compression, ✅ multilink, ✅ authentication (usrpwd,
       pubkey), ✅ access control, ✅ low-latency transport, ✅ querier,
       ✅ matching status, ✅ advanced pub/sub (zenoh-ext), ✅ namespaces,
-      ✅ locality (allowed origin / destination), ✅ zenoh-ext serialization.
+      ✅ locality (allowed origin / destination), ✅ zenoh-ext serialization,
+      ✅ interceptors (downsampling, low-pass filter, QoS overwrite),
+      ✅ timestamping.
 
 ## Package layout
 
@@ -470,9 +482,21 @@ tiny-zenoh-go/
   allowing subject is enough; per subject, a deny rule *including* the key
   wins, then allow if default-allow or an allow rule includes it. "Includes"
   means the rule covers the whole message key expression, so allowing
-  `a/b/**` does not allow subscribing to `a/**`. A dropped query gets no
-  final: the querier times out. Interests for tokens with no key expression
-  are denied.
+  `a/b/**` does not allow subscribing to `a/**`. Interests for tokens with
+  no key expression are denied.
+- Interceptors and access control form one chain, in zenoh-rust's order:
+  downsampling, access control, QoS overwrite, low-pass filter. A query
+  dropped on the way in is answered with a RESPONSE_FINAL, a dropped
+  interest with a D_FINAL; one dropped on the way out counts as answered by
+  that face, so queriers don't wait for their timeout. Downsampling uses the
+  first rule whose key expression *intersects* the message key; low-pass
+  and QoS overwrite rules must *include* it. A QoS overwrite applies to
+  puts, deletes and queries (zenoh has no reply overwrite). zenoh-rust 1.10
+  ignores negative priority increments (`if 1 >= 0` in qos_overwrite.rs);
+  we apply them. Timestamping is on by default only in router mode
+  (`timestamping/enabled`), stamps PUTs (not DELs) that have none and the
+  node's own publications, and treats a timestamp more than 500 ms ahead
+  of the node's clock (uhlc's default delta) as from the future.
 - Matching status comes from the INTERESTs publishers (`KeyExprs |
   Subscribers`) and queriers (`KeyExprs | Queryables`) send their routers
   with mode CurrentFuture on their key; the router answers with aggregated

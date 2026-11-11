@@ -54,6 +54,9 @@ func (s *Session) mcastMessage(g *mcastGroup, p *transport.MulticastPeer, m prot
 	switch m := m.(type) {
 	case *protocol.Push:
 		key, ok := s.mcastResolve(g, p.Addr, m.WireExpr)
+		if put, isPut := m.Body.(*protocol.Put); ok && isPut && s.tsOn && !s.stampIngress(put) {
+			return
+		}
 		if ok {
 			s.dispatchSample(sampleFromBody(key, m.Body, m.QoS), false)
 		}

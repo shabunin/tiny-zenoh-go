@@ -483,6 +483,7 @@ func (f *face) aclEgress(msgs []transport.Encoder) []transport.Encoder {
 			continue
 		}
 		if we == nil {
+			f.refused(m)
 			continue
 		}
 		if undecl && we.Scope == 0 && we.Suffix == "" {
@@ -492,6 +493,8 @@ func (f *face) aclEgress(msgs []transport.Encoder) []transport.Encoder {
 		key, ok := f.resolveOwn(*we)
 		if ok && a.check(1, msg, key) {
 			out = append(out, m)
+		} else {
+			f.refused(m)
 		}
 	}
 	return out

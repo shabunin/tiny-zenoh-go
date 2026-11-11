@@ -35,7 +35,7 @@ func (s *Session) dispatchSample(smp Sample, local bool) {
 
 func (s *Session) buildData(kind SampleKind, o *putOptions) protocol.DataBody {
 	ts := o.timestamp
-	if ts == nil && o.autoTS {
+	if ts == nil && (o.autoTS || s.tsOn) {
 		t := s.NewTimestamp()
 		ts = &t
 	}
