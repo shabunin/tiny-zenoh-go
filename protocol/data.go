@@ -60,6 +60,9 @@ type Put struct {
 	// a decoded PUT with that extension has Parts and no Payload.
 	Parts   []PayloadPart
 	Unknown []Extension // non-mandatory extensions preserved for forwarding
+	// ShmBuf, in-process only (never encoded), is the shared-memory buffer
+	// (*shm.Buf) Payload lies in: SHM links get a reference to it.
+	ShmBuf any
 }
 
 func (*Put) msgID() byte { return IDPut }

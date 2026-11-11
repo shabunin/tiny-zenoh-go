@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/shabunin/tiny-zenoh-go/protocol"
+	"github.com/shabunin/tiny-zenoh-go/shm"
 )
 
 // Re-exported protocol types.
@@ -254,6 +255,26 @@ type putOptions struct {
 	autoTS      bool
 	sourceInfo  *SourceInfo
 	destination Locality
+	shmBuf      *shm.Buf
+}
+
+// payloadOf is the payload to publish: payload, or the shared-memory
+// buffer's bytes (WithShmBuf).
+func (o *putOptions) payloadOf(payload []byte) []byte {
+	if payload == nil && o.shmBuf != nil {
+		return o.shmBuf.Bytes()
+	}
+	return payload
+}
+
+// localPayload is what this process keeps of a payload (samples for local
+// subscribers, caches): a copy if it lies in shared memory, which is reused
+// once released.
+func (o *putOptions) localPayload(payload []byte) []byte {
+	if o.shmBuf != nil && payload != nil {
+		return append([]byte{}, payload...)
+	}
+	return payload
 }
 
 func defaultPutOptions() putOptions {
@@ -288,6 +309,14 @@ func WithPriority(p Priority) PutOption { return putFn(func(o *putOptions) { o.p
 func WithCongestionControl(c CongestionControl) PutOption {
 	return putFn(func(o *putOptions) { o.congestion = c })
 }
+
+// WithShmBuf publishes the contents of a shared-memory buffer (from
+// Session.ShmProvider().Alloc) as the payload, which must then be nil:
+// nodes on this host that negotiated shared memory get a reference to the
+// buffer instead of a copy (zenoh's zero-copy SHM publication); the others
+// get its bytes, as usual. The buffer may be closed once the call returns,
+// but not written to any more.
+func WithShmBuf(b *shm.Buf) PutOption { return putFn(func(o *putOptions) { o.shmBuf = b }) }
 
 // WithExpress disables batching for the message.
 func WithExpress(e bool) PutOption { return putFn(func(o *putOptions) { o.express = e }) }

@@ -94,6 +94,76 @@ func TestShmGoPeers(t *testing.T) {
 	}
 }
 
+// Buffers the application wrote into shared memory go by reference, small
+// or large; local subscribers and non-SHM faces get the bytes; the pool is
+// reused once receivers are done.
+func TestShmZeroCopy(t *testing.T) {
+	pfx := uniq(t)
+	a := openShmPeer(t)
+	b := openShmPeer(t, a.Locators()[0])
+	waitFor(t, "peers", func() bool { return connected(a, b) && connected(b, a) })
+	if a.ShmProvider() == nil {
+		t.Fatal("no SHM provider")
+	}
+	remote, local := newSink(), newSink()
+	sub, _ := b.DeclareSubscriber(pfx+"/**", remote.handler)
+	defer sub.Undeclare()
+	lsub, _ := a.DeclareSubscriber(pfx+"/**", local.handler)
+	defer lsub.Undeclare()
+	q, _ := a.DeclareQueryable(pfx+"/q", func(q *Query) {
+		buf, err := a.ShmProvider().Alloc(5)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		copy(buf.Bytes(), "reply")
+		_ = q.Reply(q.KeyExpr(), nil, WithShmBuf(buf))
+		buf.Close()
+	})
+	defer q.Undeclare()
+	settle()
+
+	w0, z0 := shmStats.wrapped.Load(), shmStats.zeroCopy.Load()
+	for _, n := range []int{3 << 20, 10} { // a 3 MiB buffer in a 4 MiB pool: reuse is required
+		for round := range 3 {
+			var buf *shm.Buf
+			waitFor(t, "pool room", func() bool {
+				var err error
+				buf, err = a.ShmProvider().Alloc(n)
+				if err != nil && err != shm.ErrNoMemory {
+					t.Fatal(err)
+				}
+				return err == nil
+			})
+			want := pattern(n)
+			want[0] = byte(round)
+			copy(buf.Bytes(), want)
+			if err := a.Put(pfx+"/x", nil, WithShmBuf(buf), WithCongestionControl(CongestionBlock)); err != nil {
+				t.Fatal(err)
+			}
+			buf.Close()
+			for _, sk := range []*sampleSink{remote, local} {
+				all := sk.wait(t, 1)
+				if got := all[len(all)-1]; !bytes.Equal(got.Payload, want) {
+					t.Errorf("size %d round %d: got %d bytes, differ", n, round, len(got.Payload))
+				}
+			}
+		}
+	}
+	replies, _ := b.Get(pfx + "/q")
+	for r := range replies {
+		if smp, err := r.Result(); err != nil || string(smp.Payload) != "reply" {
+			t.Errorf("reply %v %q", err, smp.Payload)
+		}
+	}
+	if w, z := shmStats.wrapped.Load()-w0, shmStats.zeroCopy.Load()-z0; w != 0 || z != 7 {
+		t.Errorf("copied %d, by reference %d; want 0, 7", w, z)
+	}
+	if _, err := a.ShmProvider().Alloc(8 << 20); err != shm.ErrNoMemory {
+		t.Errorf("oversized Alloc: %v", err)
+	}
+}
+
 func TestShmOnlyIfBothEnable(t *testing.T) {
 	a := openShmPeer(t)
 	b := openPeer(t, a.Locators()[0])
@@ -151,6 +221,39 @@ func TestShmRustPeer(t *testing.T) {
 			if e.Size != len(big)-i || e.Sum != sum(big[:len(big)-i]) || !e.Shm {
 				t.Errorf("rust got size %d shm %v (sum ok %v)", e.Size, e.Shm, e.Sum == sum(big[:len(big)-i]))
 			}
+		}
+	})
+
+	t.Run("RustReceivesShmBuf", func(t *testing.T) {
+		rs := startRust(t, conf(), true, "bigsub", pfx+"/c/**", "2")
+		waitFor(t, "rust subscriber", func() bool {
+			for _, f := range s.faceList() {
+				s.mu.Lock()
+				n := len(f.subs)
+				s.mu.Unlock()
+				if n > 0 && f.shm != nil {
+					return true
+				}
+			}
+			return false
+		})
+		z0 := shmStats.zeroCopy.Load()
+		for _, n := range []int{len(big), 100} {
+			buf, err := s.ShmProvider().Alloc(n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			copy(buf.Bytes(), big)
+			_ = s.Put(pfx+"/c/x", nil, WithShmBuf(buf), WithCongestionControl(CongestionBlock))
+			buf.Close()
+		}
+		for _, n := range []int{len(big), 100} {
+			if e := rs.next(); e.Size != n || e.Sum != sum(big[:n]) || !e.Shm {
+				t.Errorf("rust got size %d shm %v (sum ok %v)", e.Size, e.Shm, e.Sum == sum(big[:n]))
+			}
+		}
+		if z := shmStats.zeroCopy.Load() - z0; z != 2 {
+			t.Errorf("%d by reference", z)
 		}
 	})
 

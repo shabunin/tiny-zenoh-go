@@ -188,7 +188,7 @@ func (ap *AdvancedPublisher) prepare(kind SampleKind, payload []byte, opts []Put
 		ap.sn++
 	}
 	if ap.qbl != nil {
-		smp := Sample{KeyExpr: ap.KeyExpr(), Kind: kind, Payload: payload, Encoding: o.encoding,
+		smp := Sample{KeyExpr: ap.KeyExpr(), Kind: kind, Payload: o.localPayload(o.payloadOf(payload)), Encoding: o.encoding,
 			Timestamp: o.timestamp, Attachment: o.attachment, SourceInfo: o.sourceInfo,
 			Priority: o.priority, Congestion: o.congestion, Express: o.express}
 		if len(ap.cache) >= ap.max {

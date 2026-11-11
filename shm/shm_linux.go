@@ -780,6 +780,62 @@ func (l *Link) pollLocked(now time.Time) {
 	l.timed = l.timed[i:]
 }
 
+// Buf is a buffer in a Manager's shared memory, made by Alloc: write the
+// payload into Bytes, then publish it (zenoh.WithShmBuf). Peers on this
+// host that negotiated SHM get a reference to it instead of a copy; the
+// others get the bytes. Don't change the bytes once published: receivers
+// may still be reading them. Close releases the buffer (it may be closed
+// right after publishing: the memory is reused only once every receiver
+// is done with it).
+type Buf struct {
+	m    *Manager
+	h    header
+	info protocol.ShmInfo
+	mem  []byte
+
+	closed bool // guarded by g.mu
+}
+
+// Alloc takes an n-byte buffer from the Manager's pool (garbage-collecting
+// buffers nobody holds any more if needed). It fails with ErrNoMemory when
+// the pool has no room.
+func (m *Manager) Alloc(n int) (*Buf, error) {
+	if n <= 0 {
+		return nil, errors.New("shm: buffer size must be positive")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if m.closed {
+		return nil, ErrInvalidBuffer
+	}
+	h, sp, info, err := m.allocLocked(n)
+	if err != nil {
+		return nil, err
+	}
+	return &Buf{m: m, h: h, info: info, mem: m.data.mem[sp.off : sp.off+n : sp.off+n]}, nil
+}
+
+// Bytes is the buffer's memory (shared: valid until Close, and until the
+// Manager is closed).
+func (b *Buf) Bytes() []byte { return b.mem }
+
+// Len is the buffer's size.
+func (b *Buf) Len() int { return len(b.mem) }
+
+// Close releases our reference to the buffer.
+func (b *Buf) Close() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if b.closed {
+		return
+	}
+	b.closed = true
+	atomic.AddUint32(b.h.refcount(), ^uint32(0))
+	if g.confirms != nil {
+		unholdLocked(confirmKey{b.h, b.info.Generation})
+	}
+}
+
 // Wrap copies payload into shared memory for the peer of this link. The
 // result's Parts replace the message payload; call Sent once the message was
 // handed to the transport.
@@ -794,16 +850,31 @@ func (l *Link) Wrap(payload []byte, prio protocol.Priority) (*Wrapped, error) {
 		g.mu.Unlock()
 		return nil, err
 	}
-	mem := l.m.data.mem[sp.off : sp.off+len(payload)]
+	b := &Buf{m: l.m, h: h, info: info, mem: l.m.data.mem[sp.off : sp.off+len(payload)]}
 	g.mu.Unlock()
 
-	copy(mem, payload)
+	copy(b.mem, payload)
 
+	w, err := l.WrapBuf(b, prio)
+	if err != nil {
+		b.Close()
+		return nil, err
+	}
+	w.sent = b.Close // the receiver holds its own reference
+	return w, nil
+}
+
+// WrapBuf gives the peer of this link a reference to b, without copying.
+// The result's Parts replace the message payload (Sent has nothing to do).
+func (l *Link) WrapBuf(b *Buf, prio protocol.Priority) (*Wrapped, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	k := confirmKey{h, info.Generation}
-	atomic.AddUint32(h.refcount(), 1) // the receiver's reference
-	holdLocked(k)                     // kept confirmed until the receiver has it
+	if !l.active || l.closed || b.closed || b.m.closed {
+		return nil, ErrInvalidBuffer
+	}
+	k := confirmKey{b.h, b.info.Generation}
+	atomic.AddUint32(b.h.refcount(), 1) // the receiver's reference
+	holdLocked(k)                       // kept confirmed until the receiver has it
 	if l.txIDs != nil {
 		p := int(prio) & (numPrio - 1)
 		atomic.AddUint32(l.m.counter(l.txIDs[p]), 1)
@@ -811,17 +882,8 @@ func (l *Link) Wrap(payload []byte, prio protocol.Priority) (*Wrapped, error) {
 	} else {
 		l.timed = append(l.timed, timedHold{k, time.Now().Add(disabledHold)})
 	}
-	return &Wrapped{
-		Parts: []protocol.PayloadPart{{Shm: &info}},
-		sent: func() {
-			g.mu.Lock()
-			defer g.mu.Unlock()
-			atomic.AddUint32(h.refcount(), ^uint32(0))
-			if g.confirms != nil {
-				unholdLocked(k)
-			}
-		},
-	}, nil
+	info := b.info
+	return &Wrapped{Parts: []protocol.PayloadPart{{Shm: &info}}}, nil
 }
 
 // Resolve assembles a payload received in parts, reading shared-memory

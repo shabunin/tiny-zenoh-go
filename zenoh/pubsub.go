@@ -42,8 +42,12 @@ func (s *Session) buildData(kind SampleKind, o *putOptions) protocol.DataBody {
 	if kind == SampleKindDelete {
 		return &protocol.Del{Timestamp: ts, Attachment: o.attachment, SourceInfo: o.sourceInfo}
 	}
-	return &protocol.Put{Timestamp: ts, Encoding: o.encoding.wire(), Attachment: o.attachment,
+	p := &protocol.Put{Timestamp: ts, Encoding: o.encoding.wire(), Attachment: o.attachment,
 		SourceInfo: o.sourceInfo}
+	if o.shmBuf != nil {
+		p.ShmBuf = o.shmBuf
+	}
+	return p
 }
 
 func (s *Session) publish(key string, we protocol.WireExpr, kind SampleKind, payload []byte, o *putOptions) error {
@@ -52,11 +56,13 @@ func (s *Session) publish(key string, we protocol.WireExpr, kind SampleKind, pay
 	}
 	body := s.buildData(kind, o)
 	if p, ok := body.(*protocol.Put); ok {
-		p.Payload = payload
+		p.Payload = o.payloadOf(payload)
 	}
 	// Deliver to this session's own matching subscribers, like zenoh-rust.
 	if o.destination != LocalityRemote {
-		s.dispatchSample(sampleFromBody(key, body, o.qos()), true)
+		smp := sampleFromBody(key, body, o.qos())
+		smp.Payload = o.localPayload(smp.Payload)
+		s.dispatchSample(smp, true)
 	}
 	if o.destination == LocalitySessionLocal {
 		return nil

@@ -10,14 +10,26 @@ import (
 )
 
 // Shared memory (Config.SharedMemory): payloads to and from same-host nodes
-// that negotiated SHM travel through /dev/shm instead of the link. Received
-// SHM payloads are copied out at once, so the rest of the session (and router
-// forwarding) only sees ordinary payloads.
+// that negotiated SHM travel through /dev/shm instead of the link: large
+// ones copied into the session's pool, and buffers the application wrote
+// itself (ShmProvider, WithShmBuf) by reference. Received SHM payloads are
+// copied out at once, so the rest of the session (and router forwarding)
+// only sees ordinary payloads.
+
+// ShmProvider returns the session's shared-memory pool (nil without
+// Config.SharedMemory), to allocate buffers to publish with WithShmBuf:
+//
+//	b, err := s.ShmProvider().Alloc(len(frame))
+//	copy(b.Bytes(), frame) // or render into b.Bytes() directly
+//	err = s.Put("camera/0", nil, zenoh.WithShmBuf(b))
+//	b.Close()
+func (s *Session) ShmProvider() *shm.Manager { return s.shm }
 
 var errNoShm = errors.New("zenoh: shared-memory payload on a link without SHM")
 
-// shmStats counts payloads moved through shared memory (for tests).
-var shmStats struct{ wrapped, resolved atomic.Int64 }
+// shmStats counts payloads moved through shared memory (for tests):
+// copied into it, referenced without a copy (WithShmBuf), read from it.
+var shmStats struct{ wrapped, zeroCopy, resolved atomic.Int64 }
 
 // shmLink returns the face's negotiated SHM state, if any.
 func shmLink(tr *transport.Unicast) *shm.Link {
@@ -88,7 +100,13 @@ func (f *face) unshm(m protocol.Message) error {
 func (f *face) toShm(msgs []transport.Encoder) ([]transport.Encoder, func()) {
 	var wrapped []*shm.Wrapped
 	threshold := f.s.shm.Threshold()
-	wrap := func(payload []byte, qos protocol.QoS) []protocol.PayloadPart {
+	wrap := func(payload []byte, qos protocol.QoS, src any) []protocol.PayloadPart {
+		if b, ok := src.(*shm.Buf); ok && b != nil {
+			if w, err := f.shm.WrapBuf(b, qos.Priority()); err == nil {
+				shmStats.zeroCopy.Add(1)
+				return w.Parts
+			}
+		}
 		if len(payload) < threshold {
 			return nil
 		}
@@ -106,7 +124,7 @@ func (f *face) toShm(msgs []transport.Encoder) ([]transport.Encoder, func()) {
 		switch m := e.(type) {
 		case *protocol.Push:
 			if p, ok := m.Body.(*protocol.Put); ok && p.Parts == nil {
-				if parts := wrap(p.Payload, m.QoS); parts != nil {
+				if parts := wrap(p.Payload, m.QoS, p.ShmBuf); parts != nil {
 					pc, mc := *p, *m
 					pc.Payload, pc.Parts = nil, parts
 					mc.Body = &pc
@@ -115,7 +133,7 @@ func (f *face) toShm(msgs []transport.Encoder) ([]transport.Encoder, func()) {
 			}
 		case *protocol.Request:
 			if q := m.Query; q != nil && q.Body != nil && q.Body.Parts == nil {
-				if parts := wrap(q.Body.Payload, m.QoS); parts != nil {
+				if parts := wrap(q.Body.Payload, m.QoS, nil); parts != nil {
 					bc, qc, mc := *q.Body, *q, *m
 					bc.Payload, bc.Parts = nil, parts
 					qc.Body = &bc
@@ -127,7 +145,7 @@ func (f *face) toShm(msgs []transport.Encoder) ([]transport.Encoder, func()) {
 			switch b := m.Body.(type) {
 			case *protocol.Reply:
 				if p, ok := b.Body.(*protocol.Put); ok && p.Parts == nil {
-					if parts := wrap(p.Payload, m.QoS); parts != nil {
+					if parts := wrap(p.Payload, m.QoS, p.ShmBuf); parts != nil {
 						pc, bc, mc := *p, *b, *m
 						pc.Payload, pc.Parts = nil, parts
 						bc.Body = &pc
@@ -137,7 +155,7 @@ func (f *face) toShm(msgs []transport.Encoder) ([]transport.Encoder, func()) {
 				}
 			case *protocol.Err:
 				if b.Parts == nil {
-					if parts := wrap(b.Payload, m.QoS); parts != nil {
+					if parts := wrap(b.Payload, m.QoS, nil); parts != nil {
 						bc, mc := *b, *m
 						bc.Payload, bc.Parts = nil, parts
 						mc.Body = &bc

@@ -36,3 +36,16 @@ func (*Link) Wrap([]byte, protocol.Priority) (*Wrapped, error) { return nil, Err
 func (*Link) Resolve([]protocol.PayloadPart, protocol.Priority) ([]byte, error) {
 	return nil, ErrUnsupported
 }
+
+// Buf is unavailable on this platform.
+type Buf struct{}
+
+// Alloc returns ErrUnsupported on this platform.
+func (*Manager) Alloc(int) (*Buf, error) { return nil, ErrUnsupported }
+
+func (*Buf) Bytes() []byte { return nil }
+func (*Buf) Len() int      { return 0 }
+func (*Buf) Close()        {}
+
+// WrapBuf fails: shared memory is not available on this platform.
+func (*Link) WrapBuf(*Buf, protocol.Priority) (*Wrapped, error) { return nil, ErrUnsupported }

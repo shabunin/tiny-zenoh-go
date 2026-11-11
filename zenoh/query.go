@@ -638,9 +638,10 @@ func (q *Query) replyData(key string, kind SampleKind, payload []byte, opts []Pu
 	}
 	data := q.st.s.buildData(kind, &o)
 	if p, ok := data.(*protocol.Put); ok {
-		p.Payload = payload
+		p.Payload = o.payloadOf(payload)
 	}
 	smp := sampleFromBody(k.String(), data, o.qos())
+	smp.Payload = o.localPayload(smp.Payload)
 	return q.respond(k.String(), &protocol.Reply{Body: data},
 		Reply{Sample: &smp, ReplierID: &EntityGlobalID{ZID: q.st.s.zid, EID: q.qbl.id}})
 }
