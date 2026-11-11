@@ -6,11 +6,12 @@
 //	gozenohd -l quic/0.0.0.0:7447 --tls-cert srv.pem --tls-key srv.key
 //	gozenohd -l tls/0.0.0.0:7447 --tls-cert srv.pem --tls-key srv.key [--tls-ca ca.pem --tls-mtls]
 //	gozenohd -e tcp/10.0.0.5:7447            # join another router (gozenohd or zenohd)
-//	gozenohd -config zenoh.json              # downsampling, low_pass_filter, qos/network, timestamping, ...
+//	gozenohd -config zenoh.json              # downsampling, low_pass_filter, qos/network, timestamping, adminspace, ...
 //
 // Clients and peers attach to it; it routes publications, queries and
 // liveliness between them, answers multicast scouting so they can find it,
-// and serves its admin space at @/<zid>/router.
+// and serves its admin space under @/<zid>/router (info, metrics, link-state
+// graphs, entities, route successors).
 package main
 
 import (
@@ -67,7 +68,7 @@ func main() {
 	regionName := flag.String("region-name", "", "region name announced to the nodes we connect to")
 	gatewayFile := flag.String("gateway", "", "south subregions: JSON file with zenoh's gateway section")
 	configFile := flag.String("config", "", "JSON zenoh config file: its downsampling, low_pass_filter, qos/network, "+
-		"timestamping, access_control and gateway sections")
+		"timestamping, access_control, gateway, adminspace and metadata sections")
 	flag.Parse()
 
 	cfg := zenoh.Config{
@@ -339,6 +340,29 @@ func loadConfig(file string, cfg *zenoh.Config) error {
 			if err = decodeStrict(v, &ts); err == nil {
 				cfg.Timestamping.DropFutureTimestamp = ts.DropFutureTimestamp
 				cfg.Timestamping.Enabled, err = routerValue(ts.Enabled)
+			}
+		case "adminspace":
+			var a struct {
+				Enabled     *bool `json:"enabled"`
+				Permissions *struct {
+					Read  *bool `json:"read"`
+					Write bool  `json:"write"`
+				} `json:"permissions"`
+			}
+			if err = decodeStrict(v, &a); err == nil {
+				cfg.AdminSpace.Enabled = a.Enabled
+				if p := a.Permissions; p != nil {
+					cfg.AdminSpace.DenyRead = p.Read != nil && !*p.Read
+					if p.Write {
+						fmt.Fprintf(os.Stderr, "gozenohd: %s: adminspace writes are not supported\n", file)
+					}
+				}
+			}
+		case "metadata":
+			// Re-encoded: zenoh-rust shows objects with sorted keys.
+			var m any
+			if err = json.Unmarshal(v, &m); err == nil {
+				cfg.Metadata, err = json.Marshal(m)
 			}
 		case "access_control":
 			cfg.ACL, err = decodeACL(v)

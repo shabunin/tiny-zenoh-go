@@ -49,3 +49,22 @@ func LocalInterfaces(l any) []string {
 	}
 	return out
 }
+
+// Endpoints returns the local and remote locators of l, a link made with
+// protocol proto, as far as it knows its addresses ("" otherwise).
+func Endpoints(l any, proto string) (src, dst string) {
+	if c, ok := l.(interface{ LocalAddr() net.Addr }); ok {
+		if a := c.LocalAddr(); a != nil && a.String() != "" {
+			src = proto + "/" + a.String()
+		}
+	}
+	if c, ok := l.(interface{ RemoteAddr() net.Addr }); ok {
+		if a := c.RemoteAddr(); a != nil && a.String() != "" {
+			dst = proto + "/" + a.String()
+		}
+	}
+	if c, ok := l.(interface{ Locators() (string, string) }); ok && src == "" && dst == "" {
+		src, dst = c.Locators()
+	}
+	return src, dst
+}

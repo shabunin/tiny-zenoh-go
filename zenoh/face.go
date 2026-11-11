@@ -56,6 +56,14 @@ type face struct {
 	acl *faceACL
 	// icpt are the face's interceptors (nil: none).
 	icpt *faceInterceptors
+	// dialed is the locator we dialed (empty for accepted links).
+	dialed string
+	// joined: protocol and dialed locator of the links that joined the
+	// transport (multilink; guarded by s.mu).
+	joined map[transport.Link][2]string
+	// published are the links the session admin space announced (guarded
+	// by s.mu).
+	published []adminLink
 
 	ready     chan struct{}   // closed when tr is usable (or the handshake failed)
 	linkDone  <-chan struct{} // closed when the link this face was made on is gone
@@ -200,6 +208,8 @@ func (f *face) onClose(error) {
 	out := outbox{}
 	wasLive := f.live
 	f.live = false
+	published := f.published
+	f.published = nil
 	if wasLive && s.cfg.Mode != ModeClient && !f.mesh {
 		s.routerFaceGoneLocked(f, out)
 	}
@@ -233,6 +243,9 @@ func (f *face) onClose(error) {
 	}
 	for _, g := range gets {
 		g.finish()
+	}
+	if wasLive {
+		s.adminFaceDown(f, published)
 	}
 	if s.closed.Load() {
 		return // the session is shutting down (and may be the caller)

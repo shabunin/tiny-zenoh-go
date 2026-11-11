@@ -1351,3 +1351,31 @@ func vleLen(v uint64) int {
 	}
 	return n
 }
+
+// LinkInfo describes one link of a transport.
+type LinkInfo struct {
+	Link     Link
+	Streamed bool // a byte stream (length-prefixed batches), not packets
+	Reliable bool
+	MTU      int // the link's packet size limit, 0 for streams
+	// HasRange: the link carries only priorities PrioLo..PrioHi (QUIC
+	// per-priority links).
+	HasRange       bool
+	PrioLo, PrioHi protocol.Priority
+}
+
+// LinkInfos describes the links the transport runs over.
+func (t *Unicast) LinkInfos() []LinkInfo {
+	t.lmu.Lock()
+	defer t.lmu.Unlock()
+	out := make([]LinkInfo, 0, len(t.links))
+	for _, l := range t.links {
+		li := LinkInfo{Link: l.link, Streamed: l.prefix > 0, Reliable: l.reliable,
+			HasRange: l.hasRange, PrioLo: l.prioLo, PrioHi: l.prioHi}
+		if p, ok := l.link.(PacketLink); ok {
+			li.MTU = p.MTU()
+		}
+		out = append(out, li)
+	}
+	return out
+}

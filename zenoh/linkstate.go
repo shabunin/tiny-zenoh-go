@@ -1,6 +1,7 @@
 package zenoh
 
 import (
+	"bytes"
 	"container/heap"
 	"errors"
 	"math"
@@ -643,17 +644,15 @@ func (n *lsNetwork) faceOf(i int) *face {
 	return nil
 }
 
-// zidLess orders zids as zenoh-rust does (as little-endian u128 values).
+// zidLess orders zids as zenoh-rust does: uhlc's ID derives Ord on its
+// 16 little-endian bytes, so the comparison is lexicographic over the wire
+// bytes (zero-padded), *not* numeric. Checked against zenoh-rust's edge
+// weights, which hash the smaller zid first.
 func zidLess(a, b ZID) bool {
 	var x, y [16]byte
 	copy(x[:], a.Bytes())
 	copy(y[:], b.Bytes())
-	for i := 15; i >= 0; i-- {
-		if x[i] != y[i] {
-			return x[i] < y[i]
-		}
-	}
-	return false
+	return bytes.Compare(x[:], y[:]) < 0
 }
 
 // edgeWeight reproduces zenoh-rust's update_edge: the larger configured

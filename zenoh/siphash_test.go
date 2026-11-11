@@ -1,6 +1,10 @@
 package zenoh
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/shabunin/tiny-zenoh-go/protocol"
+)
 
 // Expected values from CPython's hash() of the same bytes with
 // PYTHONHASHSEED=0 (SipHash-1-3, zero key), masked to 64 bits.
@@ -19,6 +23,37 @@ func TestSipHash13(t *testing.T) {
 	for _, c := range cases {
 		if got := sipHash13([]byte(c.in)); got != c.want {
 			t.Errorf("sipHash13(%q) = %#x, want %#x", c.in, got, c.want)
+		}
+	}
+}
+
+// Edge weights zenoh-rust 1.10 reported (admin space linkstate) for pairs
+// of routers; they depend on the order of the two zids in the hash, which
+// is uhlc's (lexicographic over the little-endian bytes).
+func TestEdgeWeightRust(t *testing.T) {
+	for _, c := range []struct{ a, b, want string }{
+		{"34c338cb3af481ff3205708fce05f125", "846256c00172d1f3647fbffd7f756525", "100.08821998026414"},
+		{"d559f47c331cccbd1303962086e65824", "7482e55c98f9ae6fbac2d38a535c1c41", "100.24086273653452"},
+		{"b4d236908b4218b269a2bd370fd8e181", "b0021d9f48778fd90732a9fd4b53c7bf", "100.63278123890814"},
+		{"e12bbe199f06201ffadbd459869c155e", "65089cf9376e2ae1cfb5cd8b19dcee24", "100.06468053070472"},
+	} {
+		a, err := protocol.ParseZID(c.a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := protocol.ParseZID(c.b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range []*lsNetwork{newNetwork(a), newNetwork(b)} {
+			other := b
+			if n.nodes[0].zid.Equal(b) {
+				other = a
+			}
+			n.addNode(&lsNode{zid: other, links: map[string]uint16{}})
+			if got := rustFloat(n.edgeWeight(0, 1)); got != c.want {
+				t.Errorf("%s-%s: %s, want %s", c.a, c.b, got, c.want)
+			}
 		}
 	}
 }

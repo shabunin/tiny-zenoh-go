@@ -185,6 +185,11 @@ type Config struct {
 	// Timestamping configures timestamping (by default enabled in router
 	// mode only).
 	Timestamping TimestampingConfig
+	// AdminSpace configures the admin space (zenoh-rust "adminspace").
+	AdminSpace AdminSpaceConfig
+	// Metadata is a JSON value the admin space shows (zenoh-rust
+	// "metadata"), e.g. []byte(`{"name":"strawberry"}`); nil shows null.
+	Metadata []byte
 }
 
 func (c *Config) setDefaults() {
@@ -355,6 +360,12 @@ func Open(cfg Config) (*Session, error) {
 		}
 		s.mlKey = k
 	}
+	if err := s.startAdmin(); err != nil {
+		if s.shm != nil {
+			_ = s.shm.Close()
+		}
+		return nil, err
+	}
 	if cfg.Mode == ModeClient {
 		if err := s.openClient(); err != nil {
 			if s.shm != nil {
@@ -367,12 +378,6 @@ func Open(cfg Config) (*Session, error) {
 	if err := s.openPeer(); err != nil {
 		_ = s.Close()
 		return nil, err
-	}
-	if cfg.Mode == ModeRouter {
-		if err := s.startAdmin(); err != nil {
-			_ = s.Close()
-			return nil, err
-		}
 	}
 	return s, nil
 }
@@ -754,6 +759,7 @@ func (s *Session) dial(ep string) (*face, error) {
 	}
 	f := newFace(s)
 	f.ifaces = link.LocalInterfaces(l)
+	f.dialed = ep
 	if loc, err := link.Parse(ep); err == nil {
 		f.proto = loc.Protocol
 	}
@@ -777,6 +783,24 @@ func (s *Session) established(f *face, l transport.Link, tr *transport.Unicast, 
 	if err == nil && f.joinTo != nil && tr == f.joinTo.tr {
 		f.linkDone = tr.LinkDone(l)
 		close(f.ready)
+		owner := f.joinTo
+		s.mu.Lock()
+		if owner.joined == nil {
+			owner.joined = map[transport.Link][2]string{}
+		}
+		owner.joined[l] = [2]string{f.proto, f.dialed}
+		s.mu.Unlock()
+		s.adminLinksChanged(owner)
+		go func() {
+			select {
+			case <-f.linkDone:
+				s.adminLinksChanged(owner)
+				s.mu.Lock()
+				delete(owner.joined, l)
+				s.mu.Unlock()
+			case <-owner.closed:
+			}
+		}()
 		return nil
 	}
 	f.joinTo = nil
@@ -823,6 +847,7 @@ func (s *Session) established(f *face, l transport.Link, tr *transport.Unicast, 
 		f.close()
 		return ErrSessionClosed
 	}
+	s.adminFaceUp(f)
 	if f.mesh {
 		s.meshLinkUp(f)
 	}

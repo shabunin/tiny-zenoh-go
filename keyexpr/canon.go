@@ -5,8 +5,8 @@ import "strings"
 // Validate reports whether s is a well-formed key expression in canonical form.
 //
 // Well-formed requires: non-empty; no empty chunks (so no leading/trailing '/'
-// and no "//"); every chunk uses only unreserved characters, percent-encoding,
-// or the wildcards "*", "**", "$*".
+// and no "//"); no '#' or '?'; '*' only in the wildcards "*", "**" and "$*",
+// and '$' only in "$*".
 //
 // Canonical additionally requires: no chunk is the bare "$*" (write "*"); no
 // "**" is adjacent to another "**"; and a "**" is never immediately followed by
@@ -41,42 +41,20 @@ func validChunk(c string) error {
 	if c == "*" || c == "**" {
 		return nil
 	}
+	// zenoh-rust (keyexpr TryFrom<&str>): any character but '#' and '?';
+	// '*' only as a whole chunk or in "$*"; '$' only in "$*".
 	for i := 0; i < len(c); i++ {
-		ch := c[i]
-		switch {
-		case ch == '$':
-			if i+1 < len(c) && c[i+1] == '*' {
-				i++ // consume the "$*" wildcard
-				continue
-			}
-			// a lone '$' is an unreserved character.
-		case ch == '*':
-			// A bare '*' may only appear as the whole chunk ("*"/"**") or in "$*".
+		switch c[i] {
+		case '#', '?', '*':
 			return ErrBadChar
-		case ch == '%':
-			if i+2 >= len(c) || !isHex(c[i+1]) || !isHex(c[i+2]) {
+		case '$':
+			if i+1 >= len(c) || c[i+1] != '*' {
 				return ErrBadChar
 			}
-			i += 2
-		case isUnreserved(ch):
-			// ok
-		default:
-			return ErrBadChar
+			i++ // the "$*" wildcard
 		}
 	}
 	return nil
-}
-
-func isUnreserved(ch byte) bool {
-	switch {
-	case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9':
-		return true
-	}
-	switch ch {
-	case '-', '_', '.', '~', '@', '$':
-		return true
-	}
-	return false
 }
 
 func isHex(ch byte) bool {
