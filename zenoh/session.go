@@ -8,7 +8,9 @@
 //
 // In client mode (the default) the session talks to one router. In peer mode
 // it listens for and connects to other peers directly, discovering them by
-// multicast scouting, and routers too.
+// multicast scouting, and routers too. A peer routes for the clients
+// attached to it, and with Config.Gateway for subregions of peers (zenoh
+// 1.10 regions, see region.go).
 //
 // Callbacks (subscriber, queryable, liveliness) run on a receive goroutine:
 // keep them short and never block in them waiting for other Zenoh traffic.
@@ -109,6 +111,13 @@ type Config struct {
 	Scouting ScoutingConfig
 	// Gossip configures gossip scouting between peers (peer mode).
 	Gossip GossipConfig
+	// RegionName is announced to the nodes we connect to (zenoh-rust
+	// region_name, 1..32 bytes), so that a gateway can sort us into one of
+	// its subregions by name.
+	RegionName string
+	// Gateway configures the subregions we are the gateway of (zenoh-rust
+	// gateway.south); the zero value keeps zenoh's auto preset.
+	Gateway GatewayConfig
 	// ZID is this session's id. Default: random.
 	ZID ZID
 	// Lease is the session lease announced to other nodes. Default 10s.
@@ -244,6 +253,8 @@ type Session struct {
 	mesh         *meshState                       // router mode: the router network
 	gossip       *gossipState                     // peer mode: gossip scouting
 	gossipNet    *lsNetwork                       // peer mode: multihop gossip
+	southNets    map[Region]*lsNetwork            // our south peer subregions
+	upstream     *upstreamInterest                // what our gateways tell us, for our south faces
 	acl          *aclEnforcer                     // access control, nil if off
 	livSubs      map[uint32]*LivelinessSubscriber // by interest id
 	livGets      map[uint32]*livGet               // by interest id
@@ -274,6 +285,10 @@ func Open(cfg Config) (*Session, error) {
 		livGets:     map[uint32]*livGet{},
 		matchers:    map[uint32]*matcher{},
 		localTokens: map[uint32]*LivelinessToken{},
+		southNets:   map[Region]*lsNetwork{},
+	}
+	if err := cfg.validateRegions(); err != nil {
+		return nil, err
 	}
 	if s.zid.IsZero() {
 		s.zid = NewZID()
@@ -437,6 +452,11 @@ type TransportInfo struct {
 	// PriorityStreams: each priority has its own stream (QUIC multistream).
 	PriorityStreams bool
 	AuthUser        string // the user the node authenticated as, if any
+	// Region is the node's region; Gateway reports that it is our region
+	// gateway (we are south of it); RegionName is the name it announced.
+	Region     Region
+	Gateway    bool
+	RegionName string
 }
 
 // Transports describes the unicast transports to the nodes we are
@@ -456,7 +476,8 @@ func (s *Session) Transports() []TransportInfo {
 			Links: f.tr.Links(), BatchSize: f.tr.BatchSize(), QoS: f.tr.QoS(),
 			LowLatency: f.tr.LowLatency(), Compression: f.tr.Compression(),
 			MultiLink: f.tr.MultiLink(), SharedMem: f.shm != nil, AuthUser: f.tr.AuthUser(),
-			PriorityStreams: f.tr.PriorityStreams()})
+			PriorityStreams: f.tr.PriorityStreams(), Region: f.region,
+			Gateway: f.remoteBound == BoundSouth, RegionName: f.regionName})
 	}
 	return out
 }
@@ -537,7 +558,9 @@ func (s *Session) faceList() []*face {
 func (s *Session) faceListLocked() []*face {
 	out := make([]*face, 0, len(s.faces))
 	for _, f := range s.faces {
-		out = append(out, f)
+		if f.live {
+			out = append(out, f)
+		}
 	}
 	return out
 }
@@ -565,22 +588,26 @@ func (s *Session) broadcast(faces []*face, msgs ...transport.Encoder) error {
 }
 
 // declareLocalLocked announces a change to one of the session's own entities.
-// It is called with s.mu held and unlocks it. Clients and peers send msg to
-// every face; a router tells the faces whose interests cover the entity.
+// It is called with s.mu held and unlocks it. North faces (peers, our
+// gateways) get msg; south faces whose interests cover the entity, and the
+// router mesh, are told through routerUpdateLocked.
 func (s *Session) declareLocalLocked(k declKind, key string, msg transport.Encoder) error {
 	defer s.checkMatching()
-	if s.cfg.Mode == ModeRouter {
-		out := outbox{}
+	out := outbox{}
+	if s.cfg.Mode != ModeClient {
 		s.routerUpdateLocked(k, key, out)
-		s.mu.Unlock()
-		if s.closed.Load() {
-			return ErrSessionClosed
-		}
-		out.send()
-		return nil
 	}
-	faces := s.faceListLocked()
+	var faces []*face
+	for _, f := range s.faceListLocked() {
+		if f.push || f.routed {
+			faces = append(faces, f)
+		}
+	}
 	s.mu.Unlock()
+	if s.closed.Load() {
+		return ErrSessionClosed
+	}
+	out.send()
 	return s.broadcast(faces, msg)
 }
 
@@ -624,6 +651,8 @@ func (s *Session) transportConfig(f *face) transport.Config {
 		MultiLinkKey: s.mlKey,
 		Join:         func(z protocol.ZID) *transport.Unicast { return s.join(f, z) },
 		Auth:         s.cfg.Auth,
+		RegionName:   s.cfg.RegionName,
+		Bound:        func(p transport.PeerInfo) (transport.Bound, error) { return s.boundFor(f, p) },
 	}
 }
 
@@ -677,21 +706,9 @@ func (s *Session) admit(f *face, z protocol.ZID, w protocol.WhatAmI) error {
 	if _, dup := s.faces[string(z.Bytes())]; dup {
 		return transport.ErrDuplicate
 	}
-	switch s.cfg.Mode {
-	case ModeClient:
-		f.routed = true
-	case ModePeer:
-		f.routed = w == protocol.Router
-		f.push = !f.routed
-	case ModeRouter:
-		if w == protocol.Router {
-			f.mesh = true
-		} else {
-			f.router = newRouterState()
-		}
-	}
+	// The face's region, hence its role, is known once OPEN is done
+	// (established); until then declarations skip it (it is not live).
 	s.faces[string(z.Bytes())] = f
-	f.initial = s.snapshotLocked(f)
 	return nil
 }
 
@@ -706,6 +723,7 @@ func (s *Session) dial(ep string) (*face, error) {
 		return nil, err
 	}
 	f := newFace(s)
+	f.ifaces = link.LocalInterfaces(l)
 	if loc, err := link.Parse(ep); err == nil {
 		f.proto = loc.Protocol
 	}
@@ -717,6 +735,7 @@ func (s *Session) dial(ep string) (*face, error) {
 func (s *Session) accept(l transport.Link, proto string) {
 	f := newFace(s)
 	f.proto = proto
+	f.ifaces = link.LocalInterfaces(l)
 	tr, err := transport.Accept(l, s.transportConfig(f), s.callbacks(f))
 	_ = s.established(f, l, tr, err)
 }
@@ -740,6 +759,20 @@ func (s *Session) established(f *face, l transport.Link, tr *transport.Unicast, 
 		close(f.ready)
 		return err
 	}
+	s.mu.Lock()
+	if err := s.assignRegionLocked(f, tr); err != nil {
+		if s.faces[string(f.zid.Bytes())] == f {
+			delete(s.faces, string(f.zid.Bytes()))
+		}
+		s.mu.Unlock()
+		_ = tr.Close()
+		close(f.ready)
+		return fmt.Errorf("zenoh: region of %s: %w", f.zid, err)
+	}
+	f.live = true
+	f.initial = s.snapshotLocked(f)
+	upstream := f.router != nil && s.needUpstreamLocked()
+	s.mu.Unlock()
 	f.tr = tr
 	f.linkDone = tr.LinkDone(l)
 	f.shm = shmLink(tr)
@@ -751,6 +784,9 @@ func (s *Session) established(f *face, l transport.Link, tr *transport.Unicast, 
 		_ = tr.Send(true, f.initial...)
 	}
 	f.initial = nil
+	if upstream {
+		s.startUpstream() // before f's first INTEREST can be read
+	}
 	close(f.ready)
 	if s.closed.Load() {
 		f.close()
@@ -759,11 +795,15 @@ func (s *Session) established(f *face, l transport.Link, tr *transport.Unicast, 
 	if f.mesh {
 		s.meshLinkUp(f)
 	}
-	if s.gossip != nil && gossipTarget(f.whatami) {
-		s.gossipLinkUp(f)
-	}
-	if s.gossipNet != nil && gossipTarget(f.whatami) {
-		s.gossipNetLinkUp(f)
+	if !f.region.South {
+		if s.gossip != nil && gossipTarget(f.whatami) {
+			s.gossipLinkUp(f)
+		}
+		if s.gossipNet != nil && gossipTarget(f.whatami) {
+			s.gossipNetLinkUp(f)
+		}
+	} else if f.region.Mode == protocol.Peer {
+		s.southLinkUp(f)
 	}
 	return nil
 }

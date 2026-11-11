@@ -33,9 +33,21 @@ type face struct {
 	routed bool
 	// push: peer-to-peer face; we also push all our declarations to it.
 	push bool
-	// router: per-face routing state when we are a router and the face is a
-	// client or peer.
+	// router: per-face routing state when the face is in one of our south
+	// regions (we are its gateway): it learns about entities through
+	// INTERESTs.
 	router *routerState
+	// relay: the entities of our south regions we declared to a north face
+	// (a peer, or our gateway), on top of our session's own.
+	relay *routerState
+	// region is the face's region; remoteBound the side of it we stand on
+	// (BoundSouth: it is our gateway); regionName what it announced.
+	region      Region
+	remoteBound Bound
+	regionName  string
+	transient   *Region  // region by the custom gateway config, set during OPEN
+	ifaces      []string // local network interfaces of its link
+	live        bool     // handshake done and role assigned (guarded by s.mu)
 	// mesh: we are a router and the face is another router.
 	mesh bool
 	// proto is the protocol of the link the face was made on ("tcp", ...).
@@ -103,10 +115,11 @@ func (f *face) close() {
 	}
 }
 
-// snapshotLocked lists what a new face must learn about us: our key-expr ids,
-// and, for push faces, every subscriber, queryable and token, closed by the
-// initial-interest D_FINAL. Routed faces ask with INTERESTs instead; we only
-// re-send them our liveliness interests.
+// snapshotLocked lists what a new face must learn about us: our key-expr
+// ids; for north faces, every entity of our session and of our south
+// regions, closed (peers) by the initial-interest D_FINAL; for our gateways
+// also our liveliness and matching interests. South faces ask with
+// INTERESTs instead.
 func (s *Session) snapshotLocked(f *face) []transport.Encoder {
 	var out []transport.Encoder
 	decl := func(d protocol.Declaration) {
@@ -115,17 +128,8 @@ func (s *Session) snapshotLocked(f *face) []transport.Encoder {
 	for id, key := range s.localExprs {
 		decl(&protocol.DeclareKeyExpr{ID: id, WireExpr: protocol.WireExpr{Suffix: key}})
 	}
-	if f.routed {
-		for id, ls := range s.livSubs {
-			out = append(out, ls.interest(id, protocol.InterestCurrentFuture))
-		}
-		for _, m := range s.matchers {
-			out = append(out, m.interest(protocol.InterestCurrentFuture))
-		}
-		return out
-	}
-	if !f.push {
-		return out // router mode: faces learn about us through their interests
+	if !f.push && !f.routed {
+		return out // south faces learn about us through their interests
 	}
 	for id, sub := range s.subs {
 		decl(&protocol.DeclareSubscriber{ID: id, WireExpr: protocol.WireExpr{Suffix: sub.key.String()}})
@@ -135,6 +139,18 @@ func (s *Session) snapshotLocked(f *face) []transport.Encoder {
 	}
 	for id, t := range s.localTokens {
 		decl(&protocol.DeclareToken{ID: id, WireExpr: protocol.WireExpr{Suffix: t.key}})
+	}
+	if f.relay != nil {
+		out = append(out, s.relayedLocked(f, nil)...)
+	}
+	if f.routed {
+		for id, ls := range s.livSubs {
+			out = append(out, ls.interest(id, protocol.InterestCurrentFuture))
+		}
+		for _, m := range s.matchers {
+			out = append(out, m.interest(protocol.InterestCurrentFuture))
+		}
+		return append(out, s.upstreamSnapshotLocked(f)...)
 	}
 	out = append(out, &protocol.Declare{HasInterestID: true, InterestID: initialInterestID,
 		QoS: protocol.QoSDeclare, Body: &protocol.DeclareFinal{}})
@@ -176,7 +192,9 @@ func (f *face) onClose(error) {
 		}
 	}
 	out := outbox{}
-	if f.router != nil {
+	wasLive := f.live
+	f.live = false
+	if wasLive && s.cfg.Mode != ModeClient && !f.mesh {
 		s.routerFaceGoneLocked(f, out)
 	}
 	if f.mesh && s.mesh != nil {
@@ -188,6 +206,7 @@ func (f *face) onClose(error) {
 	if s.gossipNet != nil {
 		s.gossipNetLinkDownLocked(f, out)
 	}
+	s.southLinkDownLocked(f)
 	var gone []string
 	for _, key := range f.tokens {
 		gone = append(gone, key)
@@ -196,6 +215,9 @@ func (f *face) onClose(error) {
 	s.mu.Unlock()
 
 	out.send()
+	if f.routed {
+		s.upstreamDone(f)
+	}
 	s.checkMatching()
 	for _, rid := range routes {
 		s.routeDone(rid, f, false)
@@ -284,20 +306,24 @@ func (f *face) onMessage(m protocol.Message, reliable bool) error {
 			return nil // unknown mapping: drop, as zenoh-rust does
 		}
 		s.dispatchSample(sampleFromBody(key, m.Body, m.QoS))
-		if s.cfg.Mode == ModeRouter {
+		if s.cfg.Mode != ModeClient {
 			s.routerForward(f, key, m, reliable)
 		}
 	case *protocol.OAM:
 		if f.mesh {
 			s.meshOAM(f, m)
 			s.checkMatching()
+		} else if f.region.South {
+			if f.region.Mode == protocol.Peer {
+				s.southOAM(f, m)
+			}
 		} else if s.gossip != nil {
 			s.gossipOAM(f, m)
 		} else if s.gossipNet != nil {
 			s.gossipNetOAM(f, m)
 		}
 	case *protocol.Request:
-		if s.cfg.Mode == ModeRouter {
+		if s.cfg.Mode != ModeClient {
 			if key, ok := f.resolve(m.WireExpr); ok {
 				s.routerRequest(f, key, m)
 			} else {
@@ -416,7 +442,14 @@ func (f *face) handleDeclare(m *protocol.Declare) {
 		}
 	case *protocol.DeclareFinal:
 		if m.HasInterestID && m.InterestID != initialInterestID {
-			s.livGetFinal(m.InterestID, f)
+			s.mu.Lock()
+			up := s.upstream != nil && s.upstream.id == m.InterestID
+			s.mu.Unlock()
+			if up {
+				s.upstreamDone(f)
+			} else {
+				s.livGetFinal(m.InterestID, f)
+			}
 		}
 	}
 }
@@ -425,7 +458,7 @@ func (f *face) handleDeclare(m *protocol.Declare) {
 // changed; it unlocks, and in router mode tells interested faces.
 func (f *face) propagateLocked(k declKind, key string) {
 	s := f.s
-	if f.router == nil {
+	if s.cfg.Mode == ModeClient || !f.live {
 		s.mu.Unlock()
 		return
 	}
@@ -473,6 +506,19 @@ func (f *face) handleInterest(m *protocol.Interest) {
 		for id, t := range s.localTokens {
 			if match(t.key) {
 				decl(&protocol.DeclareToken{ID: id, WireExpr: protocol.WireExpr{Suffix: t.key}})
+			}
+		}
+	}
+	if f.relay != nil { // and those of our south regions
+		for k := declKind(0); k < nKinds; k++ {
+			if m.Options&k.option() == 0 {
+				continue
+			}
+			for _, key := range s.keysLocked(k, filter, f) {
+				if d := f.relay.declared[k][key]; d != nil {
+					id := m.ID
+					msgs = append(msgs, declMsg(k, d.id, key, d.complete, &id))
+				}
 			}
 		}
 	}

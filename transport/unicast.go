@@ -89,6 +89,14 @@ type Config struct {
 	// handshake proved it is the same peer. Open and Accept then return that
 	// transport. Returning nil makes the handshake call Admit.
 	Join func(zid protocol.ZID) *Unicast
+
+	// RegionName, if set, is announced to the peer in INIT (zenoh-rust
+	// region_name) so that it can sort us into one of its subregions.
+	RegionName string
+	// Bound, if set, is called during OPEN to decide which side of us the
+	// peer stands on; anything but BoundNone is told to the peer
+	// (open::ext::RemoteBound). An error aborts the handshake.
+	Bound func(PeerInfo) (Bound, error)
 }
 
 func (c *Config) setDefaults() {
@@ -228,6 +236,9 @@ type Unicast struct {
 
 	peerZID     protocol.ZID
 	peerWhatAmI protocol.WhatAmI
+	peerRegion  string // region name the peer announced
+	peerBound   Bound  // side of the peer we stand on, by its OPEN
+	ourBound    Bound  // side of us the peer stands on, as we told it
 	snMask      uint64
 	// qos is set when the QoS extension was negotiated.
 	qos bool
@@ -572,6 +583,7 @@ func (t *Unicast) openHandshake() error {
 	}
 	syn.Exts = addExt(syn.Exts, t.mlInitSyn())
 	syn.Exts = addExt(syn.Exts, t.authInitSyn())
+	syn.Exts = addExt(syn.Exts, t.regionNameExt())
 	if t.ext != nil {
 		syn.Exts = addExt(syn.Exts, t.ext.InitSyn())
 	}
@@ -590,6 +602,10 @@ func (t *Unicast) openHandshake() error {
 		return fmt.Errorf("%w: peer protocol version %#x, want %#x", ErrHandshake, ack.Version, protocol.ProtocolVersion)
 	}
 	t.peerZID, t.peerWhatAmI = ack.ZID, ack.WhatAmI
+	if err := t.readRegionName(ack.Exts); err != nil {
+		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
+		return err
+	}
 	if t.cfg.QoS {
 		if err := t.negotiateQoS(ack.Exts); err != nil {
 			_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
@@ -635,6 +651,12 @@ func (t *Unicast) openHandshake() error {
 	open.LeaseSeconds, open.Lease = t.leaseFields()
 	open.Exts = addExt(open.Exts, t.mlOpenSyn())
 	open.Exts = addExt(open.Exts, t.authOpenSyn())
+	rb, err := t.remoteBoundExt()
+	if err != nil {
+		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseGeneric})
+		return err
+	}
+	open.Exts = addExt(open.Exts, rb)
 	if t.ext != nil {
 		open.Exts = addExt(open.Exts, t.ext.OpenSyn(l.reliable))
 	}
@@ -659,6 +681,10 @@ func (t *Unicast) openHandshake() error {
 		return err
 	}
 	t.mlOpenAck(findExt(oack.Exts, extMultiLink))
+	if err := t.readRemoteBound(oack.Exts); err != nil {
+		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
+		return err
+	}
 	if err := t.authOpenAck(findExt(oack.Exts, extAuth)); err != nil {
 		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
 		return err
@@ -710,6 +736,10 @@ func (t *Unicast) acceptHandshake() error {
 		return fmt.Errorf("%w: %w", ErrHandshake, ErrSelf)
 	}
 	t.peerZID, t.peerWhatAmI = syn.ZID, syn.WhatAmI
+	if err := t.readRegionName(syn.Exts); err != nil {
+		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
+		return err
+	}
 	if t.cfg.QoS {
 		if err := t.negotiateQoS(syn.Exts); err != nil {
 			_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
@@ -767,6 +797,7 @@ func (t *Unicast) acceptHandshake() error {
 	}
 	ack.Exts = addExt(ack.Exts, t.mlAcceptInitAck())
 	ack.Exts = addExt(ack.Exts, t.authAcceptInitAck())
+	ack.Exts = addExt(ack.Exts, t.regionNameExt())
 	if t.ext != nil {
 		ack.Exts = addExt(ack.Exts, t.ext.AcceptInitAck())
 	}
@@ -799,6 +830,10 @@ func (t *Unicast) acceptHandshake() error {
 		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
 		return err
 	}
+	if err := t.readRemoteBound(osyn.Exts); err != nil {
+		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
+		return err
+	}
 	if t.ext != nil {
 		if err := t.ext.AcceptOpenSyn(findExt(osyn.Exts, t.ext.ExtID())); err != nil {
 			_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
@@ -815,6 +850,12 @@ func (t *Unicast) acceptHandshake() error {
 	oack.LeaseSeconds, oack.Lease = t.leaseFields()
 	oack.Exts = addExt(oack.Exts, t.mlAcceptOpenAck())
 	oack.Exts = addExt(oack.Exts, t.authAcceptOpenAck())
+	rb, err := t.remoteBoundExt()
+	if err != nil {
+		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseGeneric})
+		return err
+	}
+	oack.Exts = addExt(oack.Exts, rb)
 	if t.ext != nil {
 		oack.Exts = addExt(oack.Exts, t.ext.AcceptOpenAck(l.reliable))
 	}

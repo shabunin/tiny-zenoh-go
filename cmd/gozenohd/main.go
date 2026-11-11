@@ -63,6 +63,8 @@ func main() {
 	flag.Var(&knownKeys, "auth-known-key", "PKCS#1 PEM RSA public key accepted from nodes (repeatable)")
 	lowLatency := flag.Bool("lowlatency", false, "low-latency transport (no batching, no QoS) with nodes that enable it")
 	aclFile := flag.String("acl", "", "access control: JSON file with zenoh's access_control section")
+	regionName := flag.String("region-name", "", "region name announced to the nodes we connect to")
+	gatewayFile := flag.String("gateway", "", "south subregions: JSON file with zenoh's gateway section")
 	flag.Parse()
 
 	cfg := zenoh.Config{
@@ -83,6 +85,13 @@ func main() {
 	cfg.Auth = auth
 	if *aclFile != "" {
 		if cfg.ACL, err = loadACL(*aclFile); err != nil {
+			fmt.Fprintln(os.Stderr, "gozenohd:", err)
+			os.Exit(2)
+		}
+	}
+	cfg.RegionName = *regionName
+	if *gatewayFile != "" {
+		if cfg.Gateway, err = loadGateway(*gatewayFile); err != nil {
 			fmt.Fprintln(os.Stderr, "gozenohd:", err)
 			os.Exit(2)
 		}
@@ -195,4 +204,76 @@ func loadACL(file string) (*zenoh.ACLConfig, error) {
 		return nil, nil
 	}
 	return &c.ACLConfig, nil
+}
+
+// loadGateway reads a JSON copy of zenoh's gateway config section:
+// {"south": "auto"} or {"south": [{"filters": [{"modes": [...], "zids":
+// [...], "interfaces": [...], "region_names": [...], "negated": bool}]}]}.
+func loadGateway(file string) (zenoh.GatewayConfig, error) {
+	var gc zenoh.GatewayConfig
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return gc, err
+	}
+	var c struct {
+		South json.RawMessage `json:"south"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&c); err != nil {
+		return gc, fmt.Errorf("%s: %w", file, err)
+	}
+	var preset string
+	if len(c.South) == 0 || json.Unmarshal(c.South, &preset) == nil {
+		if preset != "" && preset != "auto" {
+			return gc, fmt.Errorf("%s: unknown gateway preset %q", file, preset)
+		}
+		return gc, nil
+	}
+	var subs []struct {
+		Filters *[]struct {
+			Modes       []string `json:"modes"`
+			ZIDs        []string `json:"zids"`
+			Interfaces  []string `json:"interfaces"`
+			RegionNames []string `json:"region_names"`
+			Negated     bool     `json:"negated"`
+		} `json:"filters"`
+	}
+	dec = json.NewDecoder(bytes.NewReader(c.South))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&subs); err != nil {
+		return gc, fmt.Errorf("%s: south: %w", file, err)
+	}
+	gc.South = []zenoh.Subregion{}
+	for _, sr := range subs {
+		var out zenoh.Subregion
+		if sr.Filters != nil {
+			out.Filters = []zenoh.GatewayFilter{}
+			for _, f := range *sr.Filters {
+				gf := zenoh.GatewayFilter{Interfaces: f.Interfaces, RegionNames: f.RegionNames, Negated: f.Negated}
+				for _, m := range f.Modes {
+					switch m {
+					case "router":
+						gf.Modes |= zenoh.MatchRouter
+					case "peer":
+						gf.Modes |= zenoh.MatchPeer
+					case "client":
+						gf.Modes |= zenoh.MatchClient
+					default:
+						return gc, fmt.Errorf("%s: unknown mode %q", file, m)
+					}
+				}
+				for _, z := range f.ZIDs {
+					zid, err := protocol.ParseZID(z)
+					if err != nil {
+						return gc, fmt.Errorf("%s: zid %q: %w", file, z, err)
+					}
+					gf.ZIDs = append(gf.ZIDs, zid)
+				}
+				out.Filters = append(out.Filters, gf)
+			}
+		}
+		gc.South = append(gc.South, out)
+	}
+	return gc, nil
 }

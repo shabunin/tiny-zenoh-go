@@ -47,6 +47,9 @@ func (s *Session) gossipNetOAM(f *face, m *protocol.OAM) {
 	if err != nil {
 		return
 	}
+	if gossipTarget(f.whatami) {
+		s.gossipNetLinkUp(f) // its link states may come before established() adds the link
+	}
 	locs := s.gossipLocators()
 	type cand struct {
 		zid  ZID
@@ -61,7 +64,7 @@ func (s *Session) gossipNetOAM(f *face, m *protocol.OAM) {
 	s.queueLinkStates(sends, out)
 	for _, i := range n.changed {
 		nd := n.nodes[i]
-		if i == 0 || !nd.hasLoc || len(nd.locators) == 0 || !nd.hasWAI ||
+		if i == 0 || nd == nil || !nd.hasLoc || len(nd.locators) == 0 || !nd.hasWAI ||
 			!s.cfg.Gossip.Autoconnect.Matches(nd.whatami) || s.faces[string(nd.zid.Bytes())] != nil {
 			continue
 		}

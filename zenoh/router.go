@@ -72,6 +72,8 @@ type routerState struct {
 	nextID    uint32
 }
 
+func newRelayState() *routerState { return newRouterState() }
+
 func newRouterState() *routerState {
 	rs := &routerState{interests: map[uint32]*remoteInterest{}}
 	for k := range rs.declared {
@@ -80,12 +82,24 @@ func newRouterState() *routerState {
 	return rs
 }
 
-// sourcesLocked reports whether anyone other than exclude (the router's own
-// session, its clients and peers, and other routers) has an entity of kind k
-// on exactly key, and for queryables whether any of them is complete.
-func (s *Session) sourcesLocked(k declKind, key string, exclude *face) (present, complete bool) {
-	present, complete = s.localSourcesLocked(k, key, exclude)
-	if s.mesh != nil {
+// sourceVisibleLocked reports whether the entities of face g are told to
+// dst: by region (crossesLocked), or, for dst nil (our announcement as a
+// source to the router mesh), all of our faces but routers.
+func (s *Session) sourceVisibleLocked(g, dst *face) bool {
+	if g == dst || !g.live || g.mesh {
+		return false
+	}
+	return dst == nil || s.crossesLocked(g, dst)
+}
+
+// sourcesLocked reports whether any source of (k, key) visible to dst
+// exists (our session, our faces by region, other routers), and for
+// queryables whether any of them is complete. A north face (relay) is told
+// only about our south regions: our session declares its own entities
+// itself.
+func (s *Session) sourcesLocked(k declKind, key string, dst *face) (present, complete bool) {
+	present, complete = s.localSourcesLocked(k, key, dst)
+	if s.mesh != nil && dst != nil && dst.relay == nil {
 		for _, info := range s.mesh.remote[k][key] {
 			present, complete = true, complete || info.complete
 		}
@@ -94,29 +108,31 @@ func (s *Session) sourcesLocked(k declKind, key string, exclude *face) (present,
 }
 
 // localSourcesLocked is sourcesLocked without other routers.
-func (s *Session) localSourcesLocked(k declKind, key string, exclude *face) (present, complete bool) {
-	switch k {
-	case kindSub:
-		for _, sub := range s.subs {
-			if sub.key.String() == key {
-				return true, false
+func (s *Session) localSourcesLocked(k declKind, key string, dst *face) (present, complete bool) {
+	if dst == nil || dst.relay == nil {
+		switch k {
+		case kindSub:
+			for _, sub := range s.subs {
+				if sub.key.String() == key {
+					return true, false
+				}
 			}
-		}
-	case kindQbl:
-		for _, q := range s.queryables {
-			if q.key.String() == key {
-				present, complete = true, complete || q.complete
+		case kindQbl:
+			for _, q := range s.queryables {
+				if q.key.String() == key {
+					present, complete = true, complete || q.complete
+				}
 			}
-		}
-	case kindToken:
-		for _, t := range s.localTokens {
-			if t.key == key {
-				return true, false
+		case kindToken:
+			for _, t := range s.localTokens {
+				if t.key == key {
+					return true, false
+				}
 			}
 		}
 	}
 	for _, f := range s.faces {
-		if f == exclude {
+		if !s.sourceVisibleLocked(f, dst) {
 			continue
 		}
 		switch k {
@@ -143,36 +159,38 @@ func (s *Session) localSourcesLocked(k declKind, key string, exclude *face) (pre
 	return present, complete
 }
 
-// keysLocked lists the distinct keys of kind k known from sources other than
-// exclude that intersect filter ("" = all).
-func (s *Session) keysLocked(k declKind, filter string, exclude *face) []string {
+// keysLocked lists the distinct keys of kind k known from sources visible
+// to dst that intersect filter ("" = all).
+func (s *Session) keysLocked(k declKind, filter string, dst *face) []string {
 	set := map[string]bool{}
 	add := func(key string) {
 		if filter == "" || keyexpr.Intersect(filter, key) {
 			set[key] = true
 		}
 	}
-	switch k {
-	case kindSub:
-		for _, sub := range s.subs {
-			add(sub.key.String())
+	if dst == nil || dst.relay == nil {
+		switch k {
+		case kindSub:
+			for _, sub := range s.subs {
+				add(sub.key.String())
+			}
+		case kindQbl:
+			for _, q := range s.queryables {
+				add(q.key.String())
+			}
+		case kindToken:
+			for _, t := range s.localTokens {
+				add(t.key)
+			}
 		}
-	case kindQbl:
-		for _, q := range s.queryables {
-			add(q.key.String())
-		}
-	case kindToken:
-		for _, t := range s.localTokens {
-			add(t.key)
-		}
-	}
-	if s.mesh != nil {
-		for key := range s.mesh.remote[k] {
-			add(key)
+		if s.mesh != nil && dst != nil {
+			for key := range s.mesh.remote[k] {
+				add(key)
+			}
 		}
 	}
 	for _, f := range s.faces {
-		if f == exclude {
+		if !s.sourceVisibleLocked(f, dst) {
 			continue
 		}
 		switch k {
@@ -241,36 +259,71 @@ func (o outbox) send() {
 }
 
 // routerUpdateLocked re-evaluates entity (k, key) for every face after its
-// sources changed: faces with a matching Future interest get it declared
-// once it exists (or re-declared when a queryable's completeness changes),
-// and undeclared when its last source is gone.
+// sources changed: south faces with a matching Future interest get it
+// declared once it exists (or re-declared when a queryable's completeness
+// changes), and undeclared when its last source is gone; north faces
+// (relay) are kept told about every entity of our south regions.
 func (s *Session) routerUpdateLocked(k declKind, key string, out outbox) {
 	s.meshOwnUpdateLocked(k, key, out)
 	for _, f := range s.faces {
-		rs := f.router
+		rs, relay := f.router, false
 		if rs == nil {
+			rs, relay = f.relay, true
+		}
+		if rs == nil || !f.live {
 			continue
 		}
 		present, complete := s.sourcesLocked(k, key, f)
 		have := rs.declared[k][key]
+		interested := relay || f.futureInterestLocked(k, key)
 		switch {
 		case have != nil && !present:
 			delete(rs.declared[k], key)
 			out.add(f, undeclMsg(k, have.id, key))
-		case have == nil && !present && k == kindToken && f.futureInterestLocked(k, key):
+		case have == nil && !present && !relay && k == kindToken && interested:
 			// Like zenoh-rust: a token the face was never told about (its
 			// interest is future-only) still gets a one-shot undeclaration,
 			// so liveliness subscribers without history see it go.
 			out.add(f, undeclMsg(k, 0, key))
-		case present && have == nil && f.futureInterestLocked(k, key):
-			rs.nextID++
-			rs.declared[k][key] = &declared{id: rs.nextID, complete: complete}
-			out.add(f, declMsg(k, rs.nextID, key, complete, nil))
+		case present && have == nil && interested:
+			d := &declared{id: s.declIDLocked(rs, relay), complete: complete}
+			rs.declared[k][key] = d
+			out.add(f, declMsg(k, d.id, key, complete, nil))
 		case present && have != nil && k == kindQbl && have.complete != complete:
 			have.complete = complete
 			out.add(f, declMsg(k, have.id, key, complete, nil))
 		}
 	}
+}
+
+// declIDLocked picks the id of an entity we declare to a face: per face for
+// south faces, from the session's entity ids for north faces, which also
+// get our own entities under those ids.
+func (s *Session) declIDLocked(rs *routerState, relay bool) uint32 {
+	if relay {
+		s.nextEntity++
+		return s.nextEntity
+	}
+	rs.nextID++
+	return rs.nextID
+}
+
+// relayedLocked lists the declarations of our south regions' entities a
+// new north face must get, recording them in its relay state.
+func (s *Session) relayedLocked(f *face, interest *uint32) []transport.Encoder {
+	var out []transport.Encoder
+	for k := declKind(0); k < nKinds; k++ {
+		for _, key := range s.keysLocked(k, "", f) {
+			_, complete := s.sourcesLocked(k, key, f)
+			d := f.relay.declared[k][key]
+			if d == nil {
+				d = &declared{id: s.declIDLocked(f.relay, true), complete: complete}
+				f.relay.declared[k][key] = d
+			}
+			out = append(out, declMsg(k, d.id, key, complete, interest))
+		}
+	}
+	return out
 }
 
 func (f *face) futureInterestLocked(k declKind, key string) bool {
@@ -300,13 +353,24 @@ func (s *Session) routerInterest(f *face, m *protocol.Interest) {
 	}
 	future := m.Mode == protocol.InterestFuture || m.Mode == protocol.InterestCurrentFuture
 	current := m.Mode == protocol.InterestCurrent || m.Mode == protocol.InterestCurrentFuture
+	if future {
+		s.mu.Lock()
+		f.router.interests[m.ID] = in
+		s.mu.Unlock()
+	}
+	if current {
+		// Answer once our own gateways (if any) told us what they know.
+		s.afterUpstream(func() { s.answerInterest(f, m, in, future) })
+	}
+}
+
+// answerInterest sends the current part of south face f's interest m: the
+// matching entities visible to it, then D_FINAL.
+func (s *Session) answerInterest(f *face, m *protocol.Interest, in *remoteInterest, future bool) {
 	var msgs []transport.Encoder
 	s.mu.Lock()
 	rs := f.router
-	if future {
-		rs.interests[m.ID] = in
-	}
-	if current {
+	{
 		id := m.ID
 		for k := declKind(0); k < nKinds; k++ {
 			if in.opts&k.option() == 0 {
@@ -327,13 +391,9 @@ func (s *Session) routerInterest(f *face, m *protocol.Interest) {
 		}
 	}
 	s.mu.Unlock()
-	if current {
-		msgs = append(msgs, &protocol.Declare{HasInterestID: true, InterestID: m.ID,
-			QoS: protocol.QoSDeclare, Body: &protocol.DeclareFinal{}})
-	}
-	if len(msgs) > 0 {
-		_ = f.send(true, msgs...)
-	}
+	msgs = append(msgs, &protocol.Declare{HasInterestID: true, InterestID: m.ID,
+		QoS: protocol.QoSDeclare, Body: &protocol.DeclareFinal{}})
+	_ = f.send(true, msgs...)
 }
 
 // routerFaceGoneLocked propagates the removal of everything face f declared;
@@ -363,13 +423,17 @@ func (s *Session) routerForward(src *face, key string, m *protocol.Push, reliabl
 		s.mu.Unlock()
 		return
 	}
+	origin := s.originOf(src, tree)
 	var dst []*face
 	for _, f := range s.faces {
-		if f != src && f.wantsDataLocked(key) {
+		if f.live && f.wantsDataLocked(key) && s.forwardsLocked(src, f, origin) {
 			dst = append(dst, f)
 		}
 	}
-	routers := s.meshTargetsLocked(kindSub, tree, key, 0, src)
+	var routers map[*face]bool
+	if src.mesh || s.gatewayAllowsLocked(src, northSide, origin) {
+		routers = s.meshTargetsLocked(kindSub, tree, key, 0, src)
+	}
 	s.mu.Unlock()
 	fwd := *m
 	fwd.WireExpr = protocol.WireExpr{Suffix: key}
@@ -404,14 +468,23 @@ func (s *Session) routerRequest(src *face, key string, m *protocol.Request) {
 	if !ok {
 		tree = 0
 	}
-	routers := s.meshTargetsLocked(kindQbl, tree, key, m.Target, src)
+	origin := s.originOf(src, tree)
+	var routers map[*face]bool
+	if src.mesh || s.gatewayAllowsLocked(src, northSide, origin) {
+		routers = s.meshTargetsLocked(kindQbl, tree, key, m.Target, src)
+	}
 	for f := range routers {
 		rq.pending[f] = true
 	}
 	for _, f := range s.faces {
-		if f != src && f.wantsQueryLocked(key, m.Target) {
+		if f.live && f.wantsQueryLocked(key, m.Target) && s.forwardsLocked(src, f, origin) {
 			rq.pending[f] = true
 		}
+	}
+	if len(rq.pending) == 0 && s.cfg.Mode != ModeRouter {
+		s.mu.Unlock()
+		s.handleRequest(src, m) // only ours to answer
+		return
 	}
 	for _, q := range s.queryables {
 		if keyexpr.Intersect(q.key.String(), key) && (m.Target != TargetAllComplete || q.complete) {

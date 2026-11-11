@@ -226,6 +226,11 @@ type lsNetwork struct {
 	// multihop gossip): ours are selfLocs, set before each operation.
 	gossip   bool
 	selfLocs []string
+	// singlehop: a region gateway's graph of its south peers (zenoh-rust
+	// Network with neither full link state nor multihop gossip): nodes come
+	// only from received link states, and a neighbour's own state is relayed
+	// to the other neighbours, nothing further.
+	singlehop bool
 	// changed lists the nodes the last linkStates call added or updated.
 	changed []int
 }
@@ -303,6 +308,22 @@ func (n *lsNetwork) entry(i int, withZID, withLinks bool) linkState {
 // messages to send.
 func (n *lsNetwork) addLink(f *face) []lsSend {
 	n.links[f] = &lsLink{f: f, mappings: map[uint64]ZID{}}
+	if n.singlehop {
+		self := n.nodes[0]
+		self.links[zkey(f.zid)] = 0
+		self.sn++
+		// Tell the new neighbour about the others, so it can connect to them.
+		var list []linkState
+		for j, nd := range n.nodes {
+			if j > 0 && nd != nil && n.isNeighbour(nd.zid) {
+				list = append(list, n.entry(j, true, false))
+			}
+		}
+		if len(list) == 0 {
+			return nil
+		}
+		return []lsSend{{f, list}}
+	}
 	i := n.idx(f.zid)
 	isNew := i < 0
 	if isNew {
@@ -339,6 +360,14 @@ func (n *lsNetwork) removeLink(f *face) ([]ZID, []lsSend) {
 	}
 	delete(n.links, f)
 	delete(n.nodes[0].links, zkey(f.zid))
+	if n.singlehop {
+		if !n.isNeighbour(f.zid) {
+			if i := n.idx(f.zid); i > 0 {
+				n.nodes[i] = nil
+			}
+		}
+		return nil, nil
+	}
 	removed := n.removeDetached()
 	n.nodes[0].sn++
 	var out []lsSend
@@ -381,16 +410,12 @@ func (n *lsNetwork) removeDetached() []ZID {
 // linkStates applies a LinkStateList received from neighbour src. It returns
 // the routers that disappeared and the messages to send.
 func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
+	n.changed = n.changed[:0]
 	link := n.links[src]
 	if link == nil {
 		return nil, nil
 	}
-	type local struct {
-		zid   ZID
-		ls    linkState
-		links map[string]uint16
-	}
-	var states []local
+	var states []lsLocal
 	for _, ls := range list {
 		z := ls.zid
 		if !z.IsZero() {
@@ -398,7 +423,7 @@ func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
 		} else if z = link.mappings[ls.psid]; z.IsZero() {
 			continue // unknown psid
 		}
-		states = append(states, local{zid: z, ls: ls})
+		states = append(states, lsLocal{zid: z, ls: ls})
 	}
 	for i := range states {
 		st := &states[i]
@@ -414,6 +439,10 @@ func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
 			}
 			st.links[zkey(z)] = w
 		}
+	}
+
+	if n.singlehop {
+		return nil, n.singlehopStates(states)
 	}
 
 	var newNodes []int
@@ -495,6 +524,87 @@ func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
 		}
 	}
 	return removed, out
+}
+
+// lsLocal is a received link state with its ids mapped to ours.
+type lsLocal struct {
+	zid   ZID
+	ls    linkState
+	links map[string]uint16
+}
+
+func (n *lsNetwork) isNeighbour(z ZID) bool {
+	for f := range n.links {
+		if f.zid.Equal(z) {
+			return true
+		}
+	}
+	return false
+}
+
+// singlehopStates is zenoh-rust process_singlehop_gossip_linkstate.
+func (n *lsNetwork) singlehopStates(states []lsLocal) []lsSend {
+	var out []lsSend
+	for _, st := range states {
+		whatami, hasWAI := st.ls.whatami, st.ls.hasWAI
+		if !hasWAI {
+			whatami, hasWAI = protocol.Router, true
+		}
+		i := n.idx(st.zid)
+		if i == 0 {
+			continue
+		}
+		if i < 0 {
+			i = n.addNode(&lsNode{zid: st.zid, whatami: whatami, hasWAI: hasWAI, locators: st.ls.locators,
+				hasLoc: st.ls.hasLoc, sn: st.ls.sn, links: st.links, gateway: st.ls.gateway})
+			if !st.ls.hasLoc {
+				continue
+			}
+		} else {
+			nd := n.nodes[i]
+			if nd.sn >= st.ls.sn {
+				continue
+			}
+			nd.sn = st.ls.sn
+			// Gossip sends a node's links only to its gateways, and states
+			// of other nodes without them: keep what we know then.
+			if len(st.links) > 0 {
+				nd.links = st.links
+			}
+			if !st.ls.hasLoc || (nd.hasLoc && equalStrings(nd.locators, st.ls.locators)) {
+				continue
+			}
+			nd.locators, nd.hasLoc = st.ls.locators, true
+		}
+		if n.gossip && n.isNeighbour(st.zid) {
+			e := n.entry(i, true, false)
+			for g := range n.links {
+				if !g.zid.Equal(st.zid) {
+					out = append(out, lsSend{g, []linkState{e}})
+				}
+			}
+		}
+	}
+	return out
+}
+
+// gatewaysOf lists the gateways (us included) that node z is linked to,
+// or nil if z is unknown.
+func (n *lsNetwork) gatewaysOf(z ZID) []ZID {
+	i := n.idx(z)
+	if i < 0 {
+		return nil
+	}
+	var out []ZID
+	for _, nd := range n.nodes {
+		if nd == nil || !nd.gateway {
+			continue
+		}
+		if _, ok := n.nodes[i].links[zkey(nd.zid)]; ok {
+			out = append(out, nd.zid)
+		}
+	}
+	return out
 }
 
 // localPSID maps a psid announced by neighbour f to our index.

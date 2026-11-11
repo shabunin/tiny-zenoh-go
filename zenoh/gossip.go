@@ -133,7 +133,7 @@ func (s *Session) gossipLinkUp(f *face) {
 		s.mu.Unlock()
 		return
 	}
-	south := s.cfg.Mode == ModePeer && f.whatami == protocol.Router
+	south := f.remoteBound == BoundSouth // our gateway: it also gets our links
 	g.links = append(g.links, &gLink{f: f, south: south, mappings: map[uint64]string{}})
 	i, isNew := g.idx(f.zid), false
 	if i < 0 {
@@ -195,6 +195,9 @@ func (s *Session) gossipOAM(f *face, m *protocol.OAM) {
 	list, err := decodeLinkStates(m.Buf)
 	if err != nil {
 		return
+	}
+	if gossipTarget(f.whatami) {
+		s.gossipLinkUp(f) // its link states may come before established() adds the link
 	}
 	type cand struct {
 		zid  ZID

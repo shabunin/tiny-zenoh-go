@@ -98,7 +98,7 @@ session can publish, subscribe and serve queries itself.
 | `transport`      | ✅ | Unicast session over stream links (length-prefixed batches) or packet links (one batch per datagram, batch size capped at the link MTU), both sides of the handshake (`Open` and `Accept`, with duplicate/self rejection) + negotiation, stream framing, FRAME batching with SNs, FRAGMENT split/reassembly, keep-alive, lease expiry, CLOSE. **QoS** (INIT ext `QoS`/`QoSLink`, 8 priorities × reliable/best-effort SN channels, priority in FRAME/FRAGMENT); **compression** (INIT ext 0x6, batch header byte, own pure-Go LZ4 block codec in `internal/lz4`); **multilink** (`Config.MaxLinks`: INIT/OPEN ext 0x4 with zenoh's RSA-512 PKCS#1 key proof, one transport over several links with per-link batch size/compression/lease, zenoh-rust's link selection by reliability and priority range, link loss without session loss); **multicast** (`NewMulticast` over a `MulticastLink`: periodic `JOIN` with next SNs, per-sender SN windows and reassembly, sender leases, CLOSE); **low latency** (`Config.LowLatency`: INIT ext 0x5, every network message sent alone with no FRAME/SN/fragmentation, u32 LE length prefix on streams). Imports no `net`. |
 | `link`           | ✅ TCP, UDP, UDP multicast, TLS, QUIC, WS, Unix, serial | Locator parsing incl. `?metadata` / `#config`; TCP; UDP (MTU 65487 like zenoh on Linux, one listener socket demultiplexed per remote address); UDP multicast groups `udp/224.x.x.x:port#iface=<name>;ttl=<n>` (send socket bound to the interface, own datagrams filtered); TLS with zenoh's config keys (`root_ca_certificate`, `listen_*`/`connect_*` certificate & key as `_file`/`_base64`/`_raw`, `enable_mtls`, `verify_name_on_connect`); QUIC in `link/quic` (via `link.Register`; zenoh's variants chosen by ALPN from the locator metadata: single stream, multistream with a stream per priority (default), mixed reliability with best-effort traffic in QUIC datagrams `?mixed_rel=1`, datagrams only `?rel=0`); WebSocket `ws/host:port` (own minimal RFC 6455 code, one binary message per batch); Unix sockets `unixsock-stream/<path>` (flock'd `<path>.lock`, stale sockets replaced); serial `serial/<dev>#baudrate=N` (z-serial framing: COBS, CRC-32, I/A/R connect handshake, 1500-byte frames; Linux ttys opened raw with exclusive access; `link.NewSerial` wraps any byte stream, e.g. a TinyGo `machine.UART`). |
 | `shm`            | ✅ Linux | zenoh's POSIX shared memory, layout-compatible with zenoh-rust 1.x (SHM protocol v2): `/dev/shm/<id>.zenoh` metadata/data/auth segments, INIT/OPEN negotiation (challenges read from each other's auth segment), per-priority handoff counters, watchdog confirmation (50 ms) and validation (100 ms), refcounts and generations, garbage collection, orphan-segment cleanup. Enabled with `Config.SharedMemory` (`gozenohd --shm`): payloads ≥ 3 KiB to SHM-capable faces go through a 16 MiB pool; received SHM payloads are copied out. Stub returning `ErrUnsupported` elsewhere and on TinyGo. |
-| `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, admin space `@/<zid>/router`); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`, with `Multihop` relaying link states across any number of hops), declaration push between peers, writer-side filtering, peers attached to routers); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), matching status and matching listeners on publishers and queriers, **advanced pub/sub** (zenoh-ext compatible: `DeclareAdvancedPublisher` with cache, sequence numbers + heartbeats for miss detection, publisher detection; `DeclareAdvancedSubscriber` with history incl. late-joining publishers (`_max`, `_time` limits), in-order delivery, recovery of lost samples by gap queries / periodic queries / heartbeats, miss listeners, subscriber detection), `_anyke` replies, `_time` ranges (`ParseTimeRange`), source info on samples, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress). |
+| `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, admin space `@/<zid>/router`); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`, with `Multihop` relaying link states across any number of hops), declaration push between peers, writer-side filtering, peers attached to routers); **regions** (zenoh 1.10: every node sorted into its north region or a south subregion it is the gateway of; routers gossip with their peers and don't relay inside a peer region; peers are gateways of their clients; custom subregions by role/ZID/interface/announced `RegionName` with `Gateway.South`, so a peer can be the gateway of a group of peers; one forwarding gateway per peer when several serve it); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), matching status and matching listeners on publishers and queriers, **advanced pub/sub** (zenoh-ext compatible: `DeclareAdvancedPublisher` with cache, sequence numbers + heartbeats for miss detection, publisher detection; `DeclareAdvancedSubscriber` with history incl. late-joining publishers (`_max`, `_time` limits), in-order delivery, recovery of lost samples by gap queries / periodic queries / heartbeats, miss listeners, subscriber detection), `_anyke` replies, `_time` ranges (`ParseTimeRange`), source info on samples, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress). |
 
 ### Verified interop
 
@@ -135,6 +135,16 @@ session can publish, subscribe and serve queries itself.
   states relayed over two hops, then connects to it directly. This works
   with Rust relays and Go ends, and with Go relays and Rust ends. A
   single-hop control check confirms A never finds D.
+- **Regions**: a Rust router sorts Go peers into subregions by the names they
+  announce, relays between subregions and not inside one, and refuses an
+  unnamed peer. A Go peer gets "you are south of me" from a Rust peer
+  gateway, and a Rust peer gets it from a Go peer gateway; traffic crosses
+  both ways in each case. Rust clients reach Rust peers and each other through a Go
+  peer, and through a Go peer that sits under a router (client
+  publishers and queriers need the router's subscribers and queryables
+  relayed). Rust peers announcing names are sorted by `gozenohd -gateway`.
+  With three meshed routers and a peer attached to two of them, the peer
+  gets each sample once wherever it is published, as with Rust.
 - **QUIC variants**: single stream, multistream, mixed reliability,
   multistream + mixed reliability, and datagrams only. Each was tested Go ↔ Go,
   with a Rust peer dialing a Go peer, and with Go dialing a Rust router.
@@ -260,6 +270,14 @@ go run ./examples/zprobe                        # hex-dump a raw handshake
       (`JOIN`), ✅ multihop gossip (`scouting/gossip/multihop`). Peer
       link-state routing (`routing/peer/mode: linkstate`) was deprecated in
       zenoh 1.10 and has no effect there, so it isn't implemented.
+- [x] **M6e — Regions** (zenoh 1.10). Region name and remote-bound
+      handshake extensions; region computation (auto preset and custom
+      `gateway.south` filters); routing by region (gateways relay across
+      regions, never back into a peer region); single-hop gossip of a
+      gateway's south peers; multi-gateway de-duplication; peers as
+      gateways of clients and of peer subregions. Not done: router
+      subregions (routers south of a router), which zenoh-rust runs as a
+      second link-state mesh per subregion.
 - [x] **M7 — More links.** ✅ UDP, ✅ TLS (+ mTLS), ✅ QUIC (single
       stream, multistream, mixed reliability, datagrams), ✅ WebSocket,
       ✅ Unix sockets, ✅ serial. Not possible with quic-go: zenoh's
@@ -295,6 +313,26 @@ gozenoh/
 - **Every layer tested.** Spec examples and captured bytes are test vectors.
 
 ## Interop notes (things the spec doesn't make obvious)
+
+- Regions (zenoh 1.10) put two optional extensions into the handshake.
+  INIT carries the region name (ZBuf, id 8, 1 to 32 bytes of UTF-8). OPEN
+  carries the remote bound (Z64, id 7: 0 north, 1 south), which says which
+  side of the sender the receiver stands on. A node sends the bound only
+  with a custom `gateway.south`. Both sides then compute the region the
+  same way, and a conflict closes the transport.
+- Since 1.10 a router no longer relays between two peers attached to it:
+  they are in its south peer region and must link to each other, helped by
+  the router's single-hop gossip. Earlier gozenohd versions relayed, which
+  doubled every sample between peers that were also linked directly.
+- With several gateways, zenoh-rust lets only the highest ZID among the
+  gateways a peer is linked to forward that peer's traffic across.
+  Gateways learn this from the peer's gossip. The rule doesn't cover
+  everything: if a peer publishes to routers `a1` and `b2`, a subscriber
+  on `a1` gets each sample twice (once directly, once through `b2` and the
+  mesh), and gozenoh does the same.
+- In the Python binding the custom gateway goes in as a whole object,
+  `insert_json5("gateway", '{"south": [...]}')`; the path
+  `"gateway/south"` is an "unknown key".
 
 - The negotiated batch size **includes** the 2-byte stream length prefix:
   a batch body must be ≤ `batch_size - 2`, or zenohd drops the link.
