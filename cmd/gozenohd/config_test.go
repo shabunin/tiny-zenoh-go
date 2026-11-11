@@ -1,0 +1,185 @@
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/shabunin/tiny-zenoh-go/zenoh"
+)
+
+func TestConfigTree(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "z.json5")
+	if err := os.WriteFile(file, []byte(`{
+		// a zenohd-style file
+		mode: 'router',
+		id: "a1b2",
+		listen: { endpoints: { router: ["tcp/127.0.0.1:0"], peer: ["tcp/127.0.0.1:1"] } },
+		connect: { endpoints: [], timeout_ms: -1, },
+		scouting: { multicast: { enabled: false, address: "224.0.0.224:7446" } },
+		timestamping: { enabled: { router: true, peer: false } },
+		plugins: { storage_manager: { storages: { a: { key_expr: "a/**", volume: "memory" } } } },
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tree, err := configTree(file, "127.0.0.1:0", []string{
+		`plugins/storage_manager/storages/b:{key_expr:"b/**",strip_prefix:"b",volume:{id:"memory"},complete:"true",garbage_collection:{period:5,lifespan:60}}`,
+		`/metadata:{name:"x"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg zenoh.Config
+	p, err := applyConfig(tree, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mode != zenoh.ModeRouter || len(cfg.Listen) != 1 || cfg.Listen[0] != "tcp/127.0.0.1:0" || len(cfg.Connect) != 0 {
+		t.Fatalf("mode/endpoints: %v %v %v", cfg.Mode, cfg.Listen, cfg.Connect)
+	}
+	if cfg.ZID.String() != "a1b2" {
+		t.Fatalf("id: %v", cfg.ZID)
+	}
+	if !cfg.Scouting.Disable || cfg.Timestamping.Enabled == nil || !*cfg.Timestamping.Enabled {
+		t.Fatalf("scouting/timestamping: %+v %+v", cfg.Scouting, cfg.Timestamping)
+	}
+	if string(cfg.Metadata) != `{"name":"x"}` {
+		t.Fatalf("metadata: %s", cfg.Metadata)
+	}
+	if p.restAddr != "127.0.0.1:0" || len(p.storages) != 2 {
+		t.Fatalf("plugins: %+v", p)
+	}
+	b := p.storages[1]
+	if b.name != "b" || !b.cfg.Complete || b.cfg.StripPrefix != "b" || b.cfg.GCPeriod != 5*time.Second || b.cfg.GCLifespan != time.Minute {
+		t.Fatalf("storage b: %+v", b)
+	}
+
+	tree, err = configTree("", "", []string{
+		`transport:{unicast:{lowlatency:true,max_links:3,qos:{enabled:false},compression:{enabled:true}},` +
+			`link:{tx:{lease:5000,batch_size:8192},tls:{root_ca_certificate:"ca.pem",verify_name_on_connect:false}},` +
+			`shared_memory:{enabled:true},auth:{usrpwd:{user:"u",password:"p"}}}`,
+		`region_name:"r1"`, `queries_default_timeout:2500`, `namespace:"ns"`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg = zenoh.Config{}
+	if _, err = applyConfig(tree, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.LowLatency || cfg.MaxLinks != 3 || !cfg.DisableQoS || !cfg.Compression || cfg.Lease != 5*time.Second ||
+		cfg.BatchSize != 8192 || cfg.TLS == nil || cfg.TLS.RootCACertificate != "ca.pem" || !cfg.TLS.SkipNameVerification ||
+		cfg.SharedMemory == nil || cfg.Auth == nil || cfg.Auth.User != "u" || cfg.Auth.Password != "p" ||
+		cfg.RegionName != "r1" || cfg.QueryTimeout != 2500*time.Millisecond || cfg.Namespace != "ns" {
+		t.Fatalf("transport etc.: %+v", cfg)
+	}
+
+	// The whole configuration as --cfg ':...' replaces the file.
+	tree, err = configTree(file, "", []string{`:{mode:"peer"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tree) != 1 || tree["mode"] != "peer" {
+		t.Fatalf("inline config: %v", tree)
+	}
+
+	for _, bad := range [][]string{
+		{"nocolon"},
+		{`plugins/storage_manager/storages/x:{key_expr:"x/**",volume:"rocksdb"}`},
+		{`plugins/storage_manager/storages/x:{volume:"memory"}`},
+		{`mode:"satellite"`},
+	} {
+		tree, err := configTree("", "", bad)
+		if err == nil {
+			_, err = applyConfig(tree, &zenoh.Config{})
+		}
+		if err == nil {
+			t.Errorf("%v: no error", bad)
+		}
+	}
+}
+
+// TestPlugins runs a storage and the REST API on a router the way gozenohd
+// does: a client's put lands in the storage, and REST reads it back.
+func TestPlugins(t *testing.T) {
+	tree, err := configTree("", "127.0.0.1:0", []string{
+		`plugins/storage_manager/storages/demo:{key_expr:"demo/**",volume:"memory"}`,
+		`listen/endpoints:["tcp/127.0.0.1:0"]`,
+		`scouting/multicast/enabled:false`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := zenoh.Config{Mode: zenoh.ModeRouter}
+	p, err := applyConfig(tree, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := zenoh.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	p.restAddr = "127.0.0.1:0"
+	stop, err := startPlugins(r, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	c, err := zenoh.Open(zenoh.Config{Connect: r.Locators()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	time.Sleep(200 * time.Millisecond)
+	if err := c.Put("demo/a", []byte("hello"), zenoh.WithEncoding(zenoh.EncodingTextPlain)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	n := 0
+	for rep := range mustGet(t, c, "demo/**") {
+		if rep.Sample == nil || string(rep.Sample.Payload) != "hello" || rep.Sample.Timestamp == nil {
+			t.Fatalf("storage reply: %+v", rep)
+		}
+		n++
+	}
+	if n != 1 {
+		t.Fatalf("%d replies from the storage", n)
+	}
+	// startPlugins' REST server is on a random port it only prints; read
+	// through a second one.
+	closeREST, addr, err := startREST(r, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeREST()
+	resp, err := http.Get("http://" + addr + "/demo/**")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var out []struct {
+		Key, Value, Encoding string
+		Timestamp            *string
+	}
+	if err := json.Unmarshal(body, &out); err != nil || len(out) != 1 || out[0].Key != "demo/a" ||
+		out[0].Value != "hello" || out[0].Timestamp == nil || !strings.Contains(*out[0].Timestamp, "/") {
+		t.Fatalf("REST: %s (%v)", body, err)
+	}
+}
+
+func mustGet(t *testing.T, s *zenoh.Session, sel string) <-chan zenoh.Reply {
+	t.Helper()
+	ch, err := s.Get(sel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ch
+}

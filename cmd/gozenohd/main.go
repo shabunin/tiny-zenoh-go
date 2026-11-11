@@ -6,17 +6,19 @@
 //	gozenohd -l quic/0.0.0.0:7447 --tls-cert srv.pem --tls-key srv.key
 //	gozenohd -l tls/0.0.0.0:7447 --tls-cert srv.pem --tls-key srv.key [--tls-ca ca.pem --tls-mtls]
 //	gozenohd -e tcp/10.0.0.5:7447            # join another router (gozenohd or zenohd)
-//	gozenohd -config zenoh.json              # downsampling, low_pass_filter, qos/network, timestamping, adminspace, ...
+//	gozenohd -c zenoh.json5                  # zenoh JSON5 config: listen, connect, scouting, downsampling, qos, ...
+//	gozenohd --rest-http-port 8000           # REST API (plugins/rest)
+//	gozenohd --cfg 'plugins/storage_manager/storages/demo:{key_expr:"demo/**",volume:"memory"}'
 //
 // Clients and peers attach to it; it routes publications, queries and
 // liveliness between them, answers multicast scouting so they can find it,
 // and serves its admin space under @/<zid>/router (info, metrics, link-state
-// graphs, entities, route successors).
+// graphs, entities, route successors). Built-in plugins: the REST API and
+// the storage manager with its in-memory volume.
 package main
 
 import (
 	"bytes"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -29,7 +31,6 @@ import (
 	"github.com/shabunin/tiny-zenoh-go/link"
 	_ "github.com/shabunin/tiny-zenoh-go/link/quic" // quic/ locators (not in TinyGo builds)
 	"github.com/shabunin/tiny-zenoh-go/protocol"
-	"github.com/shabunin/tiny-zenoh-go/shm"
 	"github.com/shabunin/tiny-zenoh-go/transport"
 	"github.com/shabunin/tiny-zenoh-go/zenoh"
 )
@@ -44,7 +45,7 @@ func main() {
 	flag.Var(&listen, "l", "locator to listen on (repeatable; default tcp/0.0.0.0:7447)")
 	flag.Var(&connect, "e", "locator to connect to (repeatable)")
 	noScout := flag.Bool("no-multicast-scouting", false, "don't answer multicast SCOUTs")
-	scoutAddr := flag.String("scouting-address", "224.0.0.224:7446", "multicast scouting group")
+	scoutAddr := flag.String("scouting-address", defaultScoutAddr, "multicast scouting group")
 	id := flag.String("i", "", "router ZID in hex (default random)")
 	verbose := flag.Bool("v", false, "log connected sessions every 10s")
 	shmOn := flag.Bool("shm", false, "enable shared memory with same-host nodes (Linux)")
@@ -67,62 +68,100 @@ func main() {
 	aclFile := flag.String("acl", "", "access control: JSON file with zenoh's access_control section")
 	regionName := flag.String("region-name", "", "region name announced to the nodes we connect to")
 	gatewayFile := flag.String("gateway", "", "south subregions: JSON file with zenoh's gateway section")
-	configFile := flag.String("config", "", "JSON zenoh config file: its downsampling, low_pass_filter, qos/network, "+
-		"timestamping, access_control, gateway, adminspace and metadata sections")
+	configFile := flag.String("config", "", "zenoh config file (JSON5): its mode, id, listen, connect, scouting/multicast, "+
+		"downsampling, low_pass_filter, qos/network, timestamping, access_control, gateway, adminspace, metadata "+
+		"and plugins (rest, storage_manager with memory volumes) sections")
+	flag.StringVar(configFile, "c", "", "same as -config")
+	restPort := flag.String("rest-http-port", "", "enable the REST API: a port, <ip>:<port>, or none")
+	var cfgOverrides list
+	flag.Var(&cfgOverrides, "cfg", "config change KEY:VALUE, VALUE in JSON5, KEY a /-separated path or empty for the whole config (repeatable)")
+	noTimestamp := flag.Bool("no-timestamp", false, "don't timestamp routed data that has no timestamp")
+	adminPerms := flag.String("adminspace-permissions", "", "admin space permissions: r, rw or none (writes are not supported)")
 	flag.Parse()
 
 	cfg := zenoh.Config{
-		Mode:        zenoh.ModeRouter,
-		Listen:      listen,
-		Connect:     connect,
-		Scouting:    zenoh.ScoutingConfig{Disable: *noScout, Address: *scoutAddr},
-		TLS:         &tlsCfg,
-		Compression: *compress,
-		MaxLinks:    *maxLinks,
-		LowLatency:  *lowLatency,
+		Mode:     zenoh.ModeRouter,
+		Listen:   listen,
+		Connect:  connect,
+		Scouting: zenoh.ScoutingConfig{Address: defaultScoutAddr},
 	}
-	auth, err := authConfig(*usrpwdDict, *user, *password, *authKey, knownKeys)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "gozenohd:", err)
-		os.Exit(2)
-	}
-	cfg.Auth = auth
+	var err error
 	if *aclFile != "" {
 		if cfg.ACL, err = loadACL(*aclFile); err != nil {
 			fmt.Fprintln(os.Stderr, "gozenohd:", err)
 			os.Exit(2)
 		}
 	}
-	cfg.RegionName = *regionName
 	if *gatewayFile != "" {
 		if cfg.Gateway, err = loadGateway(*gatewayFile); err != nil {
 			fmt.Fprintln(os.Stderr, "gozenohd:", err)
 			os.Exit(2)
 		}
 	}
-	if *configFile != "" {
-		if err = loadConfig(*configFile, &cfg); err != nil {
-			fmt.Fprintln(os.Stderr, "gozenohd:", err)
-			os.Exit(2)
-		}
+	tree, err := configTree(*configFile, *restPort, cfgOverrides)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gozenohd:", err)
+		os.Exit(2)
 	}
-	if *shmOn {
-		cfg.SharedMemory = &shm.Options{}
+	// Flags given explicitly win over the configuration, as in zenohd.
+	flag.Visit(func(f *flag.Flag) {
+		set := func(path string, v any) { _ = insertPath(tree, path, v) }
+		switch f.Name {
+		case "no-multicast-scouting":
+			set("scouting/multicast/enabled", !*noScout)
+		case "scouting-address":
+			set("scouting/multicast/address", *scoutAddr)
+		case "shm":
+			set("transport/shared_memory/enabled", *shmOn)
+		case "compression":
+			set("transport/unicast/compression/enabled", *compress)
+		case "max-links":
+			set("transport/unicast/max_links", *maxLinks)
+		case "lowlatency":
+			set("transport/unicast/lowlatency", *lowLatency)
+		case "tls-cert":
+			set("transport/link/tls/listen_certificate", tlsCfg.ListenCertificate)
+		case "tls-key":
+			set("transport/link/tls/listen_private_key", tlsCfg.ListenPrivateKey)
+		case "tls-ca":
+			set("transport/link/tls/root_ca_certificate", tlsCfg.RootCACertificate)
+		case "tls-client-cert":
+			set("transport/link/tls/connect_certificate", tlsCfg.ConnectCertificate)
+		case "tls-client-key":
+			set("transport/link/tls/connect_private_key", tlsCfg.ConnectPrivateKey)
+		case "tls-mtls":
+			set("transport/link/tls/enable_mtls", tlsCfg.EnableMTLS)
+		case "usrpwd-dict":
+			set("transport/auth/usrpwd/dictionary_file", *usrpwdDict)
+		case "user":
+			set("transport/auth/usrpwd/user", *user)
+		case "password":
+			set("transport/auth/usrpwd/password", *password)
+		case "region-name":
+			set("region_name", *regionName)
+		case "no-timestamp":
+			set("timestamping/enabled", !*noTimestamp)
+		}
+	})
+	switch *adminPerms {
+	case "":
+	case "r", "rw", "none":
+		insertPath(tree, "adminspace/permissions", map[string]any{"read": *adminPerms != "none", "write": *adminPerms == "rw"})
+	default:
+		fmt.Fprintln(os.Stderr, "gozenohd: --adminspace-permissions: r, rw or none")
+		os.Exit(2)
+	}
+	plugins, err := applyConfig(tree, &cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gozenohd: config:", err)
+		os.Exit(2)
+	}
+	if err = pubkeyAuth(&cfg, *authKey, knownKeys); err != nil {
+		fmt.Fprintln(os.Stderr, "gozenohd:", err)
+		os.Exit(2)
 	}
 	if *id != "" {
-		h := *id
-		if len(h)%2 == 1 {
-			h = "0" + h
-		}
-		b, err := hex.DecodeString(h)
-		if err == nil {
-			// The ZID's text form is the little-endian u128 printed big-endian.
-			for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
-				b[i], b[j] = b[j], b[i]
-			}
-			cfg.ZID, err = protocol.NewZID(b)
-		}
-		if err != nil {
+		if cfg.ZID, err = parseZIDHex(*id); err != nil {
 			fmt.Fprintln(os.Stderr, "gozenohd: bad -i:", err)
 			os.Exit(2)
 		}
@@ -133,6 +172,12 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("gozenohd %s listening on %s\n", r.ZID(), strings.Join(r.Locators(), " "))
+	stopPlugins, err := startPlugins(r, plugins)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gozenohd:", err)
+		_ = r.Close()
+		os.Exit(1)
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -141,6 +186,7 @@ func main() {
 	for {
 		select {
 		case <-sig:
+			stopPlugins()
 			_ = r.Close()
 			return
 		case <-tick.C:
@@ -152,46 +198,38 @@ func main() {
 	}
 }
 
-// authConfig builds the handshake authentication settings from the flags
-// (nil when none is set).
-func authConfig(dict, user, password, keyFile string, known []string) (*transport.Auth, error) {
-	a := &transport.Auth{User: user, Password: password}
-	if (user == "") != (password == "") {
-		return nil, fmt.Errorf("--user and --password go together")
+// pubkeyAuth adds the --auth-key/--auth-known-key public key
+// authentication to cfg.
+func pubkeyAuth(cfg *zenoh.Config, keyFile string, known []string) error {
+	if keyFile == "" {
+		if len(known) > 0 {
+			return fmt.Errorf("--auth-known-key needs --auth-key")
+		}
+		return nil
 	}
-	if dict != "" {
-		b, err := os.ReadFile(dict)
-		if err != nil {
-			return nil, err
-		}
-		if a.Users, err = transport.ParseUsrPwdDict(b); err != nil {
-			return nil, err
-		}
+	if cfg.Auth == nil {
+		cfg.Auth = &transport.Auth{}
 	}
-	if keyFile != "" {
-		b, err := os.ReadFile(keyFile)
-		if err != nil {
-			return nil, err
-		}
-		if a.Key, err = transport.ParseRSAKeyPEM(b); err != nil {
-			return nil, err
-		}
+	a := cfg.Auth
+	b, err := os.ReadFile(keyFile)
+	if err != nil {
+		return err
+	}
+	if a.Key, err = transport.ParseRSAKeyPEM(b); err != nil {
+		return err
 	}
 	for _, f := range known {
 		b, err := os.ReadFile(f)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		k, err := transport.ParseRSAPublicKeyPEM(b)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", f, err)
+			return fmt.Errorf("%s: %w", f, err)
 		}
 		a.KnownKeys = append(a.KnownKeys, k)
 	}
-	if a.User == "" && a.Users == nil && a.Key == nil {
-		return nil, nil
-	}
-	return a, nil
+	return nil
 }
 
 // loadACL reads a JSON copy of zenoh's access_control config section (nil
@@ -302,80 +340,6 @@ func decodeStrict(b []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)
-}
-
-// loadConfig reads a zenoh configuration file (plain JSON, not JSON5) and
-// applies the sections gozenohd understands; it warns about the others.
-func loadConfig(file string, cfg *zenoh.Config) error {
-	b, err := os.ReadFile(file)
-	if err != nil {
-		return err
-	}
-	var sections map[string]json.RawMessage
-	if err := json.Unmarshal(b, &sections); err != nil {
-		return fmt.Errorf("%s: %w", file, err)
-	}
-	for name, v := range sections {
-		switch name {
-		case "downsampling":
-			err = decodeStrict(v, &cfg.Downsampling)
-		case "low_pass_filter":
-			err = decodeStrict(v, &cfg.LowPassFilter)
-		case "qos":
-			var q struct {
-				Network     []zenoh.QoSOverwriteConfig `json:"network"`
-				Publication json.RawMessage            `json:"publication"`
-			}
-			if err = decodeStrict(v, &q); err == nil {
-				cfg.QoSOverwrite = q.Network
-				if len(q.Publication) > 0 && string(q.Publication) != "[]" {
-					fmt.Fprintf(os.Stderr, "gozenohd: %s: ignoring qos/publication\n", file)
-				}
-			}
-		case "timestamping":
-			var ts struct {
-				Enabled             json.RawMessage `json:"enabled"`
-				DropFutureTimestamp bool            `json:"drop_future_timestamp"`
-			}
-			if err = decodeStrict(v, &ts); err == nil {
-				cfg.Timestamping.DropFutureTimestamp = ts.DropFutureTimestamp
-				cfg.Timestamping.Enabled, err = routerValue(ts.Enabled)
-			}
-		case "adminspace":
-			var a struct {
-				Enabled     *bool `json:"enabled"`
-				Permissions *struct {
-					Read  *bool `json:"read"`
-					Write bool  `json:"write"`
-				} `json:"permissions"`
-			}
-			if err = decodeStrict(v, &a); err == nil {
-				cfg.AdminSpace.Enabled = a.Enabled
-				if p := a.Permissions; p != nil {
-					cfg.AdminSpace.DenyRead = p.Read != nil && !*p.Read
-					if p.Write {
-						fmt.Fprintf(os.Stderr, "gozenohd: %s: adminspace writes are not supported\n", file)
-					}
-				}
-			}
-		case "metadata":
-			// Re-encoded: zenoh-rust shows objects with sorted keys.
-			var m any
-			if err = json.Unmarshal(v, &m); err == nil {
-				cfg.Metadata, err = json.Marshal(m)
-			}
-		case "access_control":
-			cfg.ACL, err = decodeACL(v)
-		case "gateway":
-			cfg.Gateway, err = decodeGateway(v)
-		default:
-			fmt.Fprintf(os.Stderr, "gozenohd: %s: ignoring section %q\n", file, name)
-		}
-		if err != nil {
-			return fmt.Errorf("%s: %s: %w", file, name, err)
-		}
-	}
-	return nil
 }
 
 // routerValue reads a zenoh mode-dependent bool (a bool, or {"router":
