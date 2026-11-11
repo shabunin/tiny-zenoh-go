@@ -108,6 +108,11 @@ func TestConfigTree(t *testing.T) {
 		{`plugins/storage_manager/storages/x:{key_expr:"x/**",volume:"rocksdb"}`},
 		{`plugins/storage_manager/storages/x:{volume:"memory"}`},
 		{`mode:"satellite"`},
+		{`plugins/storage_manager/volumes/rocksdb:{}`},
+		{`plugins/storage_manager/volumes/memory:{}`},
+		{`plugins/storage_manager/volumes/files:{backend:3}`},
+		{`plugins/storage_manager/volumes/fs:1`},
+		{`plugins/storage_manager/volumes/fs:{}`, `plugins/storage_manager/storages/x:{key_expr:"x/**",volume:{dir:"x"}}`},
 	} {
 		tree, err := configTree("", "", bad)
 		if err == nil {
@@ -116,6 +121,44 @@ func TestConfigTree(t *testing.T) {
 		if err == nil {
 			t.Errorf("%v: no error", bad)
 		}
+	}
+}
+
+// Volumes: named after their backend or naming it; a storage's volume
+// object gives the storage's settings.
+func TestConfigVolumes(t *testing.T) {
+	tree, err := configTree("", "", []string{
+		`plugins/storage_manager/volumes/fs:{__required__:true}`,
+		`plugins/storage_manager/volumes/files2:{backend:"fs"}`,
+		`plugins/storage_manager/storages/a:{key_expr:"a/**",volume:{id:"files2",dir:"a",read_only:true}}`,
+		`plugins/storage_manager/storages/b:{key_expr:"b/**",volume:"fs"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := applyConfig(tree, &zenoh.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.volumes) != 2 || p.volumes[0].name != "files2" || p.volumes[0].backend != "fs" || p.volumes[1].backend != "fs" ||
+		len(p.volumes[1].cfg) != 0 {
+		t.Errorf("volumes %+v", p.volumes)
+	}
+	a := p.storages[0]
+	if a.volume != "files2" || a.params["dir"] != "a" || a.params["read_only"] != true || len(a.params) != 2 ||
+		p.storages[1].volume != "fs" || p.storages[1].params != nil {
+		t.Errorf("storages %+v", p.storages)
+	}
+	t.Setenv("ZENOH_BACKEND_FS_ROOT", t.TempDir())
+	r, err := zenoh.Open(zenoh.Config{Mode: zenoh.ModeRouter, Listen: []string{"tcp/127.0.0.1:0"}, Scouting: zenoh.ScoutingConfig{Disable: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	stop, err := startPlugins(r, p)
+	if err == nil {
+		stop()
+		t.Error("fs storage without dir started")
 	}
 }
 

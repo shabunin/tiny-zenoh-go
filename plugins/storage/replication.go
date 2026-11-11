@@ -26,7 +26,7 @@ import (
 // any replica for everything (Discovery, then All).
 
 type replicator struct {
-	m          *Memory
+	m          *Storage
 	rc         ReplicationConfig
 	fp         string // configuration fingerprint, decimal
 	digestKey  string
@@ -39,7 +39,7 @@ type replicator struct {
 
 func alignerKey(zid, fp string) string { return "@zid/" + zid + "/" + fp + "/aligner" }
 
-func startReplication(m *Memory) (*replicator, error) {
+func startReplication(m *Storage) (*replicator, error) {
 	r := &replicator{m: m, rc: *m.cfg.Replication, fp: fmt.Sprint(m.log.cfgFP), stop: make(chan struct{})}
 	zid := m.s.ZID().String()
 	r.digestKey = "@-digest/" + zid + "/" + r.fp
@@ -290,7 +290,7 @@ func (r *replicator) replyRetrieval(ev eventMeta, reply replyFunc) {
 	switch ev.act.kind {
 	case actPut:
 		m.mu.Lock()
-		st, ok := m.data[ev.key]
+		st, ok := m.lookupLocked(ev.key)
 		m.mu.Unlock()
 		if !ok || !tsEqual(st.ts, ev.ts) {
 			return
@@ -385,7 +385,7 @@ func (r *replicator) processEventMetaLocked(ev eventMeta) bool {
 			return false
 		case removedOlder:
 			if old.act.kind == actPut {
-				delete(m.data, ev.key)
+				m.removeLocked(ev.key, ev.ts)
 			}
 		}
 	case actWildDel:
@@ -407,7 +407,7 @@ func (r *replicator) processRetrievalLocked(ev eventMeta, payload []byte, enc ze
 	case actWildDel:
 		m.registerWildLocked(ev.act.wild, zenoh.SampleKindDelete, ev.ts, nil, zenoh.Encoding{})
 	case actPut:
-		m.data[ev.key] = &stored{payload: payload, encoding: enc, ts: ev.ts}
+		m.storeLocked(ev.key, stored{payload: payload, encoding: enc, ts: ev.ts})
 	case actWildPut:
 		r.applyWildcardLocked(&ev, payload, enc)
 	}
@@ -442,7 +442,7 @@ func (r *replicator) needsProcessingLocked(ev *eventMeta) bool {
 	case tsEqual(wild.ts, logged.ts) && ev.act.kind == actDelete && logged.lastNonWild != nil &&
 		tsLess(*logged.lastNonWild, ev.ts):
 		if logged.act.kind == actPut {
-			delete(m.data, ev.key)
+			m.removeLocked(ev.key, ev.ts)
 		}
 		if removed := m.log.removeEvent(&logged.eventMeta); removed != nil {
 			removed.setTimestampAndAction(ev.ts, ev.act)
@@ -469,9 +469,9 @@ func (r *replicator) applyWildcardLocked(ev *eventMeta, payload []byte, enc zeno
 		switch ov.act.kind {
 		case actPut:
 			if kind == zenoh.SampleKindPut {
-				m.data[ov.key] = &stored{payload: payload, encoding: enc, ts: ev.ts}
+				m.storeLocked(ov.key, stored{payload: payload, encoding: enc, ts: ev.ts})
 			} else {
-				delete(m.data, ov.key)
+				m.removeLocked(ov.key, ev.ts)
 			}
 		case actWildPut, actWildDel:
 			delete(m.wildPuts, ov.act.wild) // as zenoh does, for both kinds
@@ -493,7 +493,7 @@ func (r *replicator) storeOverriddenLocked(ev *eventMeta, wildKe string, u *upda
 	if u.kind == zenoh.SampleKindDelete {
 		act.kind = actWildDel
 	} else {
-		r.m.data[ev.key] = &stored{payload: u.payload, encoding: u.encoding, ts: u.ts}
+		r.m.storeLocked(ev.key, stored{payload: u.payload, encoding: u.encoding, ts: u.ts})
 	}
 	e := eventFrom(*ev)
 	e.setTimestampAndAction(u.ts, act)

@@ -284,13 +284,24 @@ func applyTxQueue(size map[string]int, q *transport.TxQueue) error {
 // pluginsConfig is what gozenohd runs of zenoh's plugins section.
 type pluginsConfig struct {
 	restAddr string // plugins/rest/http_port
+	volumes  []namedVolume
 	storages []namedStorage
 }
 
+// namedVolume is an entry of plugins/storage_manager/volumes.
+type namedVolume struct {
+	name    string
+	backend string         // its "backend", or its name
+	cfg     map[string]any // the entry, without __path__ and __required__
+	raw     string
+}
+
 type namedStorage struct {
-	name string
-	cfg  storage.Config
-	raw  string // its configuration as given, to see whether it changed
+	name   string
+	cfg    storage.Config
+	volume string         // the volume's id
+	params map[string]any // the volume object's other entries
+	raw    string         // its configuration as given, to see whether it changed
 }
 
 // applyConfig applies the sections gozenohd understands to cfg and warns
@@ -534,8 +545,17 @@ func decodePlugins(raw json.RawMessage, p *pluginsConfig) error {
 			if err := json.Unmarshal(v, &sm); err != nil {
 				return fmt.Errorf("storage_manager: %w", err)
 			}
-			for vol := range sm.Volumes {
-				warnf("storage_manager: volume %q is not available (only the built-in \"memory\" is)", vol)
+			vnames := make([]string, 0, len(sm.Volumes))
+			for n := range sm.Volumes {
+				vnames = append(vnames, n)
+			}
+			sort.Strings(vnames)
+			for _, n := range vnames {
+				nv, err := decodeVolume(n, sm.Volumes[n])
+				if err != nil {
+					return fmt.Errorf("storage_manager: volumes: %s: %w", n, err)
+				}
+				p.volumes = append(p.volumes, nv)
 			}
 			names := make([]string, 0, len(sm.Storages))
 			for n := range sm.Storages {
@@ -543,11 +563,15 @@ func decodePlugins(raw json.RawMessage, p *pluginsConfig) error {
 			}
 			sort.Strings(names)
 			for _, n := range names {
-				sc, err := decodeStorage(n, sm.Storages[n])
+				ns, err := decodeStorage(n, sm.Storages[n])
 				if err != nil {
 					return fmt.Errorf("storage_manager: storages: %s: %w", n, err)
 				}
-				p.storages = append(p.storages, namedStorage{n, sc, string(sm.Storages[n])})
+				if !slices.Contains(volumeNames(p), ns.volume) {
+					return fmt.Errorf("storage_manager: storages: %s: volume %q is not configured (volumes: %s)",
+						n, ns.volume, strings.Join(volumeNames(p), ", "))
+				}
+				p.storages = append(p.storages, ns)
 			}
 		default:
 			warnf("plugin %q is not available in gozenohd (built in: rest, storage_manager)", name)
@@ -556,8 +580,40 @@ func decodePlugins(raw json.RawMessage, p *pluginsConfig) error {
 	return nil
 }
 
+// decodeVolume reads one volume of zenoh-backend-traits' config.
+func decodeVolume(name string, raw json.RawMessage) (namedVolume, error) {
+	v := namedVolume{name: name, backend: name, raw: string(raw)}
+	if err := json.Unmarshal(raw, &v.cfg); err != nil || v.cfg == nil {
+		return v, fmt.Errorf("a volume's configuration must be an object")
+	}
+	if b, ok := v.cfg["backend"]; ok {
+		s, ok := b.(string)
+		if !ok {
+			return v, fmt.Errorf("backend must be a string")
+		}
+		v.backend = s
+	}
+	if v.backend == "memory" {
+		return v, fmt.Errorf("\"memory\" is built in")
+	}
+	if !slices.Contains(storage.Backends(), v.backend) {
+		return v, fmt.Errorf("backend %q is not available (gozenohd has: %s)", v.backend,
+			strings.Join(storage.Backends(), ", "))
+	}
+	delete(v.cfg, "__path__")
+	delete(v.cfg, "__required__")
+	return v, nil
+}
+
 // decodeStorage reads one storage of zenoh-backend-traits' config.
-func decodeStorage(name string, raw json.RawMessage) (storage.Config, error) {
+func decodeStorage(name string, raw json.RawMessage) (namedStorage, error) {
+	ns := namedStorage{name: name, raw: string(raw)}
+	var err error
+	ns.cfg, ns.volume, ns.params, err = decodeStorageConfig(raw)
+	return ns, err
+}
+
+func decodeStorageConfig(raw json.RawMessage) (c storage.Config, volume string, params map[string]any, err error) {
 	var s struct {
 		KeyExpr           string          `json:"key_expr"`
 		StripPrefix       string          `json:"strip_prefix"`
@@ -569,12 +625,11 @@ func decodeStorage(name string, raw json.RawMessage) (storage.Config, error) {
 		} `json:"garbage_collection"`
 		Replication json.RawMessage `json:"replication"`
 	}
-	var c storage.Config
 	if err := json.Unmarshal(raw, &s); err != nil {
-		return c, err
+		return c, "", nil, err
 	}
 	if s.KeyExpr == "" {
-		return c, fmt.Errorf("key_expr is missing")
+		return c, "", nil, fmt.Errorf("key_expr is missing")
 	}
 	c.KeyExpr, c.StripPrefix = s.KeyExpr, s.StripPrefix
 	if len(s.Complete) > 0 {
@@ -583,21 +638,18 @@ func decodeStorage(name string, raw json.RawMessage) (storage.Config, error) {
 			c.Complete = true
 		case "false", `"false"`:
 		default:
-			return c, fmt.Errorf("complete must be true or false")
+			return c, "", nil, fmt.Errorf("complete must be true or false")
 		}
 	}
-	var vol string
-	if json.Unmarshal(s.Volume, &vol) != nil {
-		var o struct {
-			ID string `json:"id"`
+	if json.Unmarshal(s.Volume, &volume) != nil || volume == "" {
+		var o map[string]any
+		_ = json.Unmarshal(s.Volume, &o)
+		id, _ := o["id"].(string)
+		if id == "" {
+			return c, "", nil, fmt.Errorf("volume must be a string or an object with an \"id\"")
 		}
-		if err := json.Unmarshal(s.Volume, &o); err != nil || o.ID == "" {
-			return c, fmt.Errorf("volume must be a string or an object with an \"id\"")
-		}
-		vol = o.ID
-	}
-	if vol != "memory" {
-		return c, fmt.Errorf("volume %q is not available (only \"memory\" is)", vol)
+		delete(o, "id")
+		volume, params = id, o
 	}
 	if g := s.GarbageCollection; g != nil {
 		if g.Period != nil {
@@ -618,7 +670,7 @@ func decodeStorage(name string, raw json.RawMessage) (storage.Config, error) {
 			PropagationDelay *uint64  `json:"propagation_delay"`
 		}
 		if err := json.Unmarshal(s.Replication, &r); err != nil {
-			return c, fmt.Errorf("replication: %w", err)
+			return c, "", nil, fmt.Errorf("replication: %w", err)
 		}
 		rc := &storage.ReplicationConfig{}
 		if r.Interval != nil {
@@ -638,5 +690,5 @@ func decodeStorage(name string, raw json.RawMessage) (storage.Config, error) {
 		}
 		c.Replication = rc
 	}
-	return c, nil
+	return c, volume, params, nil
 }

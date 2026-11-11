@@ -30,8 +30,10 @@ func contents(m *Memory, prefix string) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []string
-	for k, st := range m.data {
-		if full := m.full(k, k != ""); strings.HasPrefix(full, prefix) {
+	es, _ := m.b.Entries()
+	for _, e := range es {
+		if full := m.full(e.Key, e.Key != ""); strings.HasPrefix(full, prefix) {
+			st, _ := m.lookupLocked(e.Key)
 			out = append(out, full+"="+string(st.payload))
 		}
 	}

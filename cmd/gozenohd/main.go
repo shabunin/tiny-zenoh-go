@@ -9,12 +9,15 @@
 //	gozenohd -c zenoh.json5                  # zenoh JSON5 config: listen, connect, scouting, downsampling, qos, ...
 //	gozenohd --rest-http-port 8000           # REST API (plugins/rest)
 //	gozenohd --cfg 'plugins/storage_manager/storages/demo:{key_expr:"demo/**",volume:"memory"}'
+//	gozenohd --cfg 'plugins/storage_manager/volumes/fs:{}' \
+//	  --cfg 'plugins/storage_manager/storages/files:{key_expr:"files/**",strip_prefix:"files",volume:{id:"fs",dir:"files"}}'
 //
 // Clients and peers attach to it; it routes publications, queries and
 // liveliness between them, answers multicast scouting so they can find it,
 // and serves its admin space under @/<zid>/router (info, metrics, link-state
 // graphs, entities, route successors). Built-in plugins: the REST API and
-// the storage manager with its in-memory volume.
+// the storage manager with the memory volume and the fs, influxdb,
+// influxdb2 and s3 backends (TinyGo builds: memory and fs).
 package main
 
 import (
@@ -70,7 +73,7 @@ func main() {
 	gatewayFile := flag.String("gateway", "", "south subregions: JSON file with zenoh's gateway section")
 	configFile := flag.String("config", "", "zenoh config file (JSON5): its mode, id, listen, connect, scouting/multicast, "+
 		"downsampling, low_pass_filter, qos/network, timestamping, access_control, gateway, adminspace, stats, metadata "+
-		"and plugins (rest, storage_manager with memory volumes) sections")
+		"and plugins (rest, storage_manager with memory, fs, influxdb, influxdb2 and s3 volumes) sections")
 	flag.StringVar(configFile, "c", "", "same as -config")
 	restPort := flag.String("rest-http-port", "", "enable the REST API: a port, <ip>:<port>, or none")
 	var cfgOverrides list

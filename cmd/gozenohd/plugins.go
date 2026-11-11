@@ -21,21 +21,28 @@ type pluginRunner struct {
 	mu       sync.Mutex
 	s        *zenoh.Session
 	tree     map[string]any // the plugins section
+	volumes  map[string]runningVolume
 	storages map[string]runningStorage
 	restAddr string
 	restStop func() error
 }
 
 type runningStorage struct {
-	raw  string
-	stop func() error
+	raw    string
+	volume string
+	stop   func() error
+}
+
+type runningVolume struct {
+	raw string
+	vol storage.Volume
 }
 
 func newPluginRunner(tree map[string]any) *pluginRunner {
 	if tree == nil {
 		tree = map[string]any{}
 	}
-	return &pluginRunner{tree: tree, storages: map[string]runningStorage{}}
+	return &pluginRunner{tree: tree, volumes: map[string]runningVolume{}, storages: map[string]runningStorage{}}
 }
 
 // start runs the plugins of p on s.
@@ -62,29 +69,70 @@ func startPlugins(s *zenoh.Session, p *pluginsConfig) (func(), error) {
 
 // applyLocked makes the running plugins match p.
 func (r *pluginRunner) applyLocked(p *pluginsConfig) error {
+	wantVol := map[string]namedVolume{}
+	for _, nv := range p.volumes {
+		wantVol[nv.name] = nv
+	}
 	want := map[string]namedStorage{}
 	for _, ns := range p.storages {
 		want[ns.name] = ns
 	}
+	// Storages go before their volume does.
+	goneVol := map[string]bool{}
+	for name, rv := range r.volumes {
+		if nv, ok := wantVol[name]; !ok || nv.raw != rv.raw {
+			goneVol[name] = true
+		}
+	}
 	for name, rs := range r.storages {
-		if ns, ok := want[name]; !ok || ns.raw != rs.raw {
+		if ns, ok := want[name]; !ok || ns.raw != rs.raw || goneVol[rs.volume] {
 			_ = rs.stop()
 			delete(r.storages, name)
 			fmt.Printf("storage %s stopped\n", name)
 		}
 	}
+	for name := range goneVol {
+		_ = r.volumes[name].vol.Close()
+		delete(r.volumes, name)
+		fmt.Printf("volume %s closed\n", name)
+	}
 	var errs []error
+	for _, nv := range p.volumes {
+		if _, ok := r.volumes[nv.name]; ok {
+			continue
+		}
+		vol, err := storage.OpenVolume(nv.backend, nv.name, nv.cfg)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("volume %s: %w", nv.name, err))
+			continue
+		}
+		r.volumes[nv.name] = runningVolume{nv.raw, vol}
+		fmt.Printf("volume %s (backend %s)\n", nv.name, nv.backend)
+	}
 	for _, ns := range p.storages {
 		if _, ok := r.storages[ns.name]; ok {
 			continue
 		}
-		m, err := storage.NewMemory(r.s, ns.cfg)
+		var vol storage.Volume = storage.MemoryVolume{}
+		if ns.volume != "memory" {
+			rv, ok := r.volumes[ns.volume]
+			if !ok {
+				errs = append(errs, fmt.Errorf("storage %s: no volume %q (configured: %s)", ns.name, ns.volume,
+					strings.Join(volumeNames(p), ", ")))
+				continue
+			}
+			vol = rv.vol
+		}
+		cfg := ns.cfg
+		name := ns.name
+		cfg.OnError = func(err error) { warnf("storage %s: %v", name, err) }
+		m, err := storage.New(r.s, cfg, vol, ns.params)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("storage %s: %w", ns.name, err))
 			continue
 		}
-		r.storages[ns.name] = runningStorage{ns.raw, m.Close}
-		fmt.Printf("storage %s on %s (memory)\n", ns.name, ns.cfg.KeyExpr)
+		r.storages[ns.name] = runningStorage{ns.raw, ns.volume, m.Close}
+		fmt.Printf("storage %s on %s (volume %s)\n", ns.name, ns.cfg.KeyExpr, ns.volume)
 	}
 	if p.restAddr != r.restAddr {
 		if r.restStop != nil {
@@ -120,6 +168,18 @@ func (r *pluginRunner) stopLocked() {
 		_ = rs.stop()
 		delete(r.storages, name)
 	}
+	for name, rv := range r.volumes {
+		_ = rv.vol.Close()
+		delete(r.volumes, name)
+	}
+}
+
+func volumeNames(p *pluginsConfig) []string {
+	out := []string{"memory"}
+	for _, nv := range p.volumes {
+		out = append(out, nv.name)
+	}
+	return out
 }
 
 // onConfig applies a config write (zenoh.AdminSpaceConfig.OnConfig): key

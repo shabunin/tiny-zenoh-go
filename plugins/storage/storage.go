@@ -1,6 +1,7 @@
-// Package storage is zenoh's storage manager with its "memory" volume
-// (zenoh-rust plugins/zenoh-plugin-storage-manager): a storage subscribes
-// to a key expression, keeps the latest value of every key under it, and
+// Package storage is zenoh's storage manager (zenoh-rust
+// plugins/zenoh-plugin-storage-manager): a storage subscribes to a key
+// expression, keeps the latest value of every key under it in a backend
+// (see backend.go; "memory" is built in, others are in subpackages), and
 // answers queries on it with those values and their timestamps. With
 // Config.Replication, storages on the same key expression and settings
 // align with each other, wire-compatible with zenoh-rust's replicas (see
@@ -44,6 +45,8 @@ type Config struct {
 	// Replication, if set, aligns this storage with the other replicas of
 	// it (same KeyExpr, StripPrefix and replication settings).
 	Replication *ReplicationConfig `json:"-"`
+	// OnError, if set, hears of the backend's failures.
+	OnError func(error) `json:"-"`
 }
 
 // ReplicationConfig is zenoh's storage "replication" section.
@@ -100,26 +103,36 @@ type update struct {
 	stored
 }
 
-// Memory is a running in-memory storage.
-type Memory struct {
+// Storage is a running storage.
+type Storage struct {
 	s    *zenoh.Session
 	cfg  Config
+	b    Backend
+	capa Capability
 	sub  *zenoh.Subscriber
 	qbl  *zenoh.Queryable
 	repl *replicator
 	stop chan struct{}
 	once sync.Once
 
-	mu       sync.Mutex
-	data     map[string]*stored // by stripped key ("" is the strip prefix itself)
+	mu       sync.Mutex         // also serializes the backend's calls
 	wildPuts map[string]*update // by wildcard key expression
 	wildDels map[string]*update
 	latest   map[logKey]*event // recent events (drained into the log with replication)
 	log      *replLog          // nil without replication
 }
 
-// NewMemory starts a storage on s.
+// Memory is a storage on the memory volume.
+type Memory = Storage
+
+// NewMemory starts a storage on s that keeps its values in memory.
 func NewMemory(s *zenoh.Session, cfg Config) (*Memory, error) {
+	return New(s, cfg, MemoryVolume{}, nil)
+}
+
+// New starts a storage on s, its values kept by a backend of vol; params
+// are the storage's volume settings.
+func New(s *zenoh.Session, cfg Config, vol Volume, params map[string]any) (*Storage, error) {
 	if err := keyexpr.Validate(cfg.KeyExpr); err != nil {
 		return nil, fmt.Errorf("storage: key_expr: %w", err)
 	}
@@ -137,10 +150,13 @@ func NewMemory(s *zenoh.Session, cfg Config) (*Memory, error) {
 	if cfg.GCLifespan <= 0 {
 		cfg.GCLifespan = 24 * time.Hour
 	}
-	m := &Memory{s: s, cfg: cfg, stop: make(chan struct{}),
-		data: map[string]*stored{}, wildPuts: map[string]*update{}, wildDels: map[string]*update{},
+	m := &Storage{s: s, cfg: cfg, capa: vol.Capability(), stop: make(chan struct{}),
+		wildPuts: map[string]*update{}, wildDels: map[string]*update{},
 		latest: map[logKey]*event{}}
 	if cfg.Replication != nil {
+		if m.capa.History != HistoryLatest {
+			return nil, errors.New("storage: replication needs a backend that keeps the latest values only")
+		}
 		rc := *cfg.Replication
 		if err := rc.defaults(); err != nil {
 			return nil, err
@@ -149,26 +165,52 @@ func NewMemory(s *zenoh.Session, cfg Config) (*Memory, error) {
 		m.log = newReplLog(cfg.KeyExpr, cfg.StripPrefix, rc)
 	}
 	var err error
-	if m.sub, err = s.DeclareSubscriber(cfg.KeyExpr, m.onSample); err != nil {
+	if m.b, err = vol.CreateStorage(m.cfg, params); err != nil {
 		return nil, err
 	}
-	if m.qbl, err = s.DeclareQueryable(cfg.KeyExpr, m.onQuery, zenoh.WithComplete(cfg.Complete)); err != nil {
-		_ = m.sub.Undeclare()
+	// What the backend already holds is known as puts (zenoh's
+	// create_and_start_storage).
+	entries, err := m.b.Entries()
+	if err != nil {
+		_ = m.b.Close()
+		return nil, fmt.Errorf("storage: listing the backend's entries: %w", err)
+	}
+	for _, e := range entries {
+		ev := newEvent(e.Key, e.Key != "", e.Timestamp, action{kind: actPut})
+		if m.log != nil {
+			m.log.insertEvent(ev)
+		} else {
+			m.latest[ev.logKey()] = ev
+		}
+	}
+	fail := func(err error) (*Storage, error) {
+		if m.sub != nil {
+			_ = m.sub.Undeclare()
+		}
+		if m.qbl != nil {
+			_ = m.qbl.Undeclare()
+		}
+		_ = m.b.Close()
 		return nil, err
+	}
+	if m.sub, err = s.DeclareSubscriber(cfg.KeyExpr, m.onSample); err != nil {
+		return fail(err)
+	}
+	if m.qbl, err = s.DeclareQueryable(cfg.KeyExpr, m.onQuery, zenoh.WithComplete(cfg.Complete)); err != nil {
+		return fail(err)
 	}
 	if m.log != nil {
 		if m.repl, err = startReplication(m); err != nil {
-			_ = m.sub.Undeclare()
-			_ = m.qbl.Undeclare()
-			return nil, err
+			return fail(err)
 		}
 	}
 	go m.gcLoop()
 	return m, nil
 }
 
-// Close stops the storage; its content is lost.
-func (m *Memory) Close() error {
+// Close stops the storage and closes its backend (a memory storage's
+// content is lost).
+func (m *Storage) Close() error {
 	var err error
 	m.once.Do(func() {
 		close(m.stop)
@@ -176,15 +218,74 @@ func (m *Memory) Close() error {
 		if m.repl != nil {
 			err = errors.Join(err, m.repl.close())
 		}
+		m.mu.Lock()
+		err = errors.Join(err, m.b.Close())
+		m.mu.Unlock()
 	})
 	return err
 }
 
+// Capability is the storage's backend capability.
+func (m *Storage) Capability() Capability { return m.capa }
+
 // Len reports how many keys hold a value.
-func (m *Memory) Len() int {
+func (m *Storage) Len() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.data)
+	es, _ := m.b.Entries()
+	return len(es)
+}
+
+func (m *Storage) fail(err error) {
+	if err != nil && m.cfg.OnError != nil {
+		m.cfg.OnError(fmt.Errorf("storage %s: %w", m.cfg.KeyExpr, err))
+	}
+}
+
+// lookupLocked is key's latest stored value.
+func (m *Storage) lookupLocked(key string) (stored, bool) {
+	vs, err := m.b.Get(key, "")
+	m.fail(err)
+	var best *Value
+	for i := range vs {
+		if best == nil || tsLess(best.Timestamp, vs[i].Timestamp) {
+			best = &vs[i]
+		}
+	}
+	if best == nil {
+		return stored{}, false
+	}
+	return stored{best.Payload, best.Encoding, best.Timestamp}, true
+}
+
+// storeLocked puts a value in the backend, reporting whether it took it.
+func (m *Storage) storeLocked(key string, st stored) bool {
+	r, err := m.b.Put(key, Value{st.payload, st.encoding, st.ts})
+	m.fail(err)
+	return err == nil && r != Outdated
+}
+
+// removeLocked deletes a key's value from the backend, reporting whether
+// that took.
+func (m *Storage) removeLocked(key string, ts zenoh.Timestamp) bool {
+	r, err := m.b.Delete(key, ts)
+	m.fail(err)
+	return err == nil && r != Outdated
+}
+
+// matchingLocked lists the full keys that the backend holds and that
+// intersect ke, sorted (zenoh's get_matching_keys).
+func (m *Storage) matchingLocked(ke string) []string {
+	es, err := m.b.Entries()
+	m.fail(err)
+	var keys []string
+	for _, e := range es {
+		if full := m.full(e.Key, e.Key != ""); keyexpr.Intersect(ke, full) {
+			keys = append(keys, full)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // tsLess is uhlc's timestamp order: time, then the ID's 16 little-endian
@@ -208,7 +309,7 @@ func idBytes(z zenoh.ZID) [16]byte {
 
 // strip removes the strip prefix from a full key (zenoh's strip_prefix):
 // has is false when the key is the prefix itself.
-func (m *Memory) strip(full string) (key string, has bool, err error) {
+func (m *Storage) strip(full string) (key string, has bool, err error) {
 	p := m.cfg.StripPrefix
 	switch {
 	case p == "":
@@ -222,7 +323,7 @@ func (m *Memory) strip(full string) (key string, has bool, err error) {
 }
 
 // full puts the strip prefix back (zenoh's prefix).
-func (m *Memory) full(key string, has bool) string {
+func (m *Storage) full(key string, has bool) string {
 	switch p := m.cfg.StripPrefix; {
 	case p == "":
 		return key
@@ -233,7 +334,7 @@ func (m *Memory) full(key string, has bool) string {
 	}
 }
 
-func (m *Memory) onSample(smp zenoh.Sample) {
+func (m *Storage) onSample(smp zenoh.Sample) {
 	ts := m.s.NewTimestamp()
 	if smp.Timestamp != nil {
 		ts = *smp.Timestamp
@@ -244,7 +345,7 @@ func (m *Memory) onSample(smp zenoh.Sample) {
 }
 
 // processLocked is zenoh's StorageService::process_sample.
-func (m *Memory) processLocked(ke string, kind zenoh.SampleKind, payload []byte, enc zenoh.Encoding, ts zenoh.Timestamp) {
+func (m *Storage) processLocked(ke string, kind zenoh.SampleKind, payload []byte, enc zenoh.Encoding, ts zenoh.Timestamp) {
 	act := actionOf(kind)
 	var keys []string
 	if !keyexpr.IsConcrete(ke) {
@@ -255,12 +356,7 @@ func (m *Memory) processLocked(ke string, kind zenoh.SampleKind, payload []byte,
 		}
 		ev := newEvent(ke, true, ts, act)
 		m.latest[ev.logKey()] = ev
-		for k := range m.data {
-			if full := m.full(k, k != ""); keyexpr.Intersect(ke, full) {
-				keys = append(keys, full)
-			}
-		}
-		sort.Strings(keys)
+		keys = m.matchingLocked(ke)
 	} else {
 		keys = []string{ke}
 	}
@@ -278,36 +374,43 @@ func (m *Memory) processLocked(ke string, kind zenoh.SampleKind, payload []byte,
 			evAct = actionOf(toStore.kind)
 		}
 		ev := newEvent(sk, has, toStore.ts, evAct)
-		if !m.isLatestLocked(ev) {
+		latestOnly := m.capa.History == HistoryLatest
+		if latestOnly && !m.isLatestLocked(ev) {
 			continue
 		}
+		var ok bool
 		if toStore.kind == zenoh.SampleKindPut {
-			st := toStore.stored
-			m.data[sk] = &st
+			ok = m.storeLocked(sk, toStore.stored)
 		} else {
-			delete(m.data, sk)
+			ok = m.removeLocked(sk, toStore.ts)
 		}
-		m.latest[ev.logKey()] = ev
+		if ok && latestOnly {
+			m.latest[ev.logKey()] = ev
+		}
 	}
 }
 
 // isLatestLocked reports whether nothing newer than ev is known for its
 // key (zenoh's guard_cache_if_latest, with a newer cached event, deletes
 // included, winning).
-func (m *Memory) isLatestLocked(ev *event) bool {
+func (m *Storage) isLatestLocked(ev *event) bool {
 	if cached, ok := m.latest[ev.logKey()]; ok {
 		return tsLess(cached.ts, ev.ts)
 	}
 	if m.log != nil {
 		return m.log.lookupNewer(&ev.eventMeta) == nil
 	}
-	if d, ok := m.data[ev.key]; ok {
-		return !tsLess(ev.ts, d.ts)
+	vs, err := m.b.Get(ev.key, "")
+	m.fail(err)
+	for _, v := range vs {
+		if tsLess(ev.ts, v.Timestamp) {
+			return false
+		}
 	}
 	return true
 }
 
-func (m *Memory) registerWildLocked(ke string, kind zenoh.SampleKind, ts zenoh.Timestamp, payload []byte, enc zenoh.Encoding) {
+func (m *Storage) registerWildLocked(ke string, kind zenoh.SampleKind, ts zenoh.Timestamp, payload []byte, enc zenoh.Encoding) {
 	u := &update{kind: kind, stored: stored{payload, enc, ts}}
 	if kind == zenoh.SampleKindPut {
 		m.wildPuts[ke] = u
@@ -320,7 +423,7 @@ func (m *Memory) registerWildLocked(ke string, kind zenoh.SampleKind, ts zenoh.T
 // wildcard delete, the earliest wildcard delete on an intersecting key not
 // older than the event (or than its last non-wildcard update); else, for a
 // put or wildcard put, the latest wildcard put not older than it.
-func (m *Memory) overridingLocked(key string, ts zenoh.Timestamp, lastNonWild *zenoh.Timestamp, act action) (string, *update) {
+func (m *Storage) overridingLocked(key string, ts zenoh.Timestamp, lastNonWild *zenoh.Timestamp, act action) (string, *update) {
 	if act.kind == actPut || act.kind == actDelete || act.kind == actWildDel {
 		lowest := ts
 		if lastNonWild != nil {
@@ -364,33 +467,37 @@ func sortedKeys[V any](m map[string]V) []string {
 	return ks
 }
 
-func (m *Memory) onQuery(q *zenoh.Query) {
+// onQuery is zenoh's reply_query: each matching key's values, as the
+// backend gives them for the query's parameters.
+func (m *Storage) onQuery(q *zenoh.Query) {
 	type hit struct {
 		key string
-		st  stored
+		v   Value
 	}
 	var hits []hit
+	keys := []string{q.KeyExpr()}
 	m.mu.Lock()
-	if keyexpr.IsConcrete(q.KeyExpr()) {
-		if sk, _, err := m.strip(q.KeyExpr()); err == nil {
-			if st, ok := m.data[sk]; ok {
-				hits = append(hits, hit{q.KeyExpr(), *st})
-			}
+	if !keyexpr.IsConcrete(q.KeyExpr()) {
+		keys = m.matchingLocked(q.KeyExpr())
+	}
+	for _, k := range keys {
+		sk, _, err := m.strip(k)
+		if err != nil {
+			continue
 		}
-	} else {
-		for k, st := range m.data {
-			if full := m.full(k, k != ""); keyexpr.Intersect(q.KeyExpr(), full) {
-				hits = append(hits, hit{full, *st})
-			}
+		vs, err := m.b.Get(sk, q.Parameters())
+		m.fail(err)
+		for _, v := range vs {
+			hits = append(hits, hit{k, v})
 		}
 	}
 	m.mu.Unlock()
 	for _, h := range hits {
-		_ = q.Reply(h.key, h.st.payload, zenoh.WithEncoding(h.st.encoding), zenoh.WithTimestamp(h.st.ts))
+		_ = q.Reply(h.key, h.v.Payload, zenoh.WithEncoding(h.v.Encoding), zenoh.WithTimestamp(h.v.Timestamp))
 	}
 }
 
-func (m *Memory) gcLoop() {
+func (m *Storage) gcLoop() {
 	t := time.NewTicker(m.cfg.GCPeriod)
 	defer t.Stop()
 	for {
@@ -405,7 +512,7 @@ func (m *Memory) gcLoop() {
 
 // gc forgets wildcard updates and (without replication) cached events
 // older than GCLifespan, by their timestamps.
-func (m *Memory) gc(now time.Time) {
+func (m *Storage) gc(now time.Time) {
 	limit := ntpMillis(zenohNTP(now)) - uint64(m.cfg.GCLifespan.Milliseconds())
 	old := func(ts zenoh.Timestamp) bool { return ntpMillis(ts.Time) < limit }
 	m.mu.Lock()

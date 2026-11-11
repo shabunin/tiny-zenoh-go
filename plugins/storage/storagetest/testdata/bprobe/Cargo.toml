@@ -1,0 +1,21 @@
+# bprobe drives zenoh-rust's storage backends directly, for the Go
+# backends' compatibility tests (storagetest.RustProbe):
+#   cargo build --release && export ZENOH_BPROBE=$PWD/target/release/bprobe
+[package]
+name = "bprobe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+zenoh = { version = "=1.10.2", features = ["unstable", "internal"] }
+zenoh_backend_traits = "=1.10.2"
+zenoh-plugin-trait = "=1.10.2"
+zenoh_backend_influxdb = { package = "zenoh-backend-influxdb-v1", version = "=1.10.2", default-features = false }
+zenoh_backend_influxdb2 = { package = "zenoh-backend-influxdb-v2", version = "=1.10.2", default-features = false }
+zenoh_backend_s3 = { package = "zenoh-backend-s3", version = "=1.10.2", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1"
+
+[profile.release]
+debug = false

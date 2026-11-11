@@ -88,11 +88,35 @@ usrpwd), `timestamping`, `downsampling`, `low_pass_filter`, `qos/network`,
 are reported and ignored. Plugins are built in, not loaded: **`rest`**
 (`plugins/rest`, zenoh's REST API: GET/POST queries as JSON, HTML or `_raw`,
 server-sent events subscriptions, PUT/PATCH/DELETE, `@/local`; output checked
-against zenohd's plugin) and **`storage_manager`** with the `memory` volume
-(`plugins/storage`: latest value per key with timestamps, tombstones,
-wildcard puts/deletes, `strip_prefix`, `complete`, `garbage_collection`,
-and **`replication`**: replicas align with each other and with zenoh-rust's;
-other backends are not implemented). With
+against zenohd's plugin) and **`storage_manager`** (`plugins/storage`:
+latest value per key with timestamps, tombstones, wildcard puts/deletes,
+`strip_prefix`, `complete`, `garbage_collection`, and **`replication`**:
+replicas align with each other and with zenoh-rust's) with the built-in
+`memory` volume and zenoh's backends, rewritten in pure Go:
+
+| backend (volume) | package | keeps | zenoh-rust's settings supported |
+|---|---|---|---|
+| `memory` | `plugins/storage` | latest value, in memory | — |
+| `fs` | `plugins/storage/fs` | latest value, a file per key under `$ZENOH_BACKEND_FS_ROOT` (default `~/.zenoh/zenoh_backend_fs`) | `dir`, `read_only`, `on_closure`, `follow_links`, `keep_mime_types` |
+| `influxdb` | `plugins/storage/influxdb` | every value, InfluxDB 1.x (InfluxQL over HTTP) | volume `url`, `username`/`password`; storage `db`, `create_db`, `on_closure` (`drop_db`, `drop_series`), `username`/`password` |
+| `influxdb2` | `plugins/storage/influxdb` | every value, InfluxDB 2.x (Flux over HTTP) | volume `url`, `org_id`/`token`; storage `db` (bucket), `create_db`, `on_closure`, `org_id`/`token` |
+| `s3` | `plugins/storage/s3` | latest value, an object per key (AWS S3, MinIO, SeaweedFS…; SigV4, path-style) | volume `url`, `region`, `tls.root_ca_certificate_file`/`_base64`; storage `bucket`, `access_key`/`secret_key` (or `$AWS_ACCESS_KEY_ID`…), `reuse_bucket`, `read_only`, `on_closure` (`destroy_bucket`) |
+
+Secrets may sit under a `private` object as in zenoh. The data layouts are
+zenoh-rust's: InfluxDB measurements/points and S3 objects written by either
+implementation are read by the other (checked against zenoh-rust's backend
+crates), and the `fs` files are at the same paths (`<key>`, `<key>.##z` for
+a key that is also a directory, `@root` for the strip prefix itself); `fs`
+metadata (timestamp, encoding) is kept in a log of its own in
+`.zenoh_datainfo/` instead of RocksDB, so files written by zenoh-rust are
+served with their modification time and extension's MIME type, as zenoh-rust
+does for files it did not write. On InfluxDB, a query without `_time` gets
+each key's latest value and `_time=[start..end]` the values in the range.
+`rocksdb` has no pure-Go counterpart and is not provided. Volumes are
+declared as in zenoh (`plugins/storage_manager/volumes/<name>`, its
+`backend` defaulting to the name); other backends can be added from Go with
+`storage.RegisterBackend` (interfaces `storage.Volume` / `storage.Backend`).
+TinyGo builds of gozenohd have `memory` and `fs`. With
 `adminspace/permissions/write` (`--adminspace-permissions rw`), the plugins'
 configuration can be changed while running, as with zenohd: PUT a JSON5
 value on `@/<zid>/router/config/plugins/<path>` (an array item by
@@ -102,6 +126,29 @@ accordingly, the REST server follows its `http_port`:
 ```sh
 curl -X PUT -d '{key_expr:"demo/**",volume:"memory"}' \
   http://localhost:8000/@/local/router/config/plugins/storage_manager/storages/demo
+```
+
+A configuration with persistent storages:
+
+```json5
+{
+  plugins: {
+    storage_manager: {
+      volumes: {
+        fs: {},
+        influxdb: { url: "http://localhost:8086", private: { username: "admin", password: "…" } },
+        s3: { url: "http://localhost:9000" },
+      },
+      storages: {
+        files: { key_expr: "files/**", strip_prefix: "files", volume: { id: "fs", dir: "files" } },
+        series: { key_expr: "sensors/**", volume: { id: "influxdb", db: "zenoh", create_db: true } },
+        objects: { key_expr: "blobs/**", strip_prefix: "blobs",
+                   volume: { id: "s3", bucket: "zenoh", reuse_bucket: true,
+                             private: { access_key: "…", secret_key: "…" } } },
+      },
+    },
+  },
+}
 ```
 
 QUIC uses the same TLS settings; enable it with a blank import:
@@ -227,7 +274,7 @@ session can publish, subscribe and serve queries itself.
 | `transport`      | ✅ | Unicast session over stream links (length-prefixed batches) or packet links (one batch per datagram, batch size capped at the link MTU), both sides of the handshake (`Open` and `Accept`, with duplicate/self rejection) + negotiation, stream framing, FRAME batching with SNs, FRAGMENT split/reassembly, keep-alive, lease expiry, CLOSE. **QoS** (INIT ext `QoS`/`QoSLink`, 8 priorities × reliable/best-effort SN channels, priority in FRAME/FRAGMENT); **compression** (INIT ext 0x6, batch header byte, own pure-Go LZ4 block codec in `internal/lz4`); **multilink** (`Config.MaxLinks`: INIT/OPEN ext 0x4 with zenoh's RSA-512 PKCS#1 key proof, one transport over several links with per-link batch size/compression/lease, zenoh-rust's link selection by reliability and priority range, link loss without session loss); **multicast** (`NewMulticast` over a `MulticastLink`: periodic `JOIN` with next SNs, per-sender SN windows and reassembly, sender leases, CLOSE); **low latency** (`Config.LowLatency`: INIT ext 0x5, every network message sent alone with no FRAME/SN/fragmentation, u32 LE length prefix on streams); **patch** (INIT ext 0x7: fragment start/drop markers); **transmission queues** (`Config.TxQueue`: per-link, per-priority bounded batch queues with writer goroutines, adaptive batching, congestion control Drop / Block / BlockFirst with zenoh's waits, drop FRAGMENT for messages abandoned midway, transport closed on a blocked link; TinyGo: synchronous unless `-tags zenoh_txqueue`). Imports no `net`. |
 | `link`           | ✅ TCP, UDP, UDP multicast, TLS, QUIC, WS, Unix, named pipes, vsock, serial | Locator parsing incl. `?metadata` / `#config`; TCP; UDP (MTU 65487 like zenoh on Linux, one listener socket demultiplexed per remote address); UDP multicast groups `udp/224.x.x.x:port#iface=<name>;ttl=<n>` (send socket bound to the interface, own datagrams filtered); TLS with zenoh's config keys (`root_ca_certificate`, `listen_*`/`connect_*` certificate & key as `_file`/`_base64`/`_raw`, `enable_mtls`, `verify_name_on_connect`); QUIC in `link/quic` (via `link.Register`; zenoh's variants chosen by ALPN from the locator metadata: single stream, multistream with a stream per priority (default), mixed reliability with best-effort traffic in QUIC datagrams `?mixed_rel=1`, datagrams only `?rel=0`); WebSocket `ws/host:port` (own minimal RFC 6455 code, one binary message per batch); Unix sockets `unixsock-stream/<path>` (flock'd `<path>.lock`, stale sockets replaced); named pipes `unixpipe/<path>` (zenoh's FIFO handshake: flock'd `<path>_uplink` request FIFO, DEADBEEF+suffix invitations, a dedicated FIFO pair per link, `#file_mask=`); VM sockets `vsock/<cid>:<port>` (Linux AF_VSOCK, `VMADDR_CID_*` names, host↔VM or `vsock_loopback`); serial `serial/<dev>#baudrate=N` (z-serial framing: COBS, CRC-32, I/A/R connect handshake, 1500-byte frames; Linux ttys opened raw with exclusive access; `link.NewSerial` wraps any byte stream, e.g. a TinyGo `machine.UART`). |
 | `tls13`          | ✅ client | TLS 1.3 client (RFC 8446) that builds with TinyGo, used by `link/tls13link`: X25519 key share, TLS_AES_128_GCM_SHA256 / TLS_AES_256_GCM_SHA384, own HKDF key schedule, record layer with concurrent Read/Write, KeyUpdate both ways (and before AES-GCM's record limit), alerts, close_notify; a minimal X.509 reader (names, validity, basicConstraints, key usage, extended key usage, unknown critical extensions rejected) and chain check against configured roots or a pinned certificate, SAN DNS (wildcards) / IP name check, validity skipped while a board's clock is unset; ECDSA P-256/P-384 verify and sign on own Montgomery field arithmetic (no allocations), RSA-PSS / PKCS #1 v1.5 via `crypto/rsa`, Ed25519; client certificates with PKCS #8, SEC 1 or PKCS #1 keys. |
-| `plugins`        | ✅ rest, storage (memory) | `plugins/rest`: zenoh-plugin-rest over any session (`rest.Serve(s, ":8000")`, `rest.Handler(s)`), JSON samples with zenoh's payload-to-JSON rules. `plugins/storage`: zenoh-plugin-storage-manager's in-memory volume (`storage.NewMemory(s, storage.Config{KeyExpr: "demo/**"})`) with **replication** (`Config.Replication`: zenoh's digest/aligner protocol — XXH3 fingerprints of a log cut into intervals and sub-intervals, hot/warm/cold eras, bincode digests on `@-digest/<zid>/<config hash>`, alignment queries to `@zid/<zid>/<config hash>/aligner`, initial alignment of an empty replica). Both in gozenohd. REST is not in TinyGo builds. |
+| `plugins`        | ✅ rest, storage (memory, fs, influxdb, influxdb2, s3) | `plugins/rest`: zenoh-plugin-rest over any session (`rest.Serve(s, ":8000")`, `rest.Handler(s)`), JSON samples with zenoh's payload-to-JSON rules. `plugins/storage`: zenoh-plugin-storage-manager's in-memory volume (`storage.NewMemory(s, storage.Config{KeyExpr: "demo/**"})`) with **replication** (`Config.Replication`: zenoh's digest/aligner protocol — XXH3 fingerprints of a log cut into intervals and sub-intervals, hot/warm/cold eras, bincode digests on `@-digest/<zid>/<config hash>`, alignment queries to `@zid/<zid>/<config hash>/aligner`, initial alignment of an empty replica). Backends `fs`, `influxdb`, `influxdb2`, `s3` (`storage.New(s, cfg, vol, params)`), data-compatible with zenoh-rust's; no `rocksdb`. Both in gozenohd. REST, InfluxDB and S3 are not in TinyGo builds. |
 | `zext`           | ✅ | zenoh-ext **serialization** (`z_serialize` / `z_deserialize` format): fixed-width little-endian numbers incl. 128-bit, bool, LEB128 lengths, strings, bytes, sequences, maps, tuples as concatenation; `Serializer`/`Deserializer`, generic `WriteSlice`/`ReadMap`..., `Serialize(vals...)`/`Deserialize(b, ptrs...)` without reflection (TinyGo), `Marshaler`/`Unmarshaler` for structs. |
 | `shm`            | ✅ Linux | zenoh's POSIX shared memory, layout-compatible with zenoh-rust 1.x (SHM protocol v2): `/dev/shm/<id>.zenoh` metadata/data/auth segments, INIT/OPEN negotiation (challenges read from each other's auth segment), per-priority handoff counters, watchdog confirmation (50 ms) and validation (100 ms), refcounts and generations, garbage collection, orphan-segment cleanup. Enabled with `Config.SharedMemory` (`gozenohd --shm`): payloads ≥ 3 KiB to SHM-capable faces go through a 16 MiB pool; buffers the application allocates itself (`Session.ShmProvider().Alloc`, published with `WithShmBuf` from puts, publishers and replies) go by reference, without a copy, whatever their size; received SHM payloads are copied out. Stub returning `ErrUnsupported` elsewhere and on TinyGo. |
 | `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, incl. *aggregate* interests); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`, with `Multihop` relaying link states across any number of hops), declaration push between peers, writer-side filtering, peers attached to routers); **regions** (zenoh 1.10: every node sorted into its north region or a south subregion it is the gateway of; routers gossip with their peers and don't relay inside a peer region; peers are gateways of their clients; custom subregions by role/ZID/interface/announced `RegionName` with `Gateway.South`, so a peer can be the gateway of a group of peers and a router the gateway of router subregions, each its own link-state mesh; one forwarding gateway per peer or router subregion when several serve it); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), **query cancellation** (`CancellationToken` + `WithCancellation` on gets, querier gets and liveliness gets, as zenoh's unstable API: local, stops replies, waits for running callbacks), matching status and matching listeners on publishers and queriers, **advanced pub/sub** (zenoh-ext compatible: `DeclareAdvancedPublisher` with cache, sequence numbers + heartbeats for miss detection, publisher detection; `DeclareAdvancedSubscriber` with history incl. late-joining publishers (`_max`, `_time` limits), in-order delivery, recovery of lost samples by gap queries / periodic queries / heartbeats, miss listeners, subscriber detection), `_anyke` replies, `_time` ranges (`ParseTimeRange`), source info on samples, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; **namespaces** (`Config.Namespace`: every key the session is given goes under `<ns>/`, every key it gives back loses it, traffic outside it is dropped; the admin space stays outside); **locality** (`WithAllowedOrigin` on subscribers and queryables, `WithAllowedDestination` on puts, publishers, gets and queriers: same session only, remote only, or both; session-local entities are not declared, matching status follows the destination); priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress); **interceptors** (zenoh's `downsampling`, `low_pass_filter` and `qos/network` sections as `Downsampling`, `LowPassFilter`, `QoSOverwrite`: per-rule rate limits, size limits on payload + attachment, priority / congestion control / express overwrite filtered by key, QoS and payload size; per face by interface, link protocol and ZID, ingress and/or egress) and **timestamping** (`Timestamping`: routers stamp PUTs that cross them, future timestamps replaced or dropped); **admin space** (`AdminSpace`, on by default in router mode: `@/<zid>/<mode>` with zid/version/`Metadata`/locators/sessions (links, region, router-link weights), `/metrics` (OpenMetrics, gzip), `/linkstate/<region>` (Graphviz graphs of every mesh and peer region), `/subscriber`, `/queryable`, `/token`, `/publisher`, `/querier` `/<key>` (who declared what), `/route/successor/src/<zid>/dst/<zid>`; config writes on `/config/plugins/**` with `AdminSpace.Write` and `OnConfig`, as zenoh-rust; and in every session the session-local `@/<zid>/session/transport/unicast/<zid>[/link/<id>]` with PUT/DELETE events as transports and links come and go, also queryable through its `@adv/…` form for advanced subscribers); **connectivity** (`Transports()` incl. multicast group members, `Links()`, and zenoh's transport / link events listeners: `DeclareTransportEventsListener`, `DeclareLinkEventsListener` with `WithHistory` and `WithLinkTransport`, opened/closed as PUT/DELETE, links withdrawn before their transport; linked in only when used); **traffic statistics** (zenohd's `stats` feature: per-link bytes / transport / network messages, per-transport payload and dropped-payload histograms, per-key filters; `Stats()`, `Metrics()`, `/metrics` with zenohd's metric names and labels, `?_stats=true` admin JSON; TinyGo: `-tags zenoh_stats`); **congestion control** (`CongestionDrop` / `CongestionBlock` / `CongestionBlockFirst` applied by the transmission queues, `Config.TxQueue`). |
@@ -446,6 +493,12 @@ ZENOH_PICO=$PWD/pico-build go test -run Pico ./zenoh/
 # (exact command in plugins/storage/replication_test.go), then
 ZENOH_REPL=tcp/127.0.0.1:17470 go test -run Replication ./plugins/storage/
 
+# storage backends: InfluxDB 1.x/2.x and an S3 server (commands in the test
+# files), and zenoh-rust's backends driven by bprobe for the data-compatibility tests
+(cd plugins/storage/storagetest/testdata/bprobe && cargo build --release)
+INFLUXDB1_URL=http://127.0.0.1:18086 INFLUXDB2_URL=http://127.0.0.1:18087 S3_URL=http://127.0.0.1:18333 \
+ZENOH_BPROBE=$PWD/plugins/storage/storagetest/testdata/bprobe/target/release/bprobe go test ./plugins/storage/...
+
 # unixpipe + vsock against zenoh-rust (vsock needs the vsock_loopback module)
 (cd zenoh/testdata/zrs && cargo build --release)
 ZENOH_RS=$PWD/zenoh/testdata/zrs/target/release/zrs go test -run RustLink ./zenoh/
@@ -521,8 +574,10 @@ go run ./examples/zprobe                        # hex-dump a raw handshake
       command line, ✅ REST plugin, ✅ storage manager with the memory
       volume, ✅ storage replication (digests and alignment,
       interoperable with zenoh-rust replicas), ✅ admin-space config
-      writes (`plugins/**`, storages and REST reconfigured live). Not
-      done: backends other than memory, dynamic plugin loading.
+      writes (`plugins/**`, storages and REST reconfigured live),
+      ✅ storage backends fs, influxdb (1.x), influxdb2, s3
+      (data-compatible with zenoh-rust's). Not done: rocksdb (no pure-Go
+      RocksDB), dynamic plugin loading.
 
 ## Package layout
 
@@ -539,7 +594,8 @@ tiny-zenoh-go/
 ├── tls13/            # TLS 1.3 client for TinyGo (X.509, ECDSA, key schedule, records)
 ├── zenoh/            # public API: Session (client/peer), pub/sub, queries, liveliness, Scout
 ├── zext/             # zenoh-ext serialization (z_serialize format)
-├── plugins/          # rest (REST API), storage (storage manager, memory volume)
+├── plugins/          # rest (REST API), storage (storage manager; memory volume,
+│                     #   fs/, influxdb/ (v1, v2), s3/ backends, storagetest/)
 ├── internal/json5/   # JSON5 → JSON for zenoh config files
 ├── internal/xxh3/    # XXH3-64 (storage replication fingerprints)
 ├── cmd/gozenohd/      # pure-Go router
