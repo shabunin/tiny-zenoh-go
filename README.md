@@ -312,9 +312,15 @@ session can publish, subscribe and serve queries itself.
   times: against zenohd, against `gozenohd` with LZ4 and user/password, and
   with the low-latency transport. It uses about 170–195 KB of its 303 KB heap
   after a GC. Over TLS 1.3 (`tls13`) it passes against zenohd/rustls, and
-  against `gozenohd` with mutual TLS (each on its own boot: a TLS session
-  needs ~12 KB more heap than TCP, and the Wi-Fi stack keeps ~12 KB per
-  closed connection). The device reports what was negotiated (`Session.Transports()`).
+  against `gozenohd` with mutual TLS, each on its own boot. Five sessions in a
+  row can run out of memory, for two reasons:
+  - lneto v0.4.0, the Wi-Fi TCP/IP stack, keeps closed connections and their
+    5 KB of buffers reachable from its port table.
+    `examples/boardtest/cardputer/lneto-release-closed-conns.patch` fixes
+    that.
+  - Free heap fragments into pieces smaller than the contiguous 8 KB stack
+    each new goroutine needs. The device reports
+  what was negotiated (`Session.Transports()`).
 - **TinyGo**: TinyGo 0.44-built binaries publish to a Rust subscriber, both
   as a client (`examples/tinyput`) and as a peer directly connected to a Rust
   peer (`examples/tinypeer`), and as a client over UDP and over WebSocket

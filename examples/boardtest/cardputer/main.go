@@ -15,10 +15,25 @@
 //	-ldflags '-X main.tlsCA=... -X main.tlsCert=... -X main.tlsKey=...'
 //
 // -X main.only=tls-rust,mtls-go picks profiles, and -X main.debugMem=1
-// prints goroutines and heap after each session closes. (Each closed
-// connection keeps ~12 KB in the Wi-Fi stack, and a TLS session needs
-// ~12 KB more than plain TCP: three sessions in a row don't fit the
-// ~300 KB heap; run the TLS profiles on their own.)
+// prints goroutines and heap after each session closes.
+//
+// Memory: the heap is ~300 KB, the Wi-Fi driver takes ~134 KB of it and a
+// session peaks at 200–230 KB in use. Run the TLS profiles on their own boot:
+// five sessions in a row can run out of memory. Two causes:
+//
+//   - lneto v0.4.0 (the TCP/IP stack under espradio) keeps closed
+//     connections, with 5 KB of buffers each, reachable from its port table.
+//     lneto-release-closed-conns.patch here fixes that. With it, all five
+//     profiles have passed in one boot; without it, the fifth runs out.
+//   - Fragmentation: every goroutine needs one contiguous 8 KB stack. After a
+//     few sessions free memory (~100 KB) is split into pieces under 8 KB, and
+//     starting a goroutine fails. This happens with or without the patch.
+//
+// To build against the patched lneto (v0.4.0):
+//
+//	cp -r $(go env GOMODCACHE)/github.com/soypat/lneto@v0.4.0 /tmp/lneto
+//	chmod -R u+w /tmp/lneto && git -C /tmp/lneto apply "$PWD/lneto-release-closed-conns.patch"
+//	go mod edit -replace github.com/soypat/lneto=/tmp/lneto
 //
 // Wi-Fi settings come from tiny-knx-go's settings record (TKC1) in the last
 // flash block, as its Cardputer example stores them. The router host is set

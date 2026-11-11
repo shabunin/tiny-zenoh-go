@@ -1,0 +1,118 @@
+diff --git a/internet/definitions.go b/internet/definitions.go
+index c8c38cd..4203f7e 100644
+--- a/internet/definitions.go
++++ b/internet/definitions.go
+@@ -101,6 +101,9 @@ func (h *handlers) compact() {
+ 			nilOff++
+ 		}
+ 	}
++	// Zero the dropped tail: entries past len are still in the backing array
++	// and would keep closed connections (and their buffers) reachable.
++	clear(h.nodes[nilOff:])
+ 	h.nodes = h.nodes[:nilOff]
+ }
+ 
+@@ -170,6 +173,7 @@ func (h *handlers) demuxByPort(buf []byte, offset int, port uint16) (*node, erro
+ 
+ func (h *handlers) encapsulateNode(node *node, buf []byte, offsetIP, offsetThisFrame int) (n int, err error) {
+ 	if node.IsInvalid() {
++		node.destroy() // Drop references to the closed connection.
+ 		return 0, nil
+ 	}
+ 	n, err = node.callbacks.Encapsulate(buf, offsetIP, offsetThisFrame)
+diff --git a/internet/handlers_release_test.go b/internet/handlers_release_test.go
+new file mode 100644
+index 0000000..2997a5b
+--- /dev/null
++++ b/internet/handlers_release_test.go
+@@ -0,0 +1,74 @@
++package internet
++
++import (
++	"sync/atomic"
++	"testing"
++
++	"github.com/soypat/lneto"
++)
++
++// fakePortNode is a minimal port StackNode whose connection can be ended by
++// bumping its connection ID, as tcp.Handler does on close.
++type fakePortNode struct {
++	connID atomic.Uint32
++	port   uint16
++}
++
++func (n *fakePortNode) Encapsulate([]byte, int, int) (int, error) { return 0, nil }
++func (n *fakePortNode) Demux([]byte, int) error                   { return nil }
++func (n *fakePortNode) LocalPort() uint16                         { return n.port }
++func (n *fakePortNode) Protocol() uint64                          { return uint64(lneto.IPProtoTCP) }
++func (n *fakePortNode) ConnectionID() *atomic.Uint32              { return &n.connID }
++
++// holds reports whether any entry of the handlers' backing array, including
++// past len, still references a node (keeping it and its buffers reachable).
++func holds(h *handlers) int {
++	n := 0
++	for _, nd := range h.nodes[:cap(h.nodes)] {
++		if !nd.callbacks.IsZeroed() || nd.connID != nil || nd.remoteAddr != nil {
++			n++
++		}
++	}
++	return n
++}
++
++// Closed connections must not stay referenced by the port handlers: neither
++// as invalid entries (dropped on the next Encapsulate pass) nor in the slice's
++// spare capacity after compaction.
++func TestStackPortsReleasesClosedNodes(t *testing.T) {
++	var ps StackPortsMACFiltered
++	ps.ResetTCP(2)
++	mac := make([]byte, 6)
++	mac[0] = 1
++	a, b := &fakePortNode{port: 1000}, &fakePortNode{port: 1001}
++	for _, n := range []*fakePortNode{a, b} {
++		if err := ps.RegisterMACFiltered(n, mac); err != nil {
++			t.Fatal(err)
++		}
++	}
++	a.connID.Add(1) // a closes.
++	buf := make([]byte, 128)
++	ps.Encapsulate(buf, 0, 20)
++	if got := holds(&ps.sp.handlers); got != 1 {
++		t.Fatalf("after encapsulate: %d nodes referenced, want 1", got)
++	}
++
++	// Compaction (on registering into a full table) must not leave copies of
++	// dropped entries past len.
++	var ps2 StackPorts
++	ps2.ResetTCP(2)
++	c, d, e := &fakePortNode{port: 1}, &fakePortNode{port: 2}, &fakePortNode{port: 3}
++	for _, n := range []*fakePortNode{c, d} {
++		if err := ps2.Register(n); err != nil {
++			t.Fatal(err)
++		}
++	}
++	c.connID.Add(1)
++	d.connID.Add(1)
++	if err := ps2.Register(e); err != nil {
++		t.Fatal(err)
++	}
++	if got := holds(&ps2.handlers); got != 1 {
++		t.Fatalf("after compaction: %d nodes referenced, want 1", got)
++	}
++}
+diff --git a/internet/stack-ports.go b/internet/stack-ports.go
+index 884b554..b47e4f3 100644
+--- a/internet/stack-ports.go
++++ b/internet/stack-ports.go
+@@ -162,7 +162,10 @@ func (ps *StackPortsMACFiltered) Encapsulate(carrierData []byte, offsetToIP, off
+ 	h := &ps.sp.handlers
+ 	for i := range h.nodes {
+ 		node := &h.nodes[i]
+-		if node.IsInvalid() || (len(node.remoteAddr) > 0 && internal.IsZeroed(node.remoteAddr...)) {
++		if node.IsInvalid() {
++			node.destroy() // Drop references to the closed connection.
++			continue
++		} else if len(node.remoteAddr) > 0 && internal.IsZeroed(node.remoteAddr...) {
+ 			continue
+ 		}
+ 		n, err = node.callbacks.Encapsulate(carrierData, offsetToIP, offsetToFrame)
