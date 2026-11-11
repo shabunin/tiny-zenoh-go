@@ -185,6 +185,9 @@ func (f *face) onClose(error) {
 	if s.gossip != nil {
 		s.gossipLinkDownLocked(f)
 	}
+	if s.gossipNet != nil {
+		s.gossipNetLinkDownLocked(f, out)
+	}
 	var gone []string
 	for _, key := range f.tokens {
 		gone = append(gone, key)
@@ -290,6 +293,8 @@ func (f *face) onMessage(m protocol.Message, reliable bool) error {
 			s.checkMatching()
 		} else if s.gossip != nil {
 			s.gossipOAM(f, m)
+		} else if s.gossipNet != nil {
+			s.gossipNetOAM(f, m)
 		}
 	case *protocol.Request:
 		if s.cfg.Mode == ModeRouter {

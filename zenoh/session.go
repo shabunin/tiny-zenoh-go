@@ -101,7 +101,8 @@ type Config struct {
 	// are connected, and reconnected in the background when lost.
 	Connect []string
 	// Listen lists locators to accept connections on (peer and router mode).
-	// Default ["tcp/0.0.0.0:0"] for a peer, ["tcp/0.0.0.0:7447"] for a router.
+	// Default (nil) ["tcp/0.0.0.0:0"] for a peer, ["tcp/0.0.0.0:7447"] for a
+	// router; an empty non-nil list listens nowhere.
 	Listen []string
 	// Scouting configures multicast discovery: a peer scouts and answers, a
 	// router only answers (so clients and peers can find it).
@@ -167,10 +168,10 @@ func (c *Config) setDefaults() {
 	if len(c.Connect) == 0 && c.Mode == ModeClient {
 		c.Connect = []string{"tcp/127.0.0.1:7447"}
 	}
-	if len(c.Listen) == 0 && c.Mode == ModePeer {
+	if c.Listen == nil && c.Mode == ModePeer {
 		c.Listen = []string{"tcp/0.0.0.0:0"}
 	}
-	if len(c.Listen) == 0 && c.Mode == ModeRouter {
+	if c.Listen == nil && c.Mode == ModeRouter {
 		c.Listen = []string{"tcp/0.0.0.0:7447"}
 	}
 	if c.Scouting.Address == "" {
@@ -179,7 +180,7 @@ func (c *Config) setDefaults() {
 	if c.Scouting.Autoconnect == 0 {
 		c.Scouting.Autoconnect = MatchRouter | MatchPeer
 	}
-	if c.Gossip.Autoconnect == 0 {
+	if c.Gossip.Autoconnect == 0 && !c.Gossip.NoAutoconnect {
 		c.Gossip.Autoconnect = MatchRouter | MatchPeer | MatchClient
 	}
 	if c.Lease == 0 {
@@ -242,6 +243,7 @@ type Session struct {
 	routes       map[uint32]*routedQuery          // router mode: requests forwarded for faces
 	mesh         *meshState                       // router mode: the router network
 	gossip       *gossipState                     // peer mode: gossip scouting
+	gossipNet    *lsNetwork                       // peer mode: multihop gossip
 	acl          *aclEnforcer                     // access control, nil if off
 	livSubs      map[uint32]*LivelinessSubscriber // by interest id
 	livGets      map[uint32]*livGet               // by interest id
@@ -287,7 +289,12 @@ func Open(cfg Config) (*Session, error) {
 		s.acl = acl
 	}
 	if cfg.Mode == ModePeer && !cfg.Gossip.Disable {
-		s.gossip = newGossip(s.zid, protocol.Peer)
+		if cfg.Gossip.Multihop {
+			s.gossipNet = newNetworkAs(s.zid, protocol.Peer)
+			s.gossipNet.gossip = true
+		} else {
+			s.gossip = newGossip(s.zid, protocol.Peer)
+		}
 	}
 	if cfg.SharedMemory != nil {
 		m, err := shm.New(*cfg.SharedMemory)
@@ -754,6 +761,9 @@ func (s *Session) established(f *face, l transport.Link, tr *transport.Unicast, 
 	}
 	if s.gossip != nil && gossipTarget(f.whatami) {
 		s.gossipLinkUp(f)
+	}
+	if s.gossipNet != nil && gossipTarget(f.whatami) {
+		s.gossipNetLinkUp(f)
 	}
 	return nil
 }

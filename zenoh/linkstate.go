@@ -199,6 +199,7 @@ type lsNode struct {
 	whatami  WhatAmI
 	hasWAI   bool
 	locators []string
+	hasLoc   bool
 	sn       uint64
 	links    map[string]uint16 // neighbour zid -> raw weight (0 = default)
 	gateway  bool
@@ -220,6 +221,13 @@ type lsNetwork struct {
 	nodes []*lsNode // index = our psid; self is 0; nil = removed
 	links map[*face]*lsLink
 	trees []lsTree
+
+	// gossip: link states carry locators (zenoh-rust propagate_locators with
+	// multihop gossip): ours are selfLocs, set before each operation.
+	gossip   bool
+	selfLocs []string
+	// changed lists the nodes the last linkStates call added or updated.
+	changed []int
 }
 
 type lsSend struct {
@@ -227,9 +235,12 @@ type lsSend struct {
 	list []linkState
 }
 
-func newNetwork(self ZID) *lsNetwork {
+func newNetwork(self ZID) *lsNetwork { return newNetworkAs(self, protocol.Router) }
+
+// newNetworkAs makes a link-state graph rooted at a node of role w.
+func newNetworkAs(self ZID, w WhatAmI) *lsNetwork {
 	n := &lsNetwork{links: map[*face]*lsLink{}}
-	n.nodes = []*lsNode{{zid: self, whatami: protocol.Router, hasWAI: true, sn: 1, links: map[string]uint16{}}}
+	n.nodes = []*lsNode{{zid: self, whatami: w, hasWAI: true, sn: 1, links: map[string]uint16{}}}
 	n.trees = []lsTree{{parent: -1, directions: []int{-1}}}
 	return n
 }
@@ -255,6 +266,13 @@ func (n *lsNetwork) entry(i int, withZID, withLinks bool) linkState {
 	ls := linkState{psid: uint64(i), sn: nd.sn, whatami: nd.whatami, hasWAI: nd.hasWAI, gateway: nd.gateway}
 	if withZID {
 		ls.zid = nd.zid
+	}
+	if n.gossip {
+		if i == 0 {
+			ls.locators, ls.hasLoc = n.selfLocs, true
+		} else {
+			ls.locators, ls.hasLoc = nd.locators, nd.hasLoc
+		}
 	}
 	if withLinks {
 		var weights []uint16
@@ -414,7 +432,7 @@ func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
 			old := nd.sn
 			nd.sn, nd.whatami, nd.hasWAI = st.ls.sn, whatami, hasWAI
 			if st.ls.hasLoc {
-				nd.locators = st.ls.locators
+				nd.locators, nd.hasLoc = st.ls.locators, true
 			}
 			nd.links, nd.gateway = st.links, st.ls.gateway
 			if old == 0 {
@@ -424,7 +442,7 @@ func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
 			}
 		} else {
 			i = n.addNode(&lsNode{zid: st.zid, whatami: whatami, hasWAI: hasWAI, locators: st.ls.locators,
-				sn: st.ls.sn, links: st.links, gateway: st.ls.gateway})
+				hasLoc: st.ls.hasLoc, sn: st.ls.sn, links: st.links, gateway: st.ls.gateway})
 			newNodes = append(newNodes, i)
 		}
 		for z := range st.links {
@@ -443,6 +461,17 @@ func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
 	}
 	removed := n.removeDetached()
 	keep := func(i int) bool { return n.nodes[i] != nil }
+	n.changed = n.changed[:0]
+	for _, i := range newNodes {
+		if keep(i) {
+			n.changed = append(n.changed, i)
+		}
+	}
+	for i := range updated {
+		if keep(i) {
+			n.changed = append(n.changed, i)
+		}
+	}
 
 	// Propagate: new nodes in full to every link; updated nodes' links to
 	// every link but the sender and the node itself.

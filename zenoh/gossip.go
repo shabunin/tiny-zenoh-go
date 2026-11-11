@@ -283,4 +283,13 @@ type GossipConfig struct {
 	// Autoconnect lists the roles to connect to when gossiped. Default
 	// routers, peers and clients (zenoh-rust's peer default).
 	Autoconnect WhatAmIMatcher
+	// NoAutoconnect: learn and relay gossip but connect to nobody
+	// (zenoh-rust autoconnect "").
+	NoAutoconnect bool
+	// Multihop relays every node's link state (with its locators) to all
+	// neighbours, not just the next hop (zenoh-rust
+	// scouting/gossip/multihop), so peers learn about peers they have no
+	// common neighbour with. More traffic; meant for peer subsystems that
+	// aren't fully reachable from each other.
+	Multihop bool
 }
