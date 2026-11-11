@@ -35,7 +35,7 @@ func icptRouters(t *testing.T, c icptConf, fn func(t *testing.T, router string))
 	t.Run("rust", func(t *testing.T) {
 		l := freeLocator(t)
 		conf := map[string]any{"mode": "router", "listen/endpoints": []string{l},
-			"scouting/multicast/enabled": false,
+			"scouting/multicast/enabled":         false,
 			"timestamping/drop_future_timestamp": c.ts.DropFutureTimestamp}
 		if c.ts.Enabled != nil {
 			conf["timestamping/enabled"] = *c.ts.Enabled
