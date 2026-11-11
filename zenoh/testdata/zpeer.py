@@ -14,6 +14,8 @@ usage: zpeer.py <router | json-config> <mode> <args...>
   queryable <key> <secs>    reply "py:<params>:<payload>" on the query key; params "fail" -> error
   get <selector>            print replies (sends payload "qbody")
   publisher <key> <n>       declared publisher (writer-side filtered): n puts "pub-<i>"
+  bepub <key> <prio> <n>    best-effort publisher at priority <prio> (a zenoh.Priority
+                            name): n puts "be-<i>"
   querier <key>             declared querier: one get, print replies
   matching <pub|querier|querier-complete> <key> <secs>
                             print {"matching": bool} on each matching status change
@@ -136,6 +138,15 @@ def main():
         time.sleep(0.5)  # let the router answer the publisher's interest
         for i in range(n):
             pub.put(f"pub-{i}".encode())
+        time.sleep(0.3)
+        emit(done=True)
+    elif mode == "bepub":
+        key, prio, n = args[0], getattr(zenoh.Priority, args[1]), int(args[2])
+        pub = s.declare_publisher(key, reliability=zenoh.Reliability.BEST_EFFORT, priority=prio)
+        time.sleep(0.5)
+        for i in range(n):
+            pub.put(f"be-{i}".encode())
+            time.sleep(0.01)
         time.sleep(0.3)
         emit(done=True)
     elif mode == "querier":

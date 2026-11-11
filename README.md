@@ -96,7 +96,7 @@ session can publish, subscribe and serve queries itself.
 | `keyexpr`        | ✅ | Validation, canonical form, **match / intersect / include** with `*`, `**`, `$*`. |
 | `protocol`       | ✅ | Scouting (`SCOUT`, `HELLO`) and the full transport message set: `INIT` `OPEN` `CLOSE` `KEEP_ALIVE` `FRAME` `FRAGMENT` `JOIN`; `PUSH` `REQUEST` `RESPONSE` `RESPONSE_FINAL` `DECLARE` (keyexpr/subscriber/queryable/token + undeclares, final) `INTEREST` `OAM`; `PUT` `DEL` `QUERY` `REPLY` `ERR`; extensions (QoS, Timestamp, SourceInfo, ResponderId, attachments, target, budget, timeout). |
 | `transport`      | ✅ | Unicast session over stream links (length-prefixed batches) or packet links (one batch per datagram, batch size capped at the link MTU), both sides of the handshake (`Open` and `Accept`, with duplicate/self rejection) + negotiation, stream framing, FRAME batching with SNs, FRAGMENT split/reassembly, keep-alive, lease expiry, CLOSE. **QoS** (INIT ext `QoS`/`QoSLink`, 8 priorities × reliable/best-effort SN channels, priority in FRAME/FRAGMENT); **compression** (INIT ext 0x6, batch header byte, own pure-Go LZ4 block codec in `internal/lz4`); **multilink** (`Config.MaxLinks`: INIT/OPEN ext 0x4 with zenoh's RSA-512 PKCS#1 key proof, one transport over several links with per-link batch size/compression/lease, zenoh-rust's link selection by reliability and priority range, link loss without session loss); **multicast** (`NewMulticast` over a `MulticastLink`: periodic `JOIN` with next SNs, per-sender SN windows and reassembly, sender leases, CLOSE); **low latency** (`Config.LowLatency`: INIT ext 0x5, every network message sent alone with no FRAME/SN/fragmentation, u32 LE length prefix on streams). Imports no `net`. |
-| `link`           | ✅ TCP, UDP, UDP multicast, TLS, QUIC, WS, Unix, serial | Locator parsing incl. `?metadata` / `#config`; TCP; UDP (MTU 65487 like zenoh on Linux, one listener socket demultiplexed per remote address); UDP multicast groups `udp/224.x.x.x:port#iface=<name>;ttl=<n>` (send socket bound to the interface, own datagrams filtered); TLS with zenoh's config keys (`root_ca_certificate`, `listen_*`/`connect_*` certificate & key as `_file`/`_base64`/`_raw`, `enable_mtls`, `verify_name_on_connect`); QUIC in `link/quic` (ALPN `zenoh`/`hq-29`, one bidirectional stream, via `link.Register`); WebSocket `ws/host:port` (own minimal RFC 6455 code, one binary message per batch); Unix sockets `unixsock-stream/<path>` (flock'd `<path>.lock`, stale sockets replaced); serial `serial/<dev>#baudrate=N` (z-serial framing: COBS, CRC-32, I/A/R connect handshake, 1500-byte frames; Linux ttys opened raw with exclusive access; `link.NewSerial` wraps any byte stream, e.g. a TinyGo `machine.UART`). |
+| `link`           | ✅ TCP, UDP, UDP multicast, TLS, QUIC, WS, Unix, serial | Locator parsing incl. `?metadata` / `#config`; TCP; UDP (MTU 65487 like zenoh on Linux, one listener socket demultiplexed per remote address); UDP multicast groups `udp/224.x.x.x:port#iface=<name>;ttl=<n>` (send socket bound to the interface, own datagrams filtered); TLS with zenoh's config keys (`root_ca_certificate`, `listen_*`/`connect_*` certificate & key as `_file`/`_base64`/`_raw`, `enable_mtls`, `verify_name_on_connect`); QUIC in `link/quic` (via `link.Register`; zenoh's variants chosen by ALPN from the locator metadata: single stream, multistream with a stream per priority (default), mixed reliability with best-effort traffic in QUIC datagrams `?mixed_rel=1`, datagrams only `?rel=0`); WebSocket `ws/host:port` (own minimal RFC 6455 code, one binary message per batch); Unix sockets `unixsock-stream/<path>` (flock'd `<path>.lock`, stale sockets replaced); serial `serial/<dev>#baudrate=N` (z-serial framing: COBS, CRC-32, I/A/R connect handshake, 1500-byte frames; Linux ttys opened raw with exclusive access; `link.NewSerial` wraps any byte stream, e.g. a TinyGo `machine.UART`). |
 | `shm`            | ✅ Linux | zenoh's POSIX shared memory, layout-compatible with zenoh-rust 1.x (SHM protocol v2): `/dev/shm/<id>.zenoh` metadata/data/auth segments, INIT/OPEN negotiation (challenges read from each other's auth segment), per-priority handoff counters, watchdog confirmation (50 ms) and validation (100 ms), refcounts and generations, garbage collection, orphan-segment cleanup. Enabled with `Config.SharedMemory` (`gozenohd --shm`): payloads ≥ 3 KiB to SHM-capable faces go through a 16 MiB pool; received SHM payloads are copied out. Stub returning `ErrUnsupported` elsewhere and on TinyGo. |
 | `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, admin space `@/<zid>/router`); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`), declaration push between peers, writer-side filtering, peers attached to routers); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), matching status and matching listeners on publishers and queriers, **advanced pub/sub** (zenoh-ext compatible: `DeclareAdvancedPublisher` with cache, sequence numbers + heartbeats for miss detection, publisher detection; `DeclareAdvancedSubscriber` with history incl. late-joining publishers (`_max`, `_time` limits), in-order delivery, recovery of lost samples by gap queries / periodic queries / heartbeats, miss listeners, subscriber detection), `_anyke` replies, `_time` ranges (`ParseTimeRange`), source info on samples, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress). |
 
@@ -130,6 +130,11 @@ session can publish, subscribe and serve queries itself.
   gozenohd routing between a Rust TLS client and a Rust UDP client, and a
   Rust QUIC client on gozenohd receiving from a Rust client on zenohd via
   the router mesh.
+- **QUIC variants**: single stream, multistream, mixed reliability,
+  multistream + mixed reliability, and datagrams only. Each was tested Go ↔ Go,
+  with a Rust peer dialing a Go peer, and with Go dialing a Rust router.
+  Traffic flowed both ways at every priority, reliable and best effort, and
+  the negotiated variant was checked on our side.
 - **Shared memory**: Go peer ↔ Rust peer (zenoh-rust's default SHM config):
   puts, query bodies and replies of 100 KB arrive in Rust as SHM buffers
   (`ZBytes.as_shm()`), and Rust's auto-wrapped payloads are read by Go;
@@ -249,10 +254,11 @@ go run ./examples/zprobe                        # hex-dump a raw handshake
       between peers (zenoh's default, one hop), ✅ multicast transport
       (`JOIN`). Not done: multihop gossip and full link-state routing
       between peers (zenoh-rust's non-default `routing/peer/mode: linkstate`).
-- [ ] **M7 — More links.** ✅ UDP, ✅ TLS (+ mTLS), ✅ QUIC (base
-      single-stream protocol), ✅ WebSocket, ✅ Unix sockets; still QUIC
-      multi-stream / mixed reliability, zenoh's "reliable UDP" (plaintext
-      QUIC). ✅ serial.
+- [x] **M7 — More links.** ✅ UDP, ✅ TLS (+ mTLS), ✅ QUIC (single
+      stream, multistream, mixed reliability, datagrams), ✅ WebSocket,
+      ✅ Unix sockets, ✅ serial. Not possible with quic-go: zenoh's
+      "reliable UDP" (`udp/…?rel=1`), which is QUIC with packet protection
+      switched off inside quinn.
 - [x] **M8 — Advanced.** ✅ shared memory (Linux), ✅ QoS negotiation &
       priorities, ✅ compression, ✅ multilink, ✅ authentication (usrpwd,
       pubkey), ✅ access control, ✅ low-latency transport, ✅ querier,
@@ -334,9 +340,22 @@ gozenoh/
   reliable/best-effort flag; over UDP "reliable" is just a separate SN space.
 - WebSocket links aren't streamed: one binary message per batch, no length
   prefix, any URL path; zenoh-rust drops the link on text or ping frames.
-- zenoh's QUIC offers ALPN `zenoh-ms` (stream per priority), `zenoh`, `hq-29`;
-  a server that only lists `zenoh`/`hq-29` gets the plain single-stream link,
-  framed exactly like TCP. QUIC reuses the `transport/link/tls` settings.
+- zenoh's QUIC variants are negotiated by ALPN, server preference first:
+  `zenoh-ms-mr`, `zenoh-ms`, `zenoh-mr`, `zenoh`, `hq-29`. The list comes from the
+  locator metadata `multistream` (default `auto`) and `mixed_rel` (default
+  `0`). Single stream is framed exactly like TCP.
+- Multistream: the bidirectional stream carries priority Control (the
+  handshake, keep-alives). Each side opens 7 unidirectional streams at once,
+  in priority order, and stream number n (from 0) carries priority n+1, so a
+  node must allow 7 incoming unidirectional streams. Without QoS everything
+  stays on the Control stream. Order across priorities is not kept.
+- Mixed reliability: the same connection's QUIC datagrams become a second,
+  best-effort link of the transport, with no handshake of its own. Batches
+  there are 1150 bytes at most, and keep-alives and lease apply per link.
+  `?rel=0` makes the whole link datagrams, handshake included (ALPN `hq-29`).
+- zenoh-rust rejects a locator whose metadata keys aren't sorted (gossip
+  fails with "failed to decode link state"), so locators are canonicalized
+  when parsed.
 - SHM: a PUT/ERR carrying SHM has the mandatory unit ext `0x12` and its
   payload becomes a list of slices (`zint` count; per slice a kind — 0 raw,
   1 SHM pointer — and length-prefixed bytes); a query body is preceded by unit

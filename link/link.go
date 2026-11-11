@@ -6,6 +6,7 @@ package link
 import (
 	"errors"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -53,7 +54,23 @@ func Parse(s string) (Locator, error) {
 		return Locator{}, ErrBadLocator
 	}
 	l.Protocol, l.Address = proto, addr
+	l.Metadata, l.Config = sortParams(l.Metadata), sortParams(l.Config)
 	return l, nil
+}
+
+// sortParams puts "k=v;..." parameters in key order: zenoh's canonical form
+// (zenoh-rust rejects a locator with unsorted metadata, e.g. in gossip).
+func sortParams(s string) string {
+	if !strings.Contains(s, ";") {
+		return s
+	}
+	kv := strings.Split(s, ";")
+	slices.SortStableFunc(kv, func(a, b string) int {
+		ka, _, _ := strings.Cut(a, "=")
+		kb, _, _ := strings.Cut(b, "=")
+		return strings.Compare(ka, kb)
+	})
+	return strings.Join(kv, ";")
 }
 
 // Protocol is a link implementation registered with Register.

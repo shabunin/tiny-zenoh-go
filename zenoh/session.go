@@ -427,7 +427,9 @@ type TransportInfo struct {
 	Compression bool
 	MultiLink   bool
 	SharedMem   bool
-	AuthUser    string // the user the node authenticated as, if any
+	// PriorityStreams: each priority has its own stream (QUIC multistream).
+	PriorityStreams bool
+	AuthUser        string // the user the node authenticated as, if any
 }
 
 // Transports describes the unicast transports to the nodes we are
@@ -446,7 +448,8 @@ func (s *Session) Transports() []TransportInfo {
 		out = append(out, TransportInfo{ZID: f.zid, WhatAmI: f.whatami, Proto: f.proto,
 			Links: f.tr.Links(), BatchSize: f.tr.BatchSize(), QoS: f.tr.QoS(),
 			LowLatency: f.tr.LowLatency(), Compression: f.tr.Compression(),
-			MultiLink: f.tr.MultiLink(), SharedMem: f.shm != nil, AuthUser: f.tr.AuthUser()})
+			MultiLink: f.tr.MultiLink(), SharedMem: f.shm != nil, AuthUser: f.tr.AuthUser(),
+			PriorityStreams: f.tr.PriorityStreams()})
 	}
 	return out
 }

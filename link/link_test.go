@@ -170,3 +170,13 @@ func splitPort(addr string) (string, string, error) {
 	}
 	return addr, "", nil
 }
+
+func TestParseSortsParams(t *testing.T) {
+	l, err := Parse("quic/127.0.0.1:7447?multistream=0;mixed_rel=1#b=2;a=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := l.String(), "quic/127.0.0.1:7447?mixed_rel=1;multistream=0#a=1;b=2"; got != want {
+		t.Fatalf("%s, want %s", got, want)
+	}
+}

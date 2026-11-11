@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -166,6 +167,11 @@ type tlink struct {
 	rxBuf          []byte
 	lastRx, lastTx atomic.Int64
 
+	// prioW: per-priority streams (PriorityLink), nil when not in use;
+	// priorities other than Control write through prioAsync.
+	prioW     []io.Writer
+	prioAsync []*prioWriter
+
 	done      chan struct{}
 	closeOnce sync.Once
 }
@@ -193,8 +199,25 @@ func newTLink(link Link, batch uint16) *tlink {
 func (l *tlink) close() {
 	l.closeOnce.Do(func() {
 		close(l.done)
+		for _, w := range l.prioAsync {
+			w.close()
+		}
 		_ = l.link.Close()
 	})
+}
+
+// flushPriorities waits (at most d) for the batches queued on l's priority
+// streams to be written, before l is closed.
+func (l *tlink) flushPriorities(d time.Duration) {
+	var wg sync.WaitGroup
+	for _, w := range l.prioAsync {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w.flush(d)
+		}()
+	}
+	wg.Wait()
 }
 
 // Unicast is an established point-to-point Zenoh transport over one or more
@@ -218,6 +241,7 @@ type Unicast struct {
 	txMu      sync.Mutex
 	txSN      [numPrio][2]uint64 // per priority: [0] best-effort, [1] reliable
 	txBatch   codec.Writer
+	txPrio    protocol.Priority // priority of txBatch, for per-priority streams
 	txPayload codec.Writer
 
 	rxMu sync.Mutex // links receive concurrently
@@ -295,15 +319,49 @@ func establish(link Link, cfg Config, cb Callbacks, handshake func(*Unicast) err
 		return ex, nil
 	}
 	t.links = []*tlink{l}
+	if c := bestEffortCompanion(l); c != nil {
+		c.t = t
+		t.links = append(t.links, c)
+		t.start(c)
+	}
 	t.start(l)
 	return t, nil
+}
+
+// bestEffortCompanion returns the unreliable link that comes with l (see
+// MixedReliabilityLink), set up like l, or nil.
+func bestEffortCompanion(l *tlink) *tlink {
+	ml, ok := l.link.(MixedReliabilityLink)
+	if !ok || l.lowLatency {
+		return nil
+	}
+	be := ml.BestEffort()
+	if be == nil {
+		return nil
+	}
+	c := newTLink(be, uint16(l.batchSize))
+	c.batchSize = int(c.propose)
+	c.reliable = false
+	c.peerLease = l.peerLease
+	c.enableCompression(l.compress)
+	return c
 }
 
 func (t *Unicast) start(l *tlink) {
 	now := time.Now().UnixNano()
 	l.lastRx.Store(now)
 	l.lastTx.Store(now)
-	go t.rxLoop(l)
+	if pl, ok := l.link.(PriorityLink); ok && pl.PriorityStreams() && !l.lowLatency {
+		l.prioW = make([]io.Writer, numPrio)
+		l.prioW[0] = l.link
+		for p := 1; p < numPrio; p++ {
+			w := newPrioWriter(pl.PriorityWriter(protocol.Priority(p)))
+			l.prioW[p] = w
+			l.prioAsync = append(l.prioAsync, w)
+			go t.rxLoop(l, pl.PriorityReader(protocol.Priority(p)), make([]byte, len(l.rxBuf)))
+		}
+	}
+	go t.rxLoop(l, l.link, l.rxBuf)
 	go t.keepAliveLoop(l)
 }
 
@@ -379,6 +437,13 @@ func (t *Unicast) LinkDone(link Link) <-chan struct{} {
 	c := make(chan struct{})
 	close(c)
 	return c
+}
+
+// PriorityStreams reports whether the first link carries each priority on
+// its own stream (see PriorityLink).
+func (t *Unicast) PriorityStreams() bool {
+	l := t.firstLink()
+	return l != nil && l.prioW != nil
 }
 
 // Ext returns the handshake extension made by Config.Ext (nil without one).
@@ -771,7 +836,7 @@ func unexpected(want string, m protocol.Message) error {
 }
 
 func (t *Unicast) readTransport(l *tlink) (protocol.Message, error) {
-	batch, err := l.readBatch()
+	batch, err := l.readBatch(l.link, l.rxBuf)
 	if err != nil {
 		return nil, err
 	}
@@ -780,17 +845,17 @@ func (t *Unicast) readTransport(l *tlink) (protocol.Message, error) {
 
 // readBatch reads the next batch: length-prefixed on streams, one packet on
 // packet links (empty packets are skipped).
-func (l *tlink) readBatch() ([]byte, error) {
+func (l *tlink) readBatch(r io.Reader, buf []byte) ([]byte, error) {
 	if l.lowLatency && l.prefix > 0 {
 		return l.readLowLatency()
 	}
 	if l.prefix > 0 {
-		return ReadBatch(l.link, l.rxBuf)
+		return ReadBatch(r, buf)
 	}
 	for {
-		n, err := l.link.Read(l.rxBuf)
+		n, err := r.Read(buf)
 		if n > 0 {
-			return l.rxBuf[:n], nil
+			return buf[:n], nil
 		}
 		if err != nil {
 			return nil, err
@@ -833,6 +898,7 @@ func (l *tlink) maxBody() int { return l.batchSize - l.prefix - l.hdrLen() }
 // startBatchLocked resets txBatch to an empty batch for l (length prefix and
 // header placeholders).
 func (t *Unicast) startBatchLocked(l *tlink) {
+	t.txPrio = protocol.PriorityControl
 	t.txBatch.Reset()
 	t.txBatch.WriteRaw(lenPlaceholder[:l.prefix+l.hdrLen()])
 }
@@ -859,7 +925,11 @@ func (t *Unicast) flushBatchLocked(l *tlink) error {
 	case l.prefix > 0:
 		b[0], b[1] = byte(n), byte(n>>8)
 	}
-	if _, err := l.link.Write(b); err != nil {
+	w := io.Writer(l.link)
+	if l.prioW != nil {
+		w = l.prioW[t.txPrio]
+	}
+	if _, err := w.Write(b); err != nil {
 		return err
 	}
 	l.lastTx.Store(time.Now().UnixNano())
@@ -999,8 +1069,18 @@ func (t *Unicast) Send(reliable bool, msgs ...Encoder) error {
 	return nil
 }
 
+// setStreamPrioLocked picks the per-priority stream for the batch being
+// built: its priority with QoS, Control without (as zenoh-rust, whose
+// single non-QoS queue is index 0).
+func (t *Unicast) setStreamPrioLocked(prio protocol.Priority) {
+	if t.qos {
+		t.txPrio = prio
+	}
+}
+
 func (t *Unicast) sendFrameLocked(l *tlink, prio protocol.Priority, reliable bool, payload []byte) error {
 	t.startBatchLocked(l)
+	t.setStreamPrioLocked(prio)
 	f := protocol.Frame{Reliable: reliable, SN: t.nextSNLocked(prio, reliable), Exts: qosExts(prio), Payload: payload}
 	f.Encode(&t.txBatch)
 	return t.flushBatchLocked(l)
@@ -1011,6 +1091,7 @@ func (t *Unicast) sendFragmentsLocked(l *tlink, prio protocol.Priority, reliable
 	for len(msg) > 0 {
 		n := min(capacity, len(msg))
 		t.startBatchLocked(l)
+		t.setStreamPrioLocked(prio)
 		f := protocol.Fragment{
 			Reliable: reliable,
 			More:     n < len(msg),
@@ -1031,13 +1112,16 @@ func (t *Unicast) sendFragmentsLocked(l *tlink, prio protocol.Priority, reliable
 // Receive
 // -----------------------------------------------------------------------------
 
-func (t *Unicast) rxLoop(l *tlink) {
+// rxLoop receives batches from r (the link, or one of its per-priority
+// streams) into buf.
+func (t *Unicast) rxLoop(l *tlink, r io.Reader, buf []byte) {
+	var zbuf []byte
 	for {
-		batch, err := l.readBatch()
+		batch, err := l.readBatch(r, buf)
 		if err == nil {
 			l.lastRx.Store(time.Now().UnixNano())
 			if l.compress {
-				batch, err = l.decompress(batch)
+				batch, err = l.decompress(batch, &zbuf)
 			}
 		}
 		if err == nil {
@@ -1175,6 +1259,7 @@ func (t *Unicast) shutdown(cause error) {
 		t.lmu.Unlock()
 		if !errors.Is(cause, ErrPeerClosed) {
 			for _, l := range links {
+				l.flushPriorities(t.cfg.Lease / time.Duration(t.cfg.KeepAliveDivisor))
 				_ = t.writeTransport(l, &protocol.Close{Session: true, Reason: closeCause(cause)})
 			}
 		}

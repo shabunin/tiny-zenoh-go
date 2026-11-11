@@ -24,7 +24,6 @@ var errDecompress = errors.New("transport: bad compressed batch")
 type compressState struct {
 	c     lz4.Compressor
 	txBuf []byte // compressed batch being sent
-	rxBuf []byte // decompressed batch being handled
 
 	txCompressed, rxCompressed atomic.Uint64
 }
@@ -57,8 +56,9 @@ func (l *tlink) compressBatch(b []byte) []byte {
 	return out
 }
 
-// decompress strips the batch header and, if set, inflates the body.
-func (l *tlink) decompress(batch []byte) ([]byte, error) {
+// decompress strips the batch header and, if set, inflates the body into
+// *buf (one buffer per receiving stream).
+func (l *tlink) decompress(batch []byte, buf *[]byte) ([]byte, error) {
 	if len(batch) == 0 {
 		return nil, errDecompress
 	}
@@ -66,11 +66,11 @@ func (l *tlink) decompress(batch []byte) ([]byte, error) {
 		return batch[1:], nil
 	}
 	z := l.lz
-	out, err := lz4.Decompress(z.rxBuf[:0], batch[1:], l.batchSize)
+	out, err := lz4.Decompress((*buf)[:0], batch[1:], l.batchSize)
 	if err != nil {
 		return nil, errors.Join(errDecompress, err)
 	}
-	z.rxBuf = out
+	*buf = out
 	z.rxCompressed.Add(1)
 	return out, nil
 }

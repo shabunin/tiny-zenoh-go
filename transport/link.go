@@ -11,6 +11,8 @@ package transport
 import (
 	"errors"
 	"io"
+
+	"github.com/shabunin/gozenoh/protocol"
 )
 
 // Link is a connection between two Zenoh nodes: by default a reliable,
@@ -31,6 +33,33 @@ type PacketLink interface {
 	Link
 	// MTU is the largest packet the link carries; it caps the batch size.
 	MTU() int
+}
+
+// PriorityLink is a stream link that may carry each message priority on a
+// stream of its own (zenoh-rust's supports_priorities: QUIC multistream),
+// so that a congested priority doesn't hold up the others. The Link's own
+// Read and Write are the Control priority's stream, which also carries the
+// handshake and keep-alives; with QoS, batches of priority p go on stream p,
+// without QoS everything stays on Control.
+type PriorityLink interface {
+	Link
+	// PriorityStreams reports whether per-priority streams are in use.
+	PriorityStreams() bool
+	// PriorityWriter and PriorityReader return the stream of priority p
+	// (1 to 7; 0 is the link itself).
+	PriorityWriter(p protocol.Priority) io.Writer
+	PriorityReader(p protocol.Priority) io.Reader
+}
+
+// MixedReliabilityLink is a reliable link that may come with a best-effort
+// companion on the same connection (zenoh-rust's NewLink::MixedReliability:
+// QUIC streams plus QUIC datagrams). After the handshake on the link, the
+// transport uses the companion as a second, unreliable link with no
+// handshake of its own, for best-effort traffic.
+type MixedReliabilityLink interface {
+	Link
+	// BestEffort returns the companion, or nil if there is none.
+	BestEffort() PacketLink
 }
 
 // ErrBatchLength is returned by ReadBatch when an incoming batch is larger than
