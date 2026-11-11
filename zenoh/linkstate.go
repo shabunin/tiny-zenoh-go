@@ -252,6 +252,16 @@ func newNetworkAs(self ZID, w WhatAmI) *lsNetwork {
 
 func zkey(z ZID) string { return string(z.Bytes()) }
 
+// knows reports whether the node with zkey r is in the graph (other than us).
+func (n *lsNetwork) knows(r string) bool {
+	for i, nd := range n.nodes {
+		if i > 0 && nd != nil && zkey(nd.zid) == r {
+			return true
+		}
+	}
+	return false
+}
+
 func (n *lsNetwork) idx(z ZID) int {
 	for i, nd := range n.nodes {
 		if nd != nil && nd.zid.Equal(z) {

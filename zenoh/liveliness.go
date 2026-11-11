@@ -109,8 +109,8 @@ func (s *Session) pushTokensLocked(key string) []string {
 			}
 		}
 	}
-	if s.mesh != nil {
-		for k := range s.mesh.remote[kindToken] {
+	for _, m := range s.meshes {
+		for k := range m.remote[kindToken] {
 			if !seen[k] && keyexpr.Intersect(key, k) {
 				seen[k] = true
 				out = append(out, k)

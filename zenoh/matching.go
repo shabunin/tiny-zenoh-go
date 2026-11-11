@@ -129,8 +129,8 @@ func (m *matcher) statusLocked() bool {
 			}
 		}
 	}
-	if s.mesh != nil {
-		for key, set := range s.mesh.remote[m.kind] {
+	for _, mesh := range s.meshes {
+		for key, set := range mesh.remote[m.kind] {
 			for _, info := range set {
 				if m.matches(key, info.complete) {
 					return true

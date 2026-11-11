@@ -287,12 +287,13 @@ func (s *Session) assignRegionLocked(f *face, tr *transport.Unicast) error {
 	if err != nil {
 		return err
 	}
-	if region.South && region.Mode == protocol.Router {
-		return errors.New("router subregions are not supported")
-	}
 	f.region, f.remoteBound, f.regionName = region, rb, tr.PeerRegionName()
 	f.routed, f.push, f.mesh, f.router = false, false, false, nil
 	switch {
+	case s.cfg.Mode == ModeRouter && f.whatami == protocol.Router:
+		// Routers mesh whatever the region: a south router is in the mesh
+		// of its subregion, a gateway is in our (north) mesh.
+		f.mesh = true
 	case rb == BoundSouth: // our gateway
 		f.routed = true
 		if s.cfg.Mode != ModeClient {
@@ -300,8 +301,6 @@ func (s *Session) assignRegionLocked(f *face, tr *transport.Unicast) error {
 		}
 	case region.South: // we are its gateway
 		f.router = newRouterState()
-	case s.cfg.Mode == ModeRouter && f.whatami == protocol.Router:
-		f.mesh = true
 	default: // north peers
 		f.push = true
 		f.relay = newRelayState()
@@ -331,42 +330,71 @@ func (s *Session) crossesLocked(src, dst *face) bool {
 }
 
 // gatewayAllowsLocked is zenoh-rust's InterRegionFilter: with several
-// gateways between a peer subregion and the north, only the one with the
-// highest ZID forwards. origin is the node the message comes from (the
-// mesh tree root for traffic from other routers).
+// gateways between a subregion and the rest, only one of them forwards a
+// given message across. origin is the node the message comes from (the mesh
+// tree root for traffic from other routers).
 func (s *Session) gatewayAllowsLocked(src, dst *face, origin ZID) bool {
-	srcSouth := src == nil || src.region.South // our session counts as south
-	dstSouth := dst.region.South
-	if srcSouth == dstSouth {
-		return true
+	if src == nil || src.region.South == dst.region.South {
+		return true // our own traffic, or not crossing a north/south bound
 	}
-	var net *lsNetwork
-	var node ZID
-	if dstSouth {
-		net, node = s.southNets[dst.region], dst.zid
-	} else {
-		if src == nil {
+	if src.region.South {
+		return s.primaryGatewayLocked(src, src.region, src.zid, origin)
+	}
+	return s.primaryGatewayLocked(src, dst.region, dst.zid, origin)
+}
+
+// primaryGatewayLocked reports whether we are the gateway of south region r
+// to forward traffic from src (to or from node of r) across it.
+//
+// In a peer region it is the highest ZID among the gateways linked to node.
+// In a router region, traffic that enters our mesh network here (from our
+// session, clients or peers) crosses here; traffic from another router
+// crosses at the highest-ZID gateway of the region's mesh, unless it comes
+// from one of the region's gateways itself, which does it directly.
+func (s *Session) primaryGatewayLocked(src *face, r Region, node, origin ZID) bool {
+	switch r.Mode {
+	case protocol.Router:
+		if !src.mesh {
 			return true
 		}
-		net, node = s.southNets[src.region], src.zid
-	}
-	if net == nil {
-		return true
-	}
-	gwys := net.gatewaysOf(node)
-	if len(gwys) == 0 {
-		return true
-	}
-	primary := gwys[0]
-	for _, g := range gwys {
-		if g.Equal(origin) {
-			return false // the origin is a gateway itself: it delivers directly
+		m := s.meshes[r]
+		if m == nil {
+			return true
 		}
-		if zidLess(primary, g) {
-			primary = g
+		primary := s.zid
+		for i, nd := range m.net.nodes {
+			if nd == nil || !nd.gateway || i >= len(m.net.trees[0].directions) || (i > 0 && m.net.trees[0].directions[i] < 0) {
+				continue
+			}
+			if nd.zid.Equal(origin) {
+				return false
+			}
+			if zidLess(primary, nd.zid) {
+				primary = nd.zid
+			}
 		}
+		return primary.Equal(s.zid)
+	case protocol.Peer:
+		net := s.southNets[r]
+		if net == nil {
+			return true
+		}
+		gwys := net.gatewaysOf(node)
+		if len(gwys) == 0 {
+			return true
+		}
+		primary := gwys[0]
+		for _, g := range gwys {
+			if g.Equal(origin) {
+				return false // the origin is a gateway itself: it delivers directly
+			}
+			if zidLess(primary, g) {
+				primary = g
+			}
+		}
+		return primary.Equal(s.zid)
 	}
-	return primary.Equal(s.zid)
+	return true
 }
 
 // originOf is the node traffic from src comes from: the mesh tree root for
@@ -375,14 +403,11 @@ func (s *Session) originOf(src *face, tree int) ZID {
 	if src == nil {
 		return s.zid
 	}
-	if src.mesh && s.mesh != nil && tree > 0 && tree < len(s.mesh.net.nodes) && s.mesh.net.nodes[tree] != nil {
-		return s.mesh.net.nodes[tree].zid
+	if m := s.meshOf(src); m != nil && tree > 0 && tree < len(m.net.nodes) && m.net.nodes[tree] != nil {
+		return m.net.nodes[tree].zid
 	}
 	return src.zid
 }
-
-// northSide stands for any face of the north region in gatewayAllowsLocked.
-var northSide = &face{}
 
 // forwardsLocked combines crossesLocked and gatewayAllowsLocked.
 func (s *Session) forwardsLocked(src, dst *face, origin ZID) bool {

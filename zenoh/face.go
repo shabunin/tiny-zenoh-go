@@ -197,7 +197,7 @@ func (f *face) onClose(error) {
 	if wasLive && s.cfg.Mode != ModeClient && !f.mesh {
 		s.routerFaceGoneLocked(f, out)
 	}
-	if f.mesh && s.mesh != nil {
+	if f.mesh {
 		s.meshLinkDown(f, out)
 	}
 	if s.gossip != nil {

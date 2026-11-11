@@ -56,7 +56,8 @@ func (s *Session) publish(key string, we protocol.WireExpr, kind SampleKind, pay
 			dst = append(dst, f)
 		}
 	}
-	for f := range s.meshTargetsLocked(kindSub, 0, key, 0, nil) {
+	routers, _ := s.meshRouteLocked(kindSub, nil, 0, key, 0)
+	for f := range routers {
 		dst = append(dst, f)
 	}
 	s.mu.Unlock()

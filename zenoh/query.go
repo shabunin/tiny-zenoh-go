@@ -234,7 +234,8 @@ func (s *Session) get(k *keyexpr.Key, params string, o *getOptions, qr *Querier,
 			pq.faces[f] = true
 		}
 	}
-	for f := range s.meshTargetsLocked(kindQbl, 0, k.String(), o.target, nil) {
+	routers, _ := s.meshRouteLocked(kindQbl, nil, 0, k.String(), o.target)
+	for f := range routers {
 		pq.faces[f] = true
 	}
 	dst := make([]*face, 0, len(pq.faces))

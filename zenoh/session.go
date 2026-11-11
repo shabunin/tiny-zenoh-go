@@ -250,7 +250,7 @@ type Session struct {
 	queryables   map[uint32]*Queryable
 	queries      map[uint32]*pendingQuery
 	routes       map[uint32]*routedQuery          // router mode: requests forwarded for faces
-	mesh         *meshState                       // router mode: the router network
+	meshes       map[Region]*meshState            // router mode: the router networks, per region
 	gossip       *gossipState                     // peer mode: gossip scouting
 	gossipNet    *lsNetwork                       // peer mode: multihop gossip
 	southNets    map[Region]*lsNetwork            // our south peer subregions
@@ -293,8 +293,9 @@ func Open(cfg Config) (*Session, error) {
 	if s.zid.IsZero() {
 		s.zid = NewZID()
 	}
+	s.meshes = map[Region]*meshState{}
 	if cfg.Mode == ModeRouter {
-		s.mesh = newMesh(s.zid)
+		s.meshForLocked(North)
 	}
 	if cfg.ACL != nil {
 		acl, err := newACL(cfg.ACL)

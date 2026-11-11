@@ -99,9 +99,11 @@ func (s *Session) sourceVisibleLocked(g, dst *face) bool {
 // itself.
 func (s *Session) sourcesLocked(k declKind, key string, dst *face) (present, complete bool) {
 	present, complete = s.localSourcesLocked(k, key, dst)
-	if s.mesh != nil && dst != nil && dst.relay == nil {
-		for _, info := range s.mesh.remote[k][key] {
-			present, complete = true, complete || info.complete
+	if dst != nil && dst.relay == nil {
+		for _, m := range s.meshes {
+			for _, info := range m.remote[k][key] {
+				present, complete = true, complete || info.complete
+			}
 		}
 	}
 	return present, complete
@@ -183,9 +185,11 @@ func (s *Session) keysLocked(k declKind, filter string, dst *face) []string {
 				add(t.key)
 			}
 		}
-		if s.mesh != nil && dst != nil {
-			for key := range s.mesh.remote[k] {
-				add(key)
+		if dst != nil {
+			for _, m := range s.meshes {
+				for key := range m.remote[k] {
+					add(key)
+				}
 			}
 		}
 	}
@@ -418,21 +422,18 @@ func (s *Session) routerFaceGoneLocked(f *face, out outbox) {
 // subscribers match.
 func (s *Session) routerForward(src *face, key string, m *protocol.Push, reliable bool) {
 	s.mu.Lock()
-	tree, ok := s.meshSourceLocked(src, m.NodeID)
+	routers, ok := s.meshRouteLocked(kindSub, src, m.NodeID, key, 0)
 	if !ok {
 		s.mu.Unlock()
 		return
 	}
+	tree, _ := s.meshSourceLocked(src, m.NodeID)
 	origin := s.originOf(src, tree)
 	var dst []*face
 	for _, f := range s.faces {
 		if f.live && f.wantsDataLocked(key) && s.forwardsLocked(src, f, origin) {
 			dst = append(dst, f)
 		}
-	}
-	var routers map[*face]bool
-	if src.mesh || s.gatewayAllowsLocked(src, northSide, origin) {
-		routers = s.meshTargetsLocked(kindSub, tree, key, 0, src)
 	}
 	s.mu.Unlock()
 	fwd := *m
@@ -441,12 +442,10 @@ func (s *Session) routerForward(src *face, key string, m *protocol.Push, reliabl
 	for _, f := range dst {
 		_ = f.send(reliable, &fwd)
 	}
-	if len(routers) > 0 {
+	for f, node := range routers {
 		meshFwd := fwd
-		meshFwd.NodeID = uint16(tree)
-		for f := range routers {
-			_ = f.send(reliable, &meshFwd)
-		}
+		meshFwd.NodeID = node
+		_ = f.send(reliable, &meshFwd)
 	}
 }
 
@@ -469,10 +468,7 @@ func (s *Session) routerRequest(src *face, key string, m *protocol.Request) {
 		tree = 0
 	}
 	origin := s.originOf(src, tree)
-	var routers map[*face]bool
-	if src.mesh || s.gatewayAllowsLocked(src, northSide, origin) {
-		routers = s.meshTargetsLocked(kindQbl, tree, key, m.Target, src)
-	}
+	routers, _ := s.meshRouteLocked(kindQbl, src, m.NodeID, key, m.Target)
 	for f := range routers {
 		rq.pending[f] = true
 	}
@@ -516,11 +512,11 @@ func (s *Session) routerRequest(src *face, key string, m *protocol.Request) {
 	fwd.ID = rid
 	fwd.WireExpr = protocol.WireExpr{Suffix: key}
 	fwd.NodeID = 0
-	meshFwd := fwd
-	meshFwd.NodeID = uint16(tree)
 	for _, f := range dst {
 		msg := &fwd
-		if routers[f] {
+		if node, ok := routers[f]; ok {
+			meshFwd := fwd
+			meshFwd.NodeID = node
 			msg = &meshFwd
 		}
 		if err := f.send(true, msg); err != nil {
