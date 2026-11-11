@@ -1,0 +1,387 @@
+# gozenoh
+
+A pure-Go implementation of the [Zenoh](https://zenoh.io) protocol — no cgo, no
+Rust, no C bindings. The whole stack, including the public `zenoh` API, also
+compiles under [TinyGo](https://tinygo.org). The core has no dependencies
+outside the standard library; the optional QUIC link (`link/quic`) uses the
+pure-Go [quic-go](https://github.com/quic-go/quic-go).
+
+> **Status: client, peer and router networks work with real Zenoh.**
+> A gozenoh session connects to `zenohd` as a client, runs as a peer talking
+> directly to other peers (Go or Rust), or runs as a **router** (`gozenohd`)
+> that Rust and Go clients and peers attach to — found by multicast scouting —
+> and that joins router meshes with other gozenohd and `zenohd` routers.
+> Pub/sub, queries/queryables and liveliness interoperate with the official
+> Rust stack in every direction, over TCP, UDP, TLS (incl. mutual TLS), QUIC,
+> WebSocket, Unix sockets and **serial lines** (zenoh's COBS/CRC framing, as
+> zenoh-pico and zenoh-rust use it), and same-host nodes can pass payloads
+> through **shared memory** (compatible with zenoh-rust's SHM). The transport
+> speaks zenoh's **QoS priorities**, **LZ4 batch compression**, **multilink**
+> (several links, e.g. TCP + UDP, under one session) and the **multicast
+> transport** (UDP groups with `JOIN`), all checked against zenoh-rust. It runs
+> on microcontrollers with TinyGo (verified on ESP32 and ESP32-S3 boards over
+> serial and Wi-Fi).
+
+Targets the **Zenoh 1.0.0 wire specification** (<https://spec.zenoh.io/spec/1.0.0/>),
+protocol version `0x09`; verified against **zenohd 1.10.2**.
+
+## Quick example
+
+```go
+s, err := zenoh.Open(zenoh.Config{Connect: []string{"tcp/127.0.0.1:7447"}})
+if err != nil { log.Fatal(err) }
+defer s.Close()
+
+sub, _ := s.DeclareSubscriber("demo/**", func(smp zenoh.Sample) {
+    fmt.Println(smp.KeyExpr, string(smp.Payload))
+})
+defer sub.Undeclare()
+
+_ = s.Put("demo/hello", []byte("hi"), zenoh.WithEncoding(zenoh.EncodingTextPlain))
+
+replies, _ := s.Get("demo/**?x=1", zenoh.WithTimeout(time.Second))
+for r := range replies {
+    if smp, err := r.Result(); err == nil {
+        fmt.Println("reply", smp.KeyExpr, string(smp.Payload))
+    }
+}
+```
+
+Peer mode — no router needed:
+
+```go
+s, _ := zenoh.Open(zenoh.Config{Mode: zenoh.ModePeer}) // listens + scouts 224.0.0.224:7446
+// or connect explicitly:
+s, _ = zenoh.Open(zenoh.Config{Mode: zenoh.ModePeer, Connect: []string{"tcp/10.0.0.5:7447"},
+    Listen: []string{"tcp/0.0.0.0:7448"}})
+
+// find nodes without connecting
+sc, _ := zenoh.Scout(zenoh.MatchRouter|zenoh.MatchPeer, zenoh.ScoutingConfig{}, func(h zenoh.Hello) {
+    fmt.Println(h.WhatAmI, h.ZID, h.Locators)
+})
+defer sc.Stop()
+```
+
+A pure-Go router, standing in for `zenohd` (also builds with TinyGo):
+
+```bash
+go run ./cmd/gozenohd                     # listens on tcp/0.0.0.0:7447, answers scouting
+go run ./cmd/gozenohd -l tcp/0.0.0.0:7447 -i 1234abcd --no-multicast-scouting
+go run ./cmd/gozenohd -l tcp/0.0.0.0:7449 -e tcp/10.0.0.5:7447   # join a zenohd mesh
+go run ./cmd/gozenohd -l udp/0.0.0.0:7447 -l tls/0.0.0.0:7448 --tls-cert srv.pem --tls-key srv.key
+```
+
+QUIC uses the same TLS settings; enable it with a blank import:
+`import _ "github.com/shabunin/gozenoh/link/quic"` (gozenohd already does,
+`-l quic/0.0.0.0:7447 --tls-cert … --tls-key …`).
+
+TLS for a session — or put zenoh's keys in the locator itself
+(`tls/host:7447#root_ca_certificate_file=ca.pem;verify_name_on_connect=false`):
+
+```go
+s, _ := zenoh.Open(zenoh.Config{
+    Connect: []string{"tls/router.example:7447"},
+    TLS:     &link.TLSConfig{RootCACertificate: "ca.pem"}, // + Connect* and EnableMTLS for mTLS
+})
+```
+
+or embedded: `zenoh.Open(zenoh.Config{Mode: zenoh.ModeRouter})` — the router
+session can publish, subscribe and serve queries itself.
+
+## What works today
+
+| Package          | Status | Notes |
+|------------------|--------|-------|
+| `internal/codec` | ✅ | VLE/zint varints (Zenoh's 9-byte u64), length-prefixed bytes/strings, header helpers. |
+| `keyexpr`        | ✅ | Validation, canonical form, **match / intersect / include** with `*`, `**`, `$*`. |
+| `protocol`       | ✅ | Scouting (`SCOUT`, `HELLO`) and the full transport message set: `INIT` `OPEN` `CLOSE` `KEEP_ALIVE` `FRAME` `FRAGMENT` `JOIN`; `PUSH` `REQUEST` `RESPONSE` `RESPONSE_FINAL` `DECLARE` (keyexpr/subscriber/queryable/token + undeclares, final) `INTEREST` `OAM`; `PUT` `DEL` `QUERY` `REPLY` `ERR`; extensions (QoS, Timestamp, SourceInfo, ResponderId, attachments, target, budget, timeout). |
+| `transport`      | ✅ | Unicast session over stream links (length-prefixed batches) or packet links (one batch per datagram, batch size capped at the link MTU), both sides of the handshake (`Open` and `Accept`, with duplicate/self rejection) + negotiation, stream framing, FRAME batching with SNs, FRAGMENT split/reassembly, keep-alive, lease expiry, CLOSE. **QoS** (INIT ext `QoS`/`QoSLink`, 8 priorities × reliable/best-effort SN channels, priority in FRAME/FRAGMENT); **compression** (INIT ext 0x6, batch header byte, own pure-Go LZ4 block codec in `internal/lz4`); **multilink** (`Config.MaxLinks`: INIT/OPEN ext 0x4 with zenoh's RSA-512 PKCS#1 key proof, one transport over several links with per-link batch size/compression/lease, zenoh-rust's link selection by reliability and priority range, link loss without session loss); **multicast** (`NewMulticast` over a `MulticastLink`: periodic `JOIN` with next SNs, per-sender SN windows and reassembly, sender leases, CLOSE); **low latency** (`Config.LowLatency`: INIT ext 0x5, every network message sent alone with no FRAME/SN/fragmentation, u32 LE length prefix on streams). Imports no `net`. |
+| `link`           | ✅ TCP, UDP, UDP multicast, TLS, QUIC, WS, Unix, serial | Locator parsing incl. `?metadata` / `#config`; TCP; UDP (MTU 65487 like zenoh on Linux, one listener socket demultiplexed per remote address); UDP multicast groups `udp/224.x.x.x:port#iface=<name>;ttl=<n>` (send socket bound to the interface, own datagrams filtered); TLS with zenoh's config keys (`root_ca_certificate`, `listen_*`/`connect_*` certificate & key as `_file`/`_base64`/`_raw`, `enable_mtls`, `verify_name_on_connect`); QUIC in `link/quic` (ALPN `zenoh`/`hq-29`, one bidirectional stream, via `link.Register`); WebSocket `ws/host:port` (own minimal RFC 6455 code, one binary message per batch); Unix sockets `unixsock-stream/<path>` (flock'd `<path>.lock`, stale sockets replaced); serial `serial/<dev>#baudrate=N` (z-serial framing: COBS, CRC-32, I/A/R connect handshake, 1500-byte frames; Linux ttys opened raw with exclusive access; `link.NewSerial` wraps any byte stream, e.g. a TinyGo `machine.UART`). |
+| `shm`            | ✅ Linux | zenoh's POSIX shared memory, layout-compatible with zenoh-rust 1.x (SHM protocol v2): `/dev/shm/<id>.zenoh` metadata/data/auth segments, INIT/OPEN negotiation (challenges read from each other's auth segment), per-priority handoff counters, watchdog confirmation (50 ms) and validation (100 ms), refcounts and generations, garbage collection, orphan-segment cleanup. Enabled with `Config.SharedMemory` (`gozenohd --shm`): payloads ≥ 3 KiB to SHM-capable faces go through a 16 MiB pool; received SHM payloads are copied out. Stub returning `ErrUnsupported` elsewhere and on TinyGo. |
+| `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, admin space `@/<zid>/router`); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`), declaration push between peers, writer-side filtering, peers attached to routers); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), matching status and matching listeners on publishers and queriers, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress). |
+
+### Verified interop
+
+- **gozenoh ↔ zenohd**: pub/sub, publisher key-expr ids, 300 KB fragmented
+  payloads, queries with error replies, the router's admin space, liveliness.
+- **gozenoh ↔ Rust Zenoh** (via the official Python binding through zenohd):
+  Go→Rust and Rust→Go pub/sub (encoding schema, attachments, delete),
+  Go `Get` → Rust queryable and Rust `get` → Go queryable (incl. error
+  replies), liveliness tokens both ways (history + delete on undeclare).
+- **Go peer ↔ Rust peer, no router**: either side listening/connecting,
+  pub/sub, queries both ways, liveliness, and a Rust peer and a Go peer
+  finding each other by multicast scouting.
+- **Go peer attached to zenohd** alongside clients: data, queries, liveliness.
+- **gozenohd routing for Rust**: the whole interop + cross suite passes with
+  `ZENOH_ROUTER=go` (an in-process Go router instead of zenohd), plus
+  Rust↔Rust tests where Go only routes — a Rust *declared publisher* and
+  *querier* (which send nothing until the router answers their INTERESTs),
+  liveliness, Rust peers and Go clients on one router, and Rust clients
+  finding gozenohd by multicast scouting. A TinyGo-built gozenohd routes
+  between Rust clients too.
+- **Router meshes**: gozenohd ↔ gozenohd (direct and in a chain, where the
+  middle router forwards for the others) and gozenohd ↔ zenohd, plus
+  zenohd ↔ gozenohd ↔ zenohd, where two zenohd routers that don't know each
+  other exchange pub/sub, queries and liveliness only through the Go router
+  (also checked with the TinyGo-built gozenohd and Rust clients).
+- **UDP, TLS, QUIC, WebSocket and Unix-socket links**: Rust clients ↔ Go router, Go clients ↔ Rust router,
+  Go peer ↔ Rust peer (each side dialing), Go ↔ Go including 300 KB
+  fragmented payloads over UDP, mutual TLS, untrusted servers rejected;
+  gozenohd routing between a Rust TLS client and a Rust UDP client, and a
+  Rust QUIC client on gozenohd receiving from a Rust client on zenohd via
+  the router mesh.
+- **Shared memory**: Go peer ↔ Rust peer (zenoh-rust's default SHM config):
+  puts, query bodies and replies of 100 KB arrive in Rust as SHM buffers
+  (`ZBytes.as_shm()`), and Rust's auto-wrapped payloads are read by Go;
+  Go ↔ Go too, and SHM stays off unless both sides enable it.
+- **QoS, compression, multilink, multicast** (zenoh-rust 1.10 via the Python
+  binding): priorities set in Go arrive in Rust and vice versa through zenohd
+  and through gozenohd; a Rust peer with `transport/unicast/compression/
+  enabled` exchanges 100 KB payloads with a Go peer, compressed both ways (Rust's
+  `lz4_flex` reads our blocks and we read its); a Rust peer with
+  `transport/unicast/max_links: 2` dials a Go peer's TCP and UDP locators and
+  both end up in one transport (the RSA challenge verified both ways); a Rust
+  peer and a Go peer on the same UDP multicast group exchange publications in
+  both directions with no unicast link.
+- **Peer gossip**: Go peers that only know a Rust peer in the middle get
+  linked to each other through its gossip, and a Rust peer and a Go peer
+  that only know a Go peer get linked through ours (data then flows over
+  the direct link, as peers do not route for each other); Go peers keep
+  gossiping to zenohd without disturbing it.
+- **Authentication and access control**: Rust clients authenticate to a Go
+  peer and to gozenohd with user/password (wrong password and missing
+  credentials refused), and with RSA keys (unknown key refused); a Go client
+  authenticates to a Rust peer reading a zenoh `dictionary_file`. One
+  `access_control` config with per-user rules (ingress puts, egress deny
+  overriding an allow, a user matching no subject) gives identical results
+  on a zenoh-rust router and on a Go router.
+- **Querier and matching status**: Go publishers and queriers (as clients
+  of zenohd or of the Go router, and as peers directly linked to a Rust
+  peer) see Rust subscribers and queryables come and go; Rust publishers
+  and queriers (incl. `ALL_COMPLETE` targets) see Go subscribers and
+  complete queryables, through both routers and peer to peer.
+- **Low latency**: a Rust peer with `transport/unicast/lowlatency: true`
+  (QoS off) exchanges publications and queries with a Go peer both ways.
+- **Microcontrollers** (TinyGo 0.44): an M5StickC (ESP32) running
+  `examples/tinyserial` over its USB-UART reaches a Rust client through
+  `gozenohd -l serial//dev/ttyUSB1#baudrate=115200 -e tcp/<zenohd>` (counter
+  publications, queries answered by the device, LED driven by puts); an
+  M5Stack Cardputer (ESP32-S3) on Wi-Fi connects to `zenohd` directly over
+  TCP. Serial framing matches z-serial's byte vectors.
+- **TinyGo**: TinyGo 0.44-built binaries publish to a Rust subscriber, both
+  as a client (`examples/tinyput`) and as a peer directly connected to a Rust
+  peer (`examples/tinypeer`), and as a client over UDP and over WebSocket
+  to a Rust router.
+  TinyGo limits: no multicast listening (they scout but don't answer
+  SCOUTs), no UDP *listeners* (its `ReadFromUDP` reports no source address;
+  dialing UDP works), no TLS or QUIC (its `crypto/tls` is a stub), no Unix
+  sockets.
+
+## Running the tests
+
+```bash
+go test ./...                    # unit tests; interop tests skip themselves
+
+# interop with a live router
+docker run -d --name zenohd -p 7447:7447 eclipse/zenoh
+export ZENOH_ROUTER=tcp/127.0.0.1:7447
+
+# cross-implementation tests also need a python with the official binding
+python -m venv zpy && zpy/bin/pip install 'eclipse-zenoh~=1.10.0'
+export ZENOH_PY=$PWD/zpy/bin/python
+
+ZENOH_MULTICAST=1 go test -race -count=1 ./...   # ZENOH_MULTICAST: also test scouting + multicast groups
+ZENOH_ROUTER=go ZENOH_PY=... go test ./zenoh/    # same suites, gozenoh as the router
+
+# router meshes: one or two zenohd routers not connected to each other
+docker run -d --name zenohd2 --net=host eclipse/zenoh -l tcp/127.0.0.1:7448 --no-multicast-scouting
+ZENOH_MESH=tcp/127.0.0.1:7447,tcp/127.0.0.1:7448 go test -run Mesh ./zenoh/
+
+tinygo build -o /dev/null ./examples/tinyput    # TinyGo builds the full API
+go run ./examples/zprobe                        # hex-dump a raw handshake
+```
+
+## Roadmap
+
+- [x] **M0 — Foundations.** Wire codec and key-expression engine.
+- [x] **M1 — Message model & codec.** Transport, network and data messages
+      plus extensions, with byte-exact vectors checked against zenohd.
+- [x] **M2 — Transport & TCP link.** Handshake, batching, SNs, fragments,
+      keep-alive, lease, close.
+- [x] **M3 — Client session.** Pub/sub, publishers, PUT/DELETE against zenohd.
+- [x] **M4 — Queries & queryables.** REQUEST/RESPONSE, consolidation,
+      selectors/parameters, error replies, timeouts.
+- [x] **M5 — Declarations & interests** (client side). Key-expr declarations,
+      answering router INTERESTs, liveliness.
+- [x] **M6a — Peer mode & scouting.** Accept-side handshake, listeners,
+      multicast `SCOUT`/`HELLO`, autoconnect, peer-to-peer declaration push
+      (initial interest), reconnection.
+- [x] **M6b — Router.** Pure-Go router for clients and peers: forwarding,
+      interest answering/propagation, query routing with finals and timeouts,
+      admin space, `cmd/gozenohd`.
+- [x] **M6c — Router meshes.** Router-to-router link-state (OAM gossip,
+      network graph, shortest-path trees with zenoh's SipHash edge weights),
+      sourced declarations, multi-hop routing, interoperating with zenohd.
+- [x] **M6d — Peer gossip & multicast transport.** ✅ gossip scouting
+      between peers (zenoh's default, one hop), ✅ multicast transport
+      (`JOIN`). Not done: multihop gossip and full link-state routing
+      between peers (zenoh-rust's non-default `routing/peer/mode: linkstate`).
+- [ ] **M7 — More links.** ✅ UDP, ✅ TLS (+ mTLS), ✅ QUIC (base
+      single-stream protocol), ✅ WebSocket, ✅ Unix sockets; still QUIC
+      multi-stream / mixed reliability, zenoh's "reliable UDP" (plaintext
+      QUIC). ✅ serial.
+- [ ] **M8 — Advanced.** Still advanced pub/sub (cache/recovery).
+      ✅ shared memory (Linux), ✅ QoS negotiation & priorities,
+      ✅ compression, ✅ multilink, ✅ authentication (usrpwd, pubkey),
+      ✅ access control, ✅ low-latency transport, ✅ querier,
+      ✅ matching status.
+
+## Package layout
+
+```
+gozenoh/
+├── internal/codec/   # wire primitives (VLE, framing, headers)
+├── keyexpr/          # key expressions (match/intersect/include, canon)
+├── protocol/         # every message type + extensions, encode/decode
+├── transport/        # unicast (QoS, compression, multilink) and multicast transports
+├── internal/lz4/     # LZ4 block codec for batch compression
+├── shm/              # zenoh shared memory (Linux)
+├── link/             # locators, dial/listen: tcp, udp, tls, ws, unixsock-stream; link/quic: quic
+├── zenoh/            # public API: Session (client/peer), pub/sub, queries, liveliness, Scout
+├── cmd/gozenohd/      # pure-Go router
+└── examples/         # zprobe, tinycheck, tinyput, tinypeer, tinyserial
+```
+
+## Design principles
+
+- **Pure Go, zero cgo.** Nothing links to the Rust/C Zenoh stacks.
+- **TinyGo-friendly.** No `reflect`, no heavy `encoding/*` in the library.
+- **Interop is the oracle.** Correctness is measured against real Zenoh nodes.
+- **Every layer tested.** Spec examples and captured bytes are test vectors.
+
+## Interop notes (things the spec doesn't make obvious)
+
+- The negotiated batch size **includes** the 2-byte stream length prefix:
+  a batch body must be ≤ `batch_size - 2`, or zenohd drops the link.
+- For the "32-bit" SN resolution the usable SN space is 28 bits (VLE packs 7
+  bits per nominal byte); the initial SN must stay below `2^28`.
+- Frame QoS extensions must not be sent unless QoS was negotiated. With QoS,
+  each priority has its own reliable and best-effort SN spaces, all starting
+  at the same initial SN; the FRAME/FRAGMENT QoS ext (Z64, mandatory, id 1)
+  is omitted for the default priority Data (5).
+- The network QoS byte 0x00 (priority Control, drop, not express) is a real
+  value, distinct from the omitted default 0x05.
+- Compression is negotiated per link (INIT unit ext 6); afterwards *every*
+  batch, keep-alives and CLOSE included, starts with a header byte (bit 0:
+  the rest is one LZ4 block, sent only when smaller). INIT/OPEN are never
+  compressed, and a block inflates to at most the batch size.
+- Multilink keys are 512-bit RSA, encoded as `zbytes(n LE) zbytes(e LE)`; the
+  challenge is a u64 LE encrypted with PKCS#1 v1.5 (Go's `crypto/rsa` refuses
+  keys that small, hence a math/big implementation). Links of one transport
+  share its SN state; zenoh-rust ignores the initial SN of later links.
+  Reliable traffic is sent on links whose locator is reliable, so with TCP +
+  UDP, best-effort messages take UDP.
+- Multicast: multicast `udp/` endpoints belong in `listen` (zenoh-rust
+  refuses them in `connect`). A sender is ignored until its `JOIN`, which
+  zenoh-rust sends every 2.5 s with patch 1 (fragments may carry
+  First/Drop markers), batch size 8192 and the next SN per channel; QoS on
+  multicast is off by default. Peers are told apart by source address, so a
+  node's own looped-back datagrams must be filtered by its send socket's
+  address, and nodes on one host must use the same interface. zenoh-rust
+  sends every publication to the group regardless of subscriptions.
+- zenohd lowers the batch size to 49152 and returns the lease in seconds.
+- Peers don't send INTERESTs to each other on connect: both sides push all
+  their subscribers/queryables/tokens and close the burst with a `D_FINAL`
+  carrying interest id 0. A Rust peer's `open()` waits for that `D_FINAL`.
+- Clients and peers push their declarations to a router but never get pushed
+  any: they send INTERESTs (publisher → subscribers, querier → queryables,
+  liveliness subscriber/get → tokens) and a declared publisher sends nothing
+  until a matching subscriber is declared to it.
+- Routers never send each other INTERESTs. Each router announces itself as
+  the *source* of its local entities (declarations with id 0 and the
+  `NodeId` extension = its index in the receiver's view of the graph),
+  forwarded down the source's shortest-path tree. Data and queries carry the
+  `NodeId` of the router where they entered the mesh and follow that
+  router's tree. Edge weights are 100 × (1 + 0.01 × a SipHash-1-3 of the two
+  ZIDs), so every router computes the same trees.
+- A liveliness subscriber without history sends a *future-only* interest; a
+  router still sends it an `U_TOKEN` (id 0 + key) when a token disappears.
+- On UDP each batch is one datagram with no length prefix, and the batch size
+  is capped at the link MTU on both sides (65487 on Linux). Frames keep their
+  reliable/best-effort flag; over UDP "reliable" is just a separate SN space.
+- WebSocket links aren't streamed: one binary message per batch, no length
+  prefix, any URL path; zenoh-rust drops the link on text or ping frames.
+- zenoh's QUIC offers ALPN `zenoh-ms` (stream per priority), `zenoh`, `hq-29`;
+  a server that only lists `zenoh`/`hq-29` gets the plain single-stream link,
+  framed exactly like TCP. QUIC reuses the `transport/link/tls` settings.
+- SHM: a PUT/ERR carrying SHM has the mandatory unit ext `0x12` and its
+  payload becomes a list of slices (`zint` count; per slice a kind — 0 raw,
+  1 SHM pointer — and length-prefixed bytes); a query body is preceded by unit
+  ext `0x04`. A pointer is `data_len, metadata segment id, index, generation`.
+  The sender bumps the chunk refcount per receiver, and keeps the watchdog
+  confirmed until the receiver decrements the sender's handoff counter for
+  that priority. zenoh-rust **mlocks** its pool and silently stops sending
+  SHM if that fails: its 16 MiB default exceeds the common 8 MiB
+  `RLIMIT_MEMLOCK`. gozenoh's mlock is best effort.
+- Serial frames are `COBS(flags | len u16 LE | payload | CRC-32 LE) 0x00`.
+  The CRC is computed the reflected way but with the *unreflected*
+  polynomial 0x04C11DB7 (Go: `crc32.MakeTable(0x04C11DB7)`), so it is not
+  IEEE CRC-32. Exclusive tty mode (TIOCEXCL) belongs to the tty, so it must
+  be cleared (TIOCNXCL) on close or the port stays busy.
+- Peer gossip reuses the router link-state codec (OAM id 1). A peer keeps
+  itself (psid 0, sn starting at 1) plus one node per neighbour; when a
+  link comes up it sends that neighbour every node *with* zid and locators
+  (and its own links only if the neighbour is a router), and forwards each
+  neighbour's own state, once it carries new locators, to the others. The
+  advertised locators leave out loopback addresses only when they come from
+  expanding `0.0.0.0`. A received state whose locators are present makes the
+  peer connect to that node (default roles: router, peer and client).
+- Two nodes that discover each other at once both dial. zenoh-rust registers
+  a transport only when a handshake *completes*, so if a dialer refuses its
+  own link as a duplicate after OPEN, the peer has already set up that
+  transport, and tearing it down can take the other, good, link with it.
+  gozenoh refuses duplicates right after INIT ACK (unless multilink needs
+  the key proof from OPEN). Between two Go nodes the smaller ZID also waits
+  ~1 s before dialing, else each could keep its own handshake and refuse
+  the other's, leaving no link.
+- Authentication is INIT/OPEN extension `0x3`, a chained list of
+  sub-extensions: pubkey `0x1` (the multilink RSA exchange plus a key
+  allow-list), usrpwd `0x2` (unit → z64 nonce → `zbytes(user)
+  zbytes(HMAC(nonce as 8 LE bytes, password))` → unit). The HMAC is over
+  **SHA3-256** (zenoh-crypto), not SHA-256. A node with usrpwd configured
+  (even only its own credentials) demands credentials from every node
+  dialing it. zenoh-rust 1.10's pubkey *acceptor* rejects every key when
+  configured from config (its allow-list starts empty and
+  `known_keys_file` is never read), so pubkey works only with Rust dialing.
+- Access control matches zenoh-rust: each subject expands into the product
+  of its lists; a node is checked against every subject it matches and one
+  allowing subject is enough; per subject, a deny rule *including* the key
+  wins, then allow if default-allow or an allow rule includes it. "Includes"
+  means the rule covers the whole message key expression, so allowing
+  `a/b/**` does not allow subscribing to `a/**`. A dropped query gets no
+  final: the querier times out. Interests for tokens with no key expression
+  are denied.
+- Matching status comes from the INTERESTs publishers (`KeyExprs |
+  Subscribers`) and queriers (`KeyExprs | Queryables`) send their routers
+  with mode CurrentFuture on their key; the router answers with aggregated
+  declarations and keeps them current, and undeclaring sends a `Final`
+  interest. For an `ALL_COMPLETE` querier only a *complete* queryable whose
+  key *includes* the querier's key counts. A listener declared while
+  matching is told so at once.
+- Low latency (INIT ext `0x5`, both sides must ask): zenoh-rust refuses it
+  together with QoS, so `Config.LowLatency` turns QoS off; messages are
+  never batched or fragmented, so each must fit the batch size, and
+  compression is not used.
+- None of the INIT/OPEN extensions are mandatory, so an acceptor can answer
+  with none of them; the INIT ACK cookie is opaque to the initiator.
+
+## Spec references
+
+- Wire primitives: <https://spec.zenoh.io/spec/1.0.0/wire/primitives.html>
+- Message format: <https://spec.zenoh.io/spec/1.0.0/wire/message-format.html>
+- Key expressions: <https://spec.zenoh.io/spec/1.0.0/concepts/key-expressions.html>
+- Session establishment: <https://spec.zenoh.io/spec/1.0.0/session/open-accept.html>
+
+## License
+
+TBD.
