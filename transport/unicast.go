@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shabunin/tiny-zenoh-go/internal/codec"
+	"github.com/shabunin/tiny-zenoh-go/internal/lz4"
 	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
@@ -100,6 +101,10 @@ type Config struct {
 
 	// Stats keeps traffic counters per link (see LinkStats, LinkInfo.Stats).
 	Stats bool
+
+	// TxQueue configures the links' transmission queues and congestion
+	// control (zenoh-rust transport/link/tx/queue).
+	TxQueue TxQueue
 }
 
 func (c *Config) setDefaults() {
@@ -121,6 +126,7 @@ func (c *Config) setDefaults() {
 	if c.HandshakeTimeout == 0 {
 		c.HandshakeTimeout = 10 * time.Second
 	}
+	c.TxQueue.setDefaults()
 }
 
 // Encoder is a message that can serialize itself (network messages).
@@ -179,10 +185,11 @@ type tlink struct {
 	lastRx, lastTx atomic.Int64
 	stats          *LinkStats // nil: not counting (set before the link starts)
 
-	// prioW: per-priority streams (PriorityLink), nil when not in use;
-	// priorities other than Control write through prioAsync.
-	prioW     []io.Writer
-	prioAsync []*prioWriter
+	// prioW: per-priority streams (PriorityLink), nil when not in use.
+	prioW []io.Writer
+	// txq is the link's transmission queue (nil: batches are written by
+	// Send itself, see TxSync).
+	txq *txQueue
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -211,25 +218,28 @@ func newTLink(link Link, batch uint16) *tlink {
 func (l *tlink) close() {
 	l.closeOnce.Do(func() {
 		close(l.done)
-		for _, w := range l.prioAsync {
-			w.close()
+		if l.txq != nil {
+			l.txq.stop(ErrClosed)
 		}
 		_ = l.link.Close()
 	})
 }
 
-// flushPriorities waits (at most d) for the batches queued on l's priority
-// streams to be written, before l is closed.
-func (l *tlink) flushPriorities(d time.Duration) {
-	var wg sync.WaitGroup
-	for _, w := range l.prioAsync {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			w.flush(d)
-		}()
+// sendClose queues (or writes) CLOSE on l and waits, at most d, for what
+// is queued on l to be written, before l is closed.
+func (t *Unicast) sendClose(l *tlink, c *protocol.Close, d time.Duration) {
+	if l.txq == nil {
+		_ = t.writeTransport(l, c)
+		return
 	}
-	wg.Wait()
+	deadline := time.Now().Add(d)
+	_, _ = l.txq.pushTransport(c, d)
+	l.txq.flush(time.Until(deadline))
+}
+
+// closeWait bounds how long closing waits for queued batches.
+func (t *Unicast) closeWait() time.Duration {
+	return t.cfg.Lease / time.Duration(t.cfg.KeepAliveDivisor)
 }
 
 // Unicast is an established point-to-point Zenoh transport over one or more
@@ -253,8 +263,12 @@ type Unicast struct {
 	lmu   sync.Mutex
 	links []*tlink
 
-	txMu      sync.Mutex
-	txSN      [numPrio][2]uint64 // per priority: [0] best-effort, [1] reliable
+	// txMu serializes Send without transmission queues (and low latency).
+	txMu sync.Mutex
+	// txSN: per priority [0] best-effort, [1] reliable; guarded by txMu, or
+	// with queues by the priority's txc lock.
+	txSN      [numPrio][2]uint64
+	txc       [numPrio]txChan
 	txBatch   codec.Writer
 	txPrio    protocol.Priority // priority of txBatch, for per-priority streams
 	txPayload codec.Writer
@@ -336,9 +350,11 @@ func establish(link Link, cfg Config, cb Callbacks, handshake func(*Unicast) err
 		}
 		return ex, nil
 	}
+	t.prepare(l)
 	t.links = []*tlink{l}
 	if c := bestEffortCompanion(l); c != nil {
 		c.t = t
+		t.prepare(c)
 		t.links = append(t.links, c)
 		t.start(c)
 	}
@@ -365,7 +381,9 @@ func bestEffortCompanion(l *tlink) *tlink {
 	return c
 }
 
-func (t *Unicast) start(l *tlink) {
+// prepare sets up an established link's sending side, before Send can
+// pick it.
+func (t *Unicast) prepare(l *tlink) {
 	if t.cfg.Stats {
 		l.stats = &LinkStats{}
 	}
@@ -376,9 +394,21 @@ func (t *Unicast) start(l *tlink) {
 		l.prioW = make([]io.Writer, numPrio)
 		l.prioW[0] = l.link
 		for p := 1; p < numPrio; p++ {
-			w := newPrioWriter(pl.PriorityWriter(protocol.Priority(p)))
-			l.prioW[p] = w
-			l.prioAsync = append(l.prioAsync, w)
+			l.prioW[p] = pl.PriorityWriter(protocol.Priority(p))
+		}
+	}
+	if t.cfg.TxQueue.Mode == TxQueued && !l.lowLatency {
+		l.txq = newTxQueue(l, t.qos, &t.cfg.TxQueue)
+	}
+}
+
+// start runs a prepared link's goroutines.
+func (t *Unicast) start(l *tlink) {
+	if l.txq != nil {
+		l.txq.start()
+	}
+	if pl, ok := l.link.(PriorityLink); ok && l.prioW != nil {
+		for p := 1; p < numPrio; p++ {
 			go t.rxLoop(l, pl.PriorityReader(protocol.Priority(p)), make([]byte, len(l.rxBuf)))
 		}
 	}
@@ -394,6 +424,7 @@ func (t *Unicast) addLink(l *tlink) error {
 		return ErrClosed
 	}
 	l.t = t
+	t.prepare(l)
 	t.links = append(t.links, l)
 	t.lmu.Unlock()
 	t.start(l)
@@ -959,11 +990,29 @@ func (t *Unicast) startBatchLocked(l *tlink) {
 	t.txBatch.WriteRaw(lenPlaceholder[:l.prefix+l.hdrLen()])
 }
 
-// flushBatchLocked patches the length prefix of txBatch and writes it to l.
+// flushBatchLocked writes txBatch to l.
 func (t *Unicast) flushBatchLocked(l *tlink) error {
-	b := t.txBatch.Bytes()
+	w := io.Writer(l.link)
+	if l.prioW != nil {
+		w = l.prioW[t.txPrio]
+	}
+	var zc *lz4.Compressor
+	var zbuf *[]byte
+	if l.lz != nil {
+		zc, zbuf = &l.lz.c, &l.lz.txBuf
+	}
+	if err := l.writeBatch(w, t.txBatch.Bytes(), zc, zbuf); err != nil {
+		return err
+	}
+	l.stats.addTransport(Tx)
+	return nil
+}
+
+// writeBatch compresses the batch b if that is on, patches its length
+// prefix and writes it to w (l or one of its priority streams).
+func (l *tlink) writeBatch(w io.Writer, b []byte, zc *lz4.Compressor, zbuf *[]byte) error {
 	if l.compress {
-		b = l.compressBatch(b)
+		b = l.compressBatch(b, zc, zbuf)
 	}
 	n := len(b) - l.prefix
 	switch {
@@ -981,18 +1030,11 @@ func (t *Unicast) flushBatchLocked(l *tlink) error {
 	case l.prefix > 0:
 		b[0], b[1] = byte(n), byte(n>>8)
 	}
-	w := io.Writer(l.link)
-	if l.prioW != nil {
-		w = l.prioW[t.txPrio]
-	}
 	if _, err := w.Write(b); err != nil {
 		return err
 	}
 	l.lastTx.Store(time.Now().UnixNano())
-	if st := l.stats; st != nil {
-		st.addBytes(Tx, len(b))
-		st.addTransport(Tx)
-	}
+	l.stats.addBytes(Tx, len(b))
 	return nil
 }
 
@@ -1067,9 +1109,20 @@ func (t *Unicast) frameCapacity(l *tlink) int {
 // batch is split into FRAGMENTs. With QoS, consecutive messages of the same
 // priority share a FRAME, which carries that priority. With several links,
 // each message goes on the link selectLink picks.
+//
+// With transmission queues (TxQueued, see TxQueue), messages are queued and
+// subject to congestion control: those dropped are listed by a returned
+// *CongestionError. Without, Send writes the batches itself.
 func (t *Unicast) Send(reliable bool, msgs ...Encoder) error {
 	if t.closed.Load() {
 		return ErrClosed
+	}
+	if t.cfg.TxQueue.Mode == TxQueued && !t.lowLatency {
+		links := t.linkList()
+		if len(links) == 0 {
+			return ErrClosed
+		}
+		return t.sendQueued(links, reliable, msgs)
 	}
 	t.txMu.Lock()
 	defer t.txMu.Unlock()
@@ -1291,7 +1344,14 @@ func (t *Unicast) keepAliveLoop(l *tlink) {
 				return
 			}
 			if now.Sub(time.Unix(0, l.lastTx.Load())) >= interval {
-				if err := t.writeTransport(l, &protocol.KeepAlive{}); err != nil {
+				var err error
+				if l.txq != nil {
+					// A full queue is being written: no keep-alive needed.
+					_, err = l.txq.pushTransport(&protocol.KeepAlive{}, 0)
+				} else {
+					err = t.writeTransport(l, &protocol.KeepAlive{})
+				}
+				if err != nil {
 					t.dropLink(l, err)
 					return
 				}
@@ -1326,7 +1386,7 @@ func (t *Unicast) dropLink(l *tlink, cause error) {
 	t.links = append(t.links[:i:i], t.links[i+1:]...)
 	t.lmu.Unlock()
 	if !errors.Is(cause, errLinkClosed) {
-		_ = t.writeTransport(l, &protocol.Close{Reason: closeCause(cause)})
+		t.sendClose(l, &protocol.Close{Reason: closeCause(cause)}, t.closeWait())
 	}
 	l.close()
 }
@@ -1346,10 +1406,15 @@ func (t *Unicast) shutdown(cause error) {
 		t.links = nil
 		t.lmu.Unlock()
 		if !errors.Is(cause, ErrPeerClosed) {
+			var wg sync.WaitGroup
 			for _, l := range links {
-				l.flushPriorities(t.cfg.Lease / time.Duration(t.cfg.KeepAliveDivisor))
-				_ = t.writeTransport(l, &protocol.Close{Session: true, Reason: closeCause(cause)})
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					t.sendClose(l, &protocol.Close{Session: true, Reason: closeCause(cause)}, t.closeWait())
+				}()
 			}
+			wg.Wait()
 		}
 		close(t.done)
 		for _, l := range links {

@@ -158,6 +158,21 @@ func (q QoS) Priority() Priority { return Priority(q.norm() & 0x07) }
 // Block reports whether congestion control blocks instead of dropping.
 func (q QoS) Block() bool { return q.norm()&0x08 != 0 }
 
+// BlockFirst reports zenoh's (unstable) BlockFirst congestion control: the
+// first message waits for room in the queue, those after it while it does
+// are dropped.
+func (q QoS) BlockFirst() bool { return q.norm()&0x20 != 0 }
+
+// WithBlockFirst returns q with congestion control BlockFirst (which
+// excludes Block).
+func (q QoS) WithBlockFirst() QoS {
+	r := (q.norm() &^ 0x08) | 0x20
+	if r == 0 {
+		return qosZero
+	}
+	return r
+}
+
 // Express reports whether the message must not be batched.
 func (q QoS) Express() bool { return q.norm()&0x10 != 0 }
 

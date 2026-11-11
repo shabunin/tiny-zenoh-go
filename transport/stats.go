@@ -205,16 +205,23 @@ func (s *LinkStats) addTransport(d int) {
 }
 
 func (s *LinkStats) addNetwork(d int, m any) {
+	if i, ok := s.netIndex(d, m); ok {
+		s.nmsgs[i].Add(1)
+	}
+}
+
+// netIndex is the counter of m in direction d; false if there is none.
+func (s *LinkStats) netIndex(d int, m any) (int, bool) {
 	if s == nil {
-		return
+		return 0, false
 	}
 	k, ok := KindOf(m)
 	if !ok {
-		return
+		return 0, false
 	}
 	h := 0
 	if IsShm(m) {
 		h = 1
 	}
-	s.nmsgs[NetIndex(d, protocol.QoSOf(m).Priority(), k, h)].Add(1)
+	return NetIndex(d, protocol.QoSOf(m).Priority(), k, h), true
 }

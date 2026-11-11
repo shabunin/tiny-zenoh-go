@@ -35,24 +35,24 @@ func (l *tlink) enableCompression(on bool) {
 	}
 }
 
-// compressLocked fills in the header byte of the batch b (prefix, header,
-// body) and returns the batch to send: b itself or its compressed form.
-func (l *tlink) compressBatch(b []byte) []byte {
+// compressBatch fills in the header byte of the batch b (prefix, header,
+// body) and returns the batch to send: b itself or its compressed form, made
+// with c into *buf (each writer has its own).
+func (l *tlink) compressBatch(b []byte, c *lz4.Compressor, buf *[]byte) []byte {
 	h := l.prefix
 	body := b[h+1:]
 	b[h] = 0
 	if len(body) < 32 { // keep-alives and the like: not worth trying
 		return b
 	}
-	z := l.lz
-	out := append(z.txBuf[:0], b[:h]...)
+	out := append((*buf)[:0], b[:h]...)
 	out = append(out, batchCompressed)
-	out = z.c.Compress(out, body)
-	z.txBuf = out
+	out = c.Compress(out, body)
+	*buf = out
 	if len(out) >= len(b) {
 		return b
 	}
-	z.txCompressed.Add(1)
+	l.lz.txCompressed.Add(1)
 	return out
 }
 

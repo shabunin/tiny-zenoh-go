@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
@@ -84,20 +85,23 @@ func TestQoSFramesPerPriority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Queued, highest priority first; messages of a channel join its frame.
 	want := []struct {
 		prio protocol.Priority
 		sn   uint64
 		n    int
 	}{
-		{protocol.PriorityData, f.clientISN, 1},
 		{protocol.PriorityControl, f.clientISN, 2}, // own channel: same initial SN
 		{protocol.PriorityRealTime, f.clientISN, 1},
-		{protocol.PriorityData, f.clientISN + 1, 1},
+		{protocol.PriorityData, f.clientISN, 2},
 	}
 	for i, w := range want {
 		fr := f.read().(*protocol.Frame)
 		if p := framePrio(t, fr); p != w.prio || fr.SN != w.sn&snMask(32) {
 			t.Errorf("frame %d: prio %d sn %d, want prio %d sn %d", i, p, fr.SN, w.prio, w.sn)
+		}
+		if n := countMsgs(t, fr.Payload); n != w.n {
+			t.Errorf("frame %d: %d messages, want %d", i, n, w.n)
 		}
 	}
 
@@ -181,17 +185,34 @@ func TestQoSAcceptPair(t *testing.T) {
 		if err := o.Send(true, pushPrio("1", protocol.PriorityBackground), bigPush, pushPrio("2", protocol.PriorityControl)); err != nil {
 			t.Fatal(err)
 		}
-		for _, w := range []string{"1", "big", "2"} {
+		// Priorities are queued apart: any order.
+		seen := map[string]bool{}
+		for range 3 {
 			select {
 			case k := <-got:
-				if k != w {
-					t.Errorf("%+v: got %s, want %s", c, k, w)
-				}
+				seen[k] = true
 			case <-time.After(2 * time.Second):
-				t.Fatalf("%+v: missing %s", c, w)
+				t.Fatalf("%+v: missing messages (got %v)", c, seen)
 			}
+		}
+		if !seen["1"] || !seen["big"] || !seen["2"] {
+			t.Errorf("%+v: got %v", c, seen)
 		}
 		_ = o.Close()
 		_ = a.Close()
 	}
+}
+
+// countMsgs counts the network messages in a frame payload.
+func countMsgs(t *testing.T, b []byte) int {
+	t.Helper()
+	r := codec.NewReader(b)
+	n := 0
+	for r.Remaining() > 0 {
+		if _, err := protocol.DecodeNetwork(r); err != nil {
+			t.Fatalf("frame payload: %v", err)
+		}
+		n++
+	}
+	return n
 }

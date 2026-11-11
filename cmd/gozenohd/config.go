@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -116,7 +117,7 @@ func insertPath(tree map[string]any, path string, v any) error {
 }
 
 // applyTransport applies zenoh's transport section: unicast lowlatency,
-// max_links, qos and compression; link/tx lease and batch_size; link/tls
+// max_links, qos and compression; link/tx lease, batch_size and queue; link/tls
 // files; shared_memory/enabled; auth/usrpwd.
 func applyTransport(v json.RawMessage, cfg *zenoh.Config) error {
 	var tr struct {
@@ -130,6 +131,18 @@ func applyTransport(v json.RawMessage, cfg *zenoh.Config) error {
 			Tx struct {
 				Lease     *int64  `json:"lease"`
 				BatchSize *uint16 `json:"batch_size"`
+				Queue     *struct {
+					Size              map[string]int `json:"size"`
+					CongestionControl struct {
+						Drop struct {
+							WaitBeforeDrop             *int64 `json:"wait_before_drop"`
+							MaxWaitBeforeDropFragments *int64 `json:"max_wait_before_drop_fragments"`
+						} `json:"drop"`
+						Block struct {
+							WaitBeforeClose *int64 `json:"wait_before_close"`
+						} `json:"block"`
+					} `json:"congestion_control"`
+				} `json:"queue"`
 			} `json:"tx"`
 			TLS *struct {
 				RootCACertificate   *string `json:"root_ca_certificate"`
@@ -172,6 +185,20 @@ func applyTransport(v json.RawMessage, cfg *zenoh.Config) error {
 	}
 	if b := tr.Link.Tx.BatchSize; b != nil {
 		cfg.BatchSize = *b
+	}
+	if q := tr.Link.Tx.Queue; q != nil {
+		if err := applyTxQueue(q.Size, &cfg.TxQueue); err != nil {
+			return err
+		}
+		us := func(p *int64, d *time.Duration) {
+			if p != nil {
+				*d = time.Duration(*p) * time.Microsecond
+			}
+		}
+		cc := q.CongestionControl
+		us(cc.Drop.WaitBeforeDrop, &cfg.TxQueue.WaitBeforeDrop)
+		us(cc.Drop.MaxWaitBeforeDropFragments, &cfg.TxQueue.MaxWaitBeforeDropFragments)
+		us(cc.Block.WaitBeforeClose, &cfg.TxQueue.WaitBeforeClose)
 	}
 	if t := tr.Link.TLS; t != nil {
 		if cfg.TLS == nil {
@@ -230,6 +257,26 @@ func applyTransport(v json.RawMessage, cfg *zenoh.Config) error {
 		if val != nil {
 			warnf("transport/auth/pubkey/%s: not supported here, use --auth-key and --auth-known-key", k)
 		}
+	}
+	return nil
+}
+
+// txQueuePriorities are the keys of transport/link/tx/queue/size.
+var txQueuePriorities = []string{"control", "real_time", "interactive_high", "interactive_low",
+	"data_high", "data", "data_low", "background"}
+
+// applyTxQueue applies transport/link/tx/queue/size: batches per priority,
+// 1..16 as zenoh requires.
+func applyTxQueue(size map[string]int, q *transport.TxQueue) error {
+	for k, n := range size {
+		p := slices.Index(txQueuePriorities, k)
+		if p < 0 {
+			return fmt.Errorf("transport/link/tx/queue/size: unknown priority %q", k)
+		}
+		if n < 1 || n > 16 {
+			return fmt.Errorf("transport/link/tx/queue/size/%s: %d is not within 1..16", k, n)
+		}
+		q.Size[p] = n
 	}
 	return nil
 }

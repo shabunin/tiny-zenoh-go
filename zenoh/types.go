@@ -62,13 +62,22 @@ const (
 	ConsolidationLatest    = protocol.ConsolidationLatest
 )
 
-// CongestionControl selects what happens when the outgoing queue is full.
+// CongestionControl selects what happens when a link's transmission queue
+// is full (see Config.TxQueue).
 type CongestionControl int
 
 // Congestion-control modes.
 const (
-	CongestionDrop  CongestionControl = iota // drop the message (default for data)
-	CongestionBlock                          // block the sender
+	// CongestionDrop waits briefly for room, then drops the message (the
+	// default for data; best-effort messages are always droppable).
+	CongestionDrop CongestionControl = iota
+	// CongestionBlock makes the sender wait; a link stuck beyond
+	// TxQueue.WaitBeforeClose is closed.
+	CongestionBlock
+	// CongestionBlockFirst (zenoh unstable) waits in the background, one
+	// message per priority at a time; the sender doesn't wait, and messages
+	// arriving meanwhile are dropped.
+	CongestionBlockFirst
 )
 
 // Reliability selects the transport channel.
@@ -217,6 +226,8 @@ func sampleFromBody(key string, body protocol.DataBody, qos protocol.QoS) Sample
 	s := Sample{KeyExpr: key, Priority: qos.Priority(), Express: qos.Express()}
 	if qos.Block() {
 		s.Congestion = CongestionBlock
+	} else if qos.BlockFirst() {
+		s.Congestion = CongestionBlockFirst
 	}
 	switch b := body.(type) {
 	case *protocol.Put:
@@ -250,7 +261,11 @@ func defaultPutOptions() putOptions {
 }
 
 func (o *putOptions) qos() protocol.QoS {
-	return protocol.NewQoS(o.priority, o.congestion == CongestionBlock, o.express)
+	q := protocol.NewQoS(o.priority, o.congestion == CongestionBlock, o.express)
+	if o.congestion == CongestionBlockFirst {
+		q = q.WithBlockFirst()
+	}
+	return q
 }
 
 // PutOption customizes a put, delete, publisher or reply.

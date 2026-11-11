@@ -53,7 +53,9 @@ func TestCompressionRustPeer(t *testing.T) {
 			return false
 		})
 		for i := range 3 {
-			_ = s.Put(pfx+"/a/x", big[:len(big)-i])
+			// Blocking: a burst of droppable puts may be dropped while
+			// the batches are compressed (slowly, under -race).
+			_ = s.Put(pfx+"/a/x", big[:len(big)-i], WithCongestionControl(CongestionBlock))
 		}
 		for i := range 3 {
 			if e := rs.next(); e.Size != len(big)-i || e.Sum != sum(big[:len(big)-i]) {

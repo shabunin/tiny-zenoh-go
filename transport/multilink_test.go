@@ -163,10 +163,15 @@ func TestMultiLinkJoin(t *testing.T) {
 	if lossy.written.Load() != before {
 		t.Error("reliable message went over the unreliable link")
 	}
-	if err := a.tr.Send(false, pushPrio("b1", protocol.PriorityData), pushPrio("b2", protocol.PriorityRealTime)); err != nil {
+	// (Separate sends: within one, a higher priority may go first.)
+	if err := a.tr.Send(false, pushPrio("b1", protocol.PriorityData)); err != nil {
 		t.Fatal(err)
 	}
-	expectMsgs(t, b, "b1", "b2")
+	expectMsgs(t, b, "b1")
+	if err := a.tr.Send(false, pushPrio("b2", protocol.PriorityRealTime)); err != nil {
+		t.Fatal(err)
+	}
+	expectMsgs(t, b, "b2")
 	if lossy.written.Load() == before {
 		t.Error("best-effort messages did not use the unreliable link")
 	}

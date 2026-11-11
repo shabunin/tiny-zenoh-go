@@ -310,6 +310,7 @@ func TestLiveliness(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ls.Undeclare()
+	settle() // our interest must reach the router before the new token does
 	tok2, _ := a.Liveliness().DeclareToken(pfx + "/two")
 	got := sink.wait(t, 2)
 	if got[0].KeyExpr != pfx+"/one" || got[1].KeyExpr != pfx+"/two" || got[1].Kind != SampleKindPut {

@@ -118,15 +118,34 @@ func (f *face) send(reliable bool, msgs ...transport.Encoder) error {
 		msgs, sent = f.toShm(msgs)
 		defer sent()
 	}
-	if f.stats == nil {
-		return f.tr.Send(reliable, msgs...)
-	}
-	f.observeTx(msgs)
 	err := f.tr.Send(reliable, msgs...)
-	if errors.Is(err, transport.ErrClosed) {
+	var ce *transport.CongestionError
+	if errors.As(err, &ce) {
+		// Dropped on congestion, as zenoh does: not an error for the sender.
+		err = nil
+	}
+	if f.stats == nil {
+		return err
+	}
+	switch {
+	case ce != nil:
+		sent := make([]transport.Encoder, 0, len(msgs)-len(ce.Dropped))
+		d := ce.Dropped
+		for _, m := range msgs {
+			if len(d) > 0 && m == d[0] {
+				f.statsDrop(transport.Tx, dropCongestion, m)
+				d = d[1:]
+			} else {
+				sent = append(sent, m)
+			}
+		}
+		f.observeTx(sent)
+	case errors.Is(err, transport.ErrClosed):
 		for _, m := range msgs {
 			f.statsDrop(transport.Tx, dropNoLink, m)
 		}
+	default:
+		f.observeTx(msgs)
 	}
 	return err
 }

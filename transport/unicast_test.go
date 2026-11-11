@@ -38,21 +38,31 @@ type fakeRouter struct {
 	conn      net.Conn
 	buf       []byte
 	clientISN uint64
-	maxBody   int // largest batch body received
+	maxBody   int                // largest batch body received
+	pending   []protocol.Message // rest of the last batch read
 }
 
+// read returns the next transport message (a batch may hold several).
 func (f *fakeRouter) read() protocol.Message {
 	f.t.Helper()
-	_ = f.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	b, err := ReadBatch(f.conn, f.buf)
-	if err != nil {
-		f.t.Fatalf("router read: %v", err)
+	if len(f.pending) == 0 {
+		_ = f.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		b, err := ReadBatch(f.conn, f.buf)
+		if err != nil {
+			f.t.Fatalf("router read: %v", err)
+		}
+		f.maxBody = max(f.maxBody, len(b))
+		r := codec.NewReader(b)
+		for r.Remaining() > 0 {
+			m, err := protocol.DecodeTransport(r)
+			if err != nil {
+				f.t.Fatalf("router decode: %v", err)
+			}
+			f.pending = append(f.pending, m)
+		}
 	}
-	f.maxBody = max(f.maxBody, len(b))
-	m, err := protocol.DecodeTransport(codec.NewReader(b))
-	if err != nil {
-		f.t.Fatalf("router decode: %v", err)
-	}
+	m := f.pending[0]
+	f.pending = f.pending[1:]
 	return m
 }
 
@@ -139,10 +149,11 @@ func TestSendFramesAndSN(t *testing.T) {
 	if err := tr.Send(true, rawMsg{0x1d, 1}, rawMsg{0x1d, 2}); err != nil {
 		t.Fatal(err)
 	}
+	fr1 := f.read().(*protocol.Frame)
+	// (Sent while frame 1 is still queued, message 3 would join it.)
 	if err := tr.Send(true, rawMsg{0x1d, 3}); err != nil {
 		t.Fatal(err)
 	}
-	fr1 := f.read().(*protocol.Frame)
 	fr2 := f.read().(*protocol.Frame)
 	if !fr1.Reliable || fr1.SN != f.clientISN || !bytes.Equal(fr1.Payload, []byte{0x1d, 1, 0x1d, 2}) {
 		t.Errorf("frame1 = %+v (isn %d)", fr1, f.clientISN)

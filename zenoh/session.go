@@ -164,6 +164,13 @@ type Config struct {
 	// It trades CPU for bandwidth: useful on slow links with compressible
 	// payloads.
 	Compression bool
+	// TxQueue configures each link's transmission queue and congestion
+	// control (zenoh-rust transport/link/tx/queue): how many batches each
+	// priority may hold, how long a CongestionDrop message waits for room
+	// before it is dropped and a CongestionBlock one before the link is
+	// given up. On TinyGo, Send writes batches itself (blocking, dropping
+	// nothing) unless Mode is transport.TxQueued.
+	TxQueue transport.TxQueue
 	// MaxLinks > 1 enables multilink (zenoh-rust: transport/unicast/max_links):
 	// up to MaxLinks links to the same node, e.g. Connect listing its tcp/
 	// and udp/ locators, then make one transport. Reliable traffic uses the
@@ -709,6 +716,7 @@ func (s *Session) transportConfig(f *face) transport.Config {
 		RegionName:   s.cfg.RegionName,
 		Bound:        func(p transport.PeerInfo) (transport.Bound, error) { return s.boundFor(f, p) },
 		Stats:        s.stats != nil,
+		TxQueue:      s.cfg.TxQueue,
 	}
 }
 
