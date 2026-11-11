@@ -290,6 +290,7 @@ type pluginsConfig struct {
 type namedStorage struct {
 	name string
 	cfg  storage.Config
+	raw  string // its configuration as given, to see whether it changed
 }
 
 // applyConfig applies the sections gozenohd understands to cfg and warns
@@ -421,9 +422,7 @@ func applyConfig(tree map[string]any, cfg *zenoh.Config) (*pluginsConfig, error)
 				cfg.AdminSpace.Enabled = a.Enabled
 				if p := a.Permissions; p != nil {
 					cfg.AdminSpace.DenyRead = p.Read != nil && !*p.Read
-					if p.Write {
-						warnf("adminspace writes are not supported")
-					}
+					cfg.AdminSpace.Write = p.Write
 				}
 			}
 		case "stats":
@@ -548,7 +547,7 @@ func decodePlugins(raw json.RawMessage, p *pluginsConfig) error {
 				if err != nil {
 					return fmt.Errorf("storage_manager: storages: %s: %w", n, err)
 				}
-				p.storages = append(p.storages, namedStorage{n, sc})
+				p.storages = append(p.storages, namedStorage{n, sc, string(sm.Storages[n])})
 			}
 		default:
 			warnf("plugin %q is not available in gozenohd (built in: rest, storage_manager)", name)
@@ -640,34 +639,4 @@ func decodeStorage(name string, raw json.RawMessage) (storage.Config, error) {
 		c.Replication = rc
 	}
 	return c, nil
-}
-
-// startPlugins starts the configured storages and REST server on s; the
-// returned function stops them.
-func startPlugins(s *zenoh.Session, p *pluginsConfig) (func(), error) {
-	var stops []func() error
-	stop := func() {
-		for i := len(stops) - 1; i >= 0; i-- {
-			_ = stops[i]()
-		}
-	}
-	for _, ns := range p.storages {
-		m, err := storage.NewMemory(s, ns.cfg)
-		if err != nil {
-			stop()
-			return nil, fmt.Errorf("storage %s: %w", ns.name, err)
-		}
-		stops = append(stops, m.Close)
-		fmt.Printf("storage %s on %s (memory)\n", ns.name, ns.cfg.KeyExpr)
-	}
-	if p.restAddr != "" {
-		closeREST, addr, err := startREST(s, p.restAddr)
-		if err != nil {
-			stop()
-			return nil, err
-		}
-		stops = append(stops, closeREST)
-		fmt.Printf("REST API on http://%s\n", addr)
-	}
-	return stop, nil
 }

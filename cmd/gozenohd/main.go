@@ -76,7 +76,7 @@ func main() {
 	var cfgOverrides list
 	flag.Var(&cfgOverrides, "cfg", "config change KEY:VALUE, VALUE in JSON5, KEY a /-separated path or empty for the whole config (repeatable)")
 	noTimestamp := flag.Bool("no-timestamp", false, "don't timestamp routed data that has no timestamp")
-	adminPerms := flag.String("adminspace-permissions", "", "admin space permissions: r, rw or none (writes are not supported)")
+	adminPerms := flag.String("adminspace-permissions", "", "admin space permissions: r, rw or none (rw: plugins/... config writes at @/<zid>/router/config/**)")
 	flag.Parse()
 
 	cfg := zenoh.Config{
@@ -166,13 +166,18 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	pluginTree, _ := tree["plugins"].(map[string]any)
+	runner := newPluginRunner(pluginTree)
+	cfg.AdminSpace.OnConfig = runner.onConfig
+	cfg.AdminSpace.OnConfigError = func(key string, err error) { warnf("config %s: %v", key, err) }
 	r, err := zenoh.Open(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gozenohd:", err)
 		os.Exit(1)
 	}
 	fmt.Printf("gozenohd %s listening on %s\n", r.ZID(), strings.Join(r.Locators(), " "))
-	stopPlugins, err := startPlugins(r, plugins)
+	stopPlugins := runner.stop
+	err = runner.start(r, plugins)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gozenohd:", err)
 		_ = r.Close()

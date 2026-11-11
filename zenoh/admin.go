@@ -1,11 +1,13 @@
 package zenoh
 
 import (
+	"errors"
 	"hash/fnv"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/shabunin/tiny-zenoh-go/keyexpr"
 	"github.com/shabunin/tiny-zenoh-go/link"
@@ -32,6 +34,20 @@ type AdminSpaceConfig struct {
 	Enabled *bool
 	// DenyRead answers no admin query (adminspace/permissions/read false).
 	DenyRead bool
+	// Write accepts configuration changes put on <root>/config/<key>
+	// (adminspace/permissions/write): as in zenoh-rust, only keys under
+	// plugins/ (others are refused), a PUT carrying the key's new JSON5
+	// value, a DELETE removing it. OnConfig applies them.
+	Write bool
+	// OnConfig applies a configuration change accepted with Write: key is
+	// the config path (e.g. plugins/storage_manager/storages/demo; its last
+	// segment may be an array filter <field>=<value>, as zenoh-rust's
+	// plugins/x/list/id=a), value the JSON5 text of a PUT or nil for a
+	// DELETE. A non-nil error is reported to OnConfigError.
+	OnConfig func(key string, value []byte) error
+	// OnConfigError, if set, learns about refused or failed config writes
+	// (zenoh-rust logs them).
+	OnConfigError func(key string, err error)
 }
 
 // Admin space (zenoh-rust zenoh/src/net/runtime/adminspace.rs), served under
@@ -77,6 +93,11 @@ func (s *Session) startAdmin() error {
 		if _, err = s.declareQueryable(k, s.onAdminQuery, true, nil); err != nil {
 			return err
 		}
+		if s.cfg.AdminSpace.Write {
+			if err = s.declareAdminConfig(); err != nil {
+				return err
+			}
+		}
 	}
 	own := "@/" + s.zid.String() + "/session"
 	adv := "@adv/pub/" + s.zid.String() + "/_/_/@/" + own
@@ -92,6 +113,50 @@ func (s *Session) startAdmin() error {
 		}
 	}
 	return nil
+}
+
+// declareAdminConfig subscribes to <root>/config/** for config writes, as
+// zenohd does (outside the namespace, like the rest of the admin space).
+func (s *Session) declareAdminConfig() error {
+	prefix := s.adminRoot() + "/config/"
+	k, err := validKey(prefix + "**")
+	if err != nil {
+		return err
+	}
+	sub := &Subscriber{s: s, id: s.entityID(), key: k, stop: make(chan struct{})}
+	sub.handler = func(smp Sample) { s.onAdminConfig(strings.TrimPrefix(smp.KeyExpr, prefix), smp) }
+	s.mu.Lock()
+	s.subs[sub.id] = sub
+	return s.declareLocalLocked(kindSub, k.String(), &protocol.Declare{QoS: protocol.QoSDeclare,
+		Body: &protocol.DeclareSubscriber{ID: sub.id, WireExpr: protocol.WireExpr{Suffix: k.String()}}})
+}
+
+// errConfigKey refuses writes outside plugins/ (zenoh-rust
+// ensure_config_key_is_dynamically_writable).
+var errConfigKey = errors.New("zenoh: updating config is only supported for keys starting with `plugins/`")
+
+func (s *Session) onAdminConfig(key string, smp Sample) {
+	a := &s.cfg.AdminSpace
+	var err error
+	switch {
+	case !strings.HasPrefix(key, "plugins/") || strings.ContainsAny(key, "*$"):
+		err = errConfigKey
+	case a.OnConfig == nil:
+		err = errors.New("zenoh: no OnConfig to apply config writes")
+	case smp.Kind == SampleKindDelete:
+		err = a.OnConfig(key, nil)
+	case !utf8.Valid(smp.Payload):
+		err = errors.New("zenoh: config value is not UTF-8")
+	default:
+		v := smp.Payload
+		if v == nil {
+			v = []byte{}
+		}
+		err = a.OnConfig(key, v)
+	}
+	if err != nil && a.OnConfigError != nil {
+		a.OnConfigError(key, err)
+	}
 }
 
 // adminHandler answers the part of the admin space under its prefix.

@@ -198,3 +198,125 @@ func mustGet(t *testing.T, s *zenoh.Session, sel string) <-chan zenoh.Reply {
 	}
 	return ch
 }
+
+// Storages come and go with PUT/DELETE on the admin space config, as with
+// zenohd (adminspace/permissions/write).
+func TestAdminConfigWrites(t *testing.T) {
+	tree, err := configTree("", "", []string{
+		`plugins/storage_manager/storages/a:{key_expr:"cw/a/**",volume:"memory"}`,
+		`listen/endpoints:["tcp/127.0.0.1:0"]`, `scouting/multicast/enabled:false`,
+		`adminspace/permissions:{read:true,write:true}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := zenoh.Config{Mode: zenoh.ModeRouter}
+	p, err := applyConfig(tree, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AdminSpace.Write {
+		t.Fatal("write permission not applied")
+	}
+	runner := newPluginRunner(tree["plugins"].(map[string]any))
+	refused := make(chan string, 4)
+	cfg.AdminSpace.OnConfig = runner.onConfig
+	cfg.AdminSpace.OnConfigError = func(key string, err error) { refused <- key }
+	r, err := zenoh.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if err := runner.start(r, p); err != nil {
+		t.Fatal(err)
+	}
+	defer runner.stop()
+	c, err := zenoh.Open(zenoh.Config{Connect: r.Locators()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	time.Sleep(200 * time.Millisecond)
+	root := "@/" + r.ZID().String() + "/router/config/"
+	count := func(sel string) int {
+		n := 0
+		for rep := range mustGet(t, c, sel) {
+			if rep.Sample != nil {
+				n++
+			}
+		}
+		return n
+	}
+	put := func(key, v string) {
+		t.Helper()
+		if err := c.Put(key, []byte(v), zenoh.WithCongestionControl(zenoh.CongestionBlock)); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	put(root+"plugins/storage_manager/storages/b", `{key_expr:"cw/b/**",volume:"memory"}`)
+	put("cw/a/1", "x")
+	put("cw/b/1", "y")
+	if n := count("cw/**"); n != 2 {
+		t.Fatalf("%d values stored, want 2", n)
+	}
+	// Changed: restarted (empty); deleted: gone.
+	put(root+"plugins/storage_manager/storages/b", `{key_expr:"cw/b/**",volume:"memory",complete:true}`)
+	if err := c.Delete(root + "plugins/storage_manager/storages/a"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := count("cw/**"); n != 0 {
+		t.Fatalf("%d values after the changes, want 0", n)
+	}
+	runner.mu.Lock()
+	names := len(runner.storages)
+	_, hasB := runner.storages["b"]
+	runner.mu.Unlock()
+	if names != 1 || !hasB {
+		t.Fatalf("running storages: %d (b: %v)", names, hasB)
+	}
+	// Only plugins/ is writable; bad values are refused.
+	put(root+"mode", `"peer"`)
+	put(root+"plugins/storage_manager/storages/c", `{volume:"memory"}`)
+	for _, want := range []string{"mode", "plugins/storage_manager/storages/c"} {
+		select {
+		case k := <-refused:
+			if k != want {
+				t.Errorf("refused %s, want %s", k, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s not refused", want)
+		}
+	}
+}
+
+func TestConfigArrayFilter(t *testing.T) {
+	tree := map[string]any{"x": map[string]any{"list": []any{map[string]any{"id": "a", "v": 1.0}}}}
+	if err := insertConfig(tree, "x/list/id=b", map[string]any{"id": "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertConfig(tree, "x/list/id=a", map[string]any{"id": "a", "v": 2.0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertConfig(tree, "x/list/id=c", map[string]any{"id": "d"}); err == nil {
+		t.Error("mismatched filter accepted")
+	}
+	l := tree["x"].(map[string]any)["list"].([]any)
+	if len(l) != 2 || l[0].(map[string]any)["v"] != 2.0 {
+		t.Fatalf("list %v", l)
+	}
+	if err := removePath(tree, "x/list/id=a"); err != nil {
+		t.Fatal(err)
+	}
+	if l = tree["x"].(map[string]any)["list"].([]any); len(l) != 1 || l[0].(map[string]any)["id"] != "b" {
+		t.Fatalf("list %v", l)
+	}
+	if err := removePath(tree, "x/list"); err != nil || len(tree["x"].(map[string]any)) != 0 {
+		t.Fatalf("remove: %v %v", err, tree)
+	}
+	if err := removePath(tree, "x/nope"); err == nil {
+		t.Error("removing a missing key")
+	}
+}
