@@ -124,7 +124,7 @@ func startPico(t *testing.T, args ...string) *picoProc {
 func startPicoReady(t *testing.T, args ...string) *picoProc {
 	t.Helper()
 	p := startPico(t, args...)
-	p.zid = p.next("ready").ZID
+	p.zid = strings.TrimLeft(p.next("ready").ZID, "0") // zenoh-pico prints leading zeros; ZID.String() drops them
 	return p
 }
 

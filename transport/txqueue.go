@@ -97,6 +97,11 @@ type txQueue struct {
 	used  [numPrio]int      // batches waiting or being written
 	free  []*txBuf
 	err   error // the queue stopped: nothing more is accepted or written
+	// holds counts the Sends filling batches of the queue: the writers
+	// leave its batches alone until they are done (so their messages share
+	// batches), unless release is set because room or a flush is needed.
+	holds   int
+	release bool
 
 	congested [numPrio]atomic.Bool
 	first     [numPrio]chan struct{} // BlockFirst token per priority
@@ -146,7 +151,7 @@ func (q *txQueue) run(lo, hi int, w io.Writer) {
 		q.mu.Lock()
 		i := -1
 		for q.err == nil {
-			for k := lo; k <= hi; k++ {
+			for k := lo; k <= hi && (q.holds == 0 || q.release); k++ {
 				if len(q.q[k]) > 0 {
 					i = k
 					break
@@ -206,6 +211,8 @@ func (q *txQueue) flush(d time.Duration) {
 	deadline := time.Now().Add(d)
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.release = true
+	q.work.Broadcast()
 	for q.err == nil && q.busyLocked() {
 		if !q.waitLocked(deadline) {
 			return
@@ -287,6 +294,7 @@ func (q *txQueue) reserveLocked(i int, fit func(*txBuf) bool, deadline time.Time
 		if q.used[i] < q.size[i] {
 			return q.newBufLocked(i), nil
 		}
+		q.release = true
 		q.work.Broadcast() // what is held back must go out to make room
 		if !q.waitLocked(deadline) {
 			// Room may have been made just as the wait ended.
@@ -304,10 +312,22 @@ func (q *txQueue) commitLocked() {
 	q.mu.Unlock()
 }
 
-// kick wakes the writers for what was queued without commitLocked (Send
-// holds its batches back until it is done, so that its messages share them).
+// hold keeps the writers off the queue's batches while a Send fills them,
+// so that its messages share batches; kick ends it.
+func (q *txQueue) hold() {
+	q.mu.Lock()
+	if q.holds++; q.holds == 1 {
+		q.release = false
+	}
+	q.mu.Unlock()
+}
+
+// kick ends a hold and wakes the writers for what was queued meanwhile.
 func (q *txQueue) kick() {
 	q.mu.Lock()
+	if q.holds--; q.holds == 0 {
+		q.release = false
+	}
 	q.work.Broadcast()
 	q.mu.Unlock()
 }
@@ -398,6 +418,7 @@ func (t *Unicast) sendQueued(links []*tlink, reliable bool, msgs []Encoder) erro
 		}
 		if !slices.Contains(queues, l.txq) {
 			queues = append(queues, l.txq)
+			l.txq.hold()
 		}
 		ok, err := t.pushMessage(l, prio, reliable, congestionOf(reliable, protocol.QoSOf(m)), m)
 		if err != nil {
