@@ -554,4 +554,8 @@ tiny-zenoh-go/
 
 ## License
 
-TBD.
+Apache License 2.0 (see [LICENSE](LICENSE)). This is a Go implementation
+of [Eclipse Zenoh](https://zenoh.io), written largely by an AI model from
+the Zenoh specification and the zenoh-rust sources (EPL-2.0 OR Apache-2.0,
+ZettaScale Technology and the Eclipse Zenoh contributors), whose behaviour it
+reproduces; see [NOTICE](NOTICE).

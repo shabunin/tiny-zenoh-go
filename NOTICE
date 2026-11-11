@@ -1,0 +1,13 @@
+tiny-zenoh-go
+Copyright 2026 The tiny-zenoh-go Authors
+
+This product is a Go implementation of the Eclipse Zenoh protocol. It was
+written largely by an AI model (Anthropic's Claude) from the Zenoh protocol
+specification and from the source code of Eclipse Zenoh (zenoh-rust,
+https://github.com/eclipse-zenoh/zenoh), whose algorithms, wire formats,
+configuration formats and behaviour it reproduces. Eclipse Zenoh is
+Copyright (c) 2017, 2024 ZettaScale Technology and the Eclipse Zenoh
+contributors, and is made available under the terms of the Eclipse Public
+License 2.0 or the Apache License 2.0 (EPL-2.0 OR Apache-2.0).
+
+Test vectors in zext and keyexpr are taken from zenoh-rust's tests.
