@@ -158,3 +158,37 @@ func TestNewRejectsNonCanon(t *testing.T) {
 		t.Errorf("a/**/c should include a/*/c")
 	}
 }
+
+// Chunks starting with '@' are verbatim: wildcards never cover them.
+func TestVerbatim(t *testing.T) {
+	for _, c := range []struct {
+		a, b        string
+		inter, incl bool
+	}{
+		{"demo/**", "demo/@adv/pub/1/2/_", false, false},
+		{"**", "@/router/x", false, false},
+		{"demo/*/x", "demo/@adv/x", false, false},
+		{"demo/$*/x", "demo/@adv/x", false, false},
+		{"demo/@adv/**", "demo/@adv/pub/1/2/_", true, true},
+		{"demo/@adv/*/1/2/**", "demo/@adv/pub/1/2/_", true, true},
+		{"demo/@adv/**", "demo/@adv/@x", false, false},
+		{"@a/**", "@a/b", true, true},
+		{"@a/**", "@b/c", false, false},
+		{"a/**/@v", "a/b/c/@v", true, true},
+		{"a/**", "a/b/**", true, true},
+		{"a/**/b", "a/@x/b", false, false},
+	} {
+		if got := Intersect(c.a, c.b); got != c.inter {
+			t.Errorf("Intersect(%s, %s) = %v", c.a, c.b, got)
+		}
+		if got := Intersect(c.b, c.a); got != c.inter {
+			t.Errorf("Intersect(%s, %s) = %v", c.b, c.a, got)
+		}
+		if got := Include(c.a, c.b); got != c.incl {
+			t.Errorf("Include(%s, %s) = %v", c.a, c.b, got)
+		}
+	}
+	if Match("demo/**", "demo/@adv/x") || !Match("demo/@adv/*", "demo/@adv/x") || Match("*", "@x") {
+		t.Error("Match ignores verbatim chunks")
+	}
+}

@@ -11,6 +11,9 @@
 //   - "$*"  a sub-chunk wildcard: matches any run of characters within a single
 //     chunk (e.g. "a/b$*" matches "a/b", "a/because", "a/blue").
 //
+// A chunk starting with '@' is verbatim (zenoh 1.x): no wildcard matches it,
+// only the identical chunk does, so "a/**" does not cover "a/@adv/x".
+//
 // The relations are defined by the spec as:
 //
 //   - A concrete key K matches a key expression E if K is in E's language.
@@ -56,7 +59,30 @@ type tok struct {
 // wildcard, or a glob pattern (toks) for a single chunk.
 type patChunk struct {
 	dw   bool // "**"
+	verb bool // verbatim: starts with '@'
+	raw  string
 	toks []tok
+}
+
+// chunkInter and chunkIncl apply the verbatim rule, then the glob relations.
+func chunkInter(a, b patChunk) bool {
+	if a.raw == b.raw {
+		return true
+	}
+	if a.verb || b.verb {
+		return false
+	}
+	return chunkIntersect(a.toks, b.toks)
+}
+
+func chunkIncl(a, b patChunk) bool {
+	if a.raw == b.raw {
+		return true
+	}
+	if a.verb || b.verb {
+		return false
+	}
+	return chunkIncludes(a.toks, b.toks)
 }
 
 // Key is a validated, compiled key expression.
@@ -119,9 +145,9 @@ func compile(s string) []patChunk {
 	pcs := make([]patChunk, len(parts))
 	for i, p := range parts {
 		if p == "**" {
-			pcs[i] = patChunk{dw: true}
+			pcs[i] = patChunk{dw: true, raw: p}
 		} else {
-			pcs[i] = patChunk{toks: parseChunk(p)}
+			pcs[i] = patChunk{verb: strings.HasPrefix(p, "@"), raw: p, toks: parseChunk(p)}
 		}
 	}
 	return pcs
@@ -164,8 +190,8 @@ func matchChunks(pat []patChunk, key []string) bool {
 		if matchChunks(pat[1:], key) {
 			return true
 		}
-		// ...or one or more.
-		if len(key) > 0 && matchChunks(pat, key[1:]) {
+		// ...or one or more (never a verbatim chunk).
+		if len(key) > 0 && !strings.HasPrefix(key[0], "@") && matchChunks(pat, key[1:]) {
 			return true
 		}
 		return false
@@ -173,7 +199,11 @@ func matchChunks(pat []patChunk, key []string) bool {
 	if len(key) == 0 {
 		return false
 	}
-	if !matchGlob(pat[0].toks, key[0]) {
+	if pat[0].verb || strings.HasPrefix(key[0], "@") {
+		if pat[0].raw != key[0] {
+			return false
+		}
+	} else if !matchGlob(pat[0].toks, key[0]) {
 		return false
 	}
 	return matchChunks(pat[1:], key[1:])
@@ -187,13 +217,13 @@ func intersectChunks(a, b []patChunk) bool {
 		return allDoubleWild(a)
 	}
 	if a[0].dw {
-		// "**" consumes zero chunks, or absorbs one chunk from b.
-		return intersectChunks(a[1:], b) || intersectChunks(a, b[1:])
+		// "**" consumes zero chunks, or absorbs one non-verbatim chunk from b.
+		return intersectChunks(a[1:], b) || (!b[0].verb && intersectChunks(a, b[1:]))
 	}
 	if b[0].dw {
-		return intersectChunks(a, b[1:]) || intersectChunks(a[1:], b)
+		return intersectChunks(a, b[1:]) || (!a[0].verb && intersectChunks(a[1:], b))
 	}
-	if !chunkIntersect(a[0].toks, b[0].toks) {
+	if !chunkInter(a[0], b[0]) {
 		return false
 	}
 	return intersectChunks(a[1:], b[1:])
@@ -208,7 +238,7 @@ func includesChunks(a, b []patChunk) bool { // does a include b?
 		if includesChunks(a[1:], b) {
 			return true
 		}
-		if len(b) > 0 && includesChunks(a, b[1:]) {
+		if len(b) > 0 && !b[0].verb && includesChunks(a, b[1:]) {
 			return true
 		}
 		return false
@@ -220,7 +250,7 @@ func includesChunks(a, b []patChunk) bool { // does a include b?
 		// A single chunk cannot cover "**" (which spans any number of chunks).
 		return false
 	}
-	if !chunkIncludes(a[0].toks, b[0].toks) {
+	if !chunkIncl(a[0], b[0]) {
 		return false
 	}
 	return includesChunks(a[1:], b[1:])
