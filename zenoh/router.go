@@ -1,0 +1,519 @@
+package zenoh
+
+import (
+	"sort"
+	"time"
+
+	"github.com/shabunin/gozenoh/keyexpr"
+	"github.com/shabunin/gozenoh/protocol"
+	"github.com/shabunin/gozenoh/transport"
+)
+
+// Router mode.
+//
+// A router serves the clients and peers attached to it (zenoh-rust's "broker"
+// hat, zenoh/src/net/routing/hat/broker). Verified against zenoh-rust 1.10:
+// such nodes push their subscribers, queryables and tokens to the router
+// unprompted, and learn about everyone else's through INTERESTs (a publisher
+// sends INTEREST(subscribers) and only sends data once a matching subscriber
+// is declared to it; liveliness subscribers and queriers likewise). So the
+// router:
+//
+//   - stores what each face declares;
+//   - answers INTERESTs with the matching entities of all other faces and of
+//     its own session, aggregated per key expression, and keeps faces with a
+//     Future interest up to date;
+//   - forwards PUSHes to the faces whose subscribers match, and REQUESTs to
+//     the faces whose queryables match, relaying their responses back under
+//     the origin's request id.
+
+// declKind indexes the three kinds of declared entity.
+type declKind int
+
+const (
+	kindSub declKind = iota
+	kindQbl
+	kindToken
+	nKinds
+)
+
+func (k declKind) option() protocol.InterestOptions {
+	switch k {
+	case kindSub:
+		return protocol.InterestSubscribers
+	case kindQbl:
+		return protocol.InterestQueryables
+	default:
+		return protocol.InterestTokens
+	}
+}
+
+// remoteInterest is an interest a face registered with us.
+type remoteInterest struct {
+	mode protocol.InterestMode
+	opts protocol.InterestOptions
+	key  string // "" = every key
+}
+
+func (i *remoteInterest) matches(k declKind, key string) bool {
+	return i.opts&k.option() != 0 && (i.key == "" || keyexpr.Intersect(i.key, key))
+}
+
+// declared is an aggregated entity we declared to a face.
+type declared struct {
+	id       uint32
+	complete bool // queryables
+}
+
+// routerState is per-face state kept in router mode (guarded by Session.mu).
+type routerState struct {
+	interests map[uint32]*remoteInterest
+	declared  [nKinds]map[string]*declared
+	nextID    uint32
+}
+
+func newRouterState() *routerState {
+	rs := &routerState{interests: map[uint32]*remoteInterest{}}
+	for k := range rs.declared {
+		rs.declared[k] = map[string]*declared{}
+	}
+	return rs
+}
+
+// sourcesLocked reports whether anyone other than exclude (the router's own
+// session, its clients and peers, and other routers) has an entity of kind k
+// on exactly key, and for queryables whether any of them is complete.
+func (s *Session) sourcesLocked(k declKind, key string, exclude *face) (present, complete bool) {
+	present, complete = s.localSourcesLocked(k, key, exclude)
+	if s.mesh != nil {
+		for _, info := range s.mesh.remote[k][key] {
+			present, complete = true, complete || info.complete
+		}
+	}
+	return present, complete
+}
+
+// localSourcesLocked is sourcesLocked without other routers.
+func (s *Session) localSourcesLocked(k declKind, key string, exclude *face) (present, complete bool) {
+	switch k {
+	case kindSub:
+		for _, sub := range s.subs {
+			if sub.key.String() == key {
+				return true, false
+			}
+		}
+	case kindQbl:
+		for _, q := range s.queryables {
+			if q.key.String() == key {
+				present, complete = true, complete || q.complete
+			}
+		}
+	case kindToken:
+		for _, t := range s.localTokens {
+			if t.key == key {
+				return true, false
+			}
+		}
+	}
+	for _, f := range s.faces {
+		if f == exclude {
+			continue
+		}
+		switch k {
+		case kindSub:
+			for _, fk := range f.subs {
+				if fk == key {
+					return true, false
+				}
+			}
+		case kindQbl:
+			for _, q := range f.qbls {
+				if q.key == key {
+					present, complete = true, complete || q.complete
+				}
+			}
+		case kindToken:
+			for _, fk := range f.tokens {
+				if fk == key {
+					return true, false
+				}
+			}
+		}
+	}
+	return present, complete
+}
+
+// keysLocked lists the distinct keys of kind k known from sources other than
+// exclude that intersect filter ("" = all).
+func (s *Session) keysLocked(k declKind, filter string, exclude *face) []string {
+	set := map[string]bool{}
+	add := func(key string) {
+		if filter == "" || keyexpr.Intersect(filter, key) {
+			set[key] = true
+		}
+	}
+	switch k {
+	case kindSub:
+		for _, sub := range s.subs {
+			add(sub.key.String())
+		}
+	case kindQbl:
+		for _, q := range s.queryables {
+			add(q.key.String())
+		}
+	case kindToken:
+		for _, t := range s.localTokens {
+			add(t.key)
+		}
+	}
+	if s.mesh != nil {
+		for key := range s.mesh.remote[k] {
+			add(key)
+		}
+	}
+	for _, f := range s.faces {
+		if f == exclude {
+			continue
+		}
+		switch k {
+		case kindSub:
+			for _, key := range f.subs {
+				add(key)
+			}
+		case kindQbl:
+			for _, q := range f.qbls {
+				add(q.key)
+			}
+		case kindToken:
+			for _, key := range f.tokens {
+				add(key)
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for key := range set {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func declMsg(k declKind, id uint32, key string, complete bool, interest *uint32) *protocol.Declare {
+	d := &protocol.Declare{QoS: protocol.QoSDeclare}
+	if interest != nil {
+		d.HasInterestID, d.InterestID = true, *interest
+	}
+	we := protocol.WireExpr{Suffix: key}
+	switch k {
+	case kindSub:
+		d.Body = &protocol.DeclareSubscriber{ID: id, WireExpr: we}
+	case kindQbl:
+		d.Body = &protocol.DeclareQueryable{ID: id, WireExpr: we, Complete: complete}
+	default:
+		d.Body = &protocol.DeclareToken{ID: id, WireExpr: we}
+	}
+	return d
+}
+
+func undeclMsg(k declKind, id uint32, key string) *protocol.Declare {
+	d := &protocol.Declare{QoS: protocol.QoSDeclare}
+	we := protocol.WireExpr{Suffix: key}
+	switch k {
+	case kindSub:
+		d.Body = &protocol.UndeclareSubscriber{ID: id, WireExpr: we}
+	case kindQbl:
+		d.Body = &protocol.UndeclareQueryable{ID: id, WireExpr: we}
+	default:
+		d.Body = &protocol.UndeclareToken{ID: id, WireExpr: we}
+	}
+	return d
+}
+
+// outbox collects messages per face while Session.mu is held.
+type outbox map[*face][]transport.Encoder
+
+func (o outbox) add(f *face, m transport.Encoder) { o[f] = append(o[f], m) }
+
+func (o outbox) send() {
+	for f, msgs := range o {
+		_ = f.send(true, msgs...)
+	}
+}
+
+// routerUpdateLocked re-evaluates entity (k, key) for every face after its
+// sources changed: faces with a matching Future interest get it declared
+// once it exists (or re-declared when a queryable's completeness changes),
+// and undeclared when its last source is gone.
+func (s *Session) routerUpdateLocked(k declKind, key string, out outbox) {
+	s.meshOwnUpdateLocked(k, key, out)
+	for _, f := range s.faces {
+		rs := f.router
+		if rs == nil {
+			continue
+		}
+		present, complete := s.sourcesLocked(k, key, f)
+		have := rs.declared[k][key]
+		switch {
+		case have != nil && !present:
+			delete(rs.declared[k], key)
+			out.add(f, undeclMsg(k, have.id, key))
+		case have == nil && !present && k == kindToken && f.futureInterestLocked(k, key):
+			// Like zenoh-rust: a token the face was never told about (its
+			// interest is future-only) still gets a one-shot undeclaration,
+			// so liveliness subscribers without history see it go.
+			out.add(f, undeclMsg(k, 0, key))
+		case present && have == nil && f.futureInterestLocked(k, key):
+			rs.nextID++
+			rs.declared[k][key] = &declared{id: rs.nextID, complete: complete}
+			out.add(f, declMsg(k, rs.nextID, key, complete, nil))
+		case present && have != nil && k == kindQbl && have.complete != complete:
+			have.complete = complete
+			out.add(f, declMsg(k, have.id, key, complete, nil))
+		}
+	}
+}
+
+func (f *face) futureInterestLocked(k declKind, key string) bool {
+	for _, i := range f.router.interests {
+		if (i.mode == protocol.InterestFuture || i.mode == protocol.InterestCurrentFuture) && i.matches(k, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// routerInterest handles an INTEREST from face f.
+func (s *Session) routerInterest(f *face, m *protocol.Interest) {
+	if m.Mode == protocol.InterestFinal {
+		s.mu.Lock()
+		delete(f.router.interests, m.ID)
+		s.mu.Unlock()
+		return
+	}
+	in := &remoteInterest{mode: m.Mode, opts: m.Options}
+	if m.WireExpr != nil {
+		key, ok := f.resolve(*m.WireExpr)
+		if !ok {
+			return
+		}
+		in.key = key
+	}
+	future := m.Mode == protocol.InterestFuture || m.Mode == protocol.InterestCurrentFuture
+	current := m.Mode == protocol.InterestCurrent || m.Mode == protocol.InterestCurrentFuture
+	var msgs []transport.Encoder
+	s.mu.Lock()
+	rs := f.router
+	if future {
+		rs.interests[m.ID] = in
+	}
+	if current {
+		id := m.ID
+		for k := declKind(0); k < nKinds; k++ {
+			if in.opts&k.option() == 0 {
+				continue
+			}
+			for _, key := range s.keysLocked(k, in.key, f) {
+				_, complete := s.sourcesLocked(k, key, f)
+				d := rs.declared[k][key]
+				if d == nil {
+					rs.nextID++
+					d = &declared{id: rs.nextID, complete: complete}
+					if future {
+						rs.declared[k][key] = d // it will be kept up to date
+					}
+				}
+				msgs = append(msgs, declMsg(k, d.id, key, complete, &id))
+			}
+		}
+	}
+	s.mu.Unlock()
+	if current {
+		msgs = append(msgs, &protocol.Declare{HasInterestID: true, InterestID: m.ID,
+			QoS: protocol.QoSDeclare, Body: &protocol.DeclareFinal{}})
+	}
+	if len(msgs) > 0 {
+		_ = f.send(true, msgs...)
+	}
+}
+
+// routerFaceGoneLocked propagates the removal of everything face f declared;
+// f must already be out of s.faces.
+func (s *Session) routerFaceGoneLocked(f *face, out outbox) {
+	for _, key := range f.subs {
+		s.routerUpdateLocked(kindSub, key, out)
+	}
+	for _, q := range f.qbls {
+		s.routerUpdateLocked(kindQbl, q.key, out)
+	}
+	for _, key := range f.tokens {
+		s.routerUpdateLocked(kindToken, key, out)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Data and query forwarding
+// -----------------------------------------------------------------------------
+
+// routerForward sends a PUSH received from src to every other face whose
+// subscribers match.
+func (s *Session) routerForward(src *face, key string, m *protocol.Push, reliable bool) {
+	s.mu.Lock()
+	tree, ok := s.meshSourceLocked(src, m.NodeID)
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	var dst []*face
+	for _, f := range s.faces {
+		if f != src && f.wantsDataLocked(key) {
+			dst = append(dst, f)
+		}
+	}
+	routers := s.meshTargetsLocked(kindSub, tree, key, 0, src)
+	s.mu.Unlock()
+	fwd := *m
+	fwd.WireExpr = protocol.WireExpr{Suffix: key}
+	fwd.NodeID = 0
+	for _, f := range dst {
+		_ = f.send(reliable, &fwd)
+	}
+	if len(routers) > 0 {
+		meshFwd := fwd
+		meshFwd.NodeID = uint16(tree)
+		for f := range routers {
+			_ = f.send(reliable, &meshFwd)
+		}
+	}
+}
+
+// routedQuery is a request we forwarded on behalf of another face.
+type routedQuery struct {
+	origin    *face
+	originRID uint32
+	pending   map[*face]bool // faces we forwarded to (nil key: our queryables)
+	local     bool
+	timer     *time.Timer
+}
+
+// routerRequest forwards a REQUEST from src to the faces (and local
+// queryables) that can answer it.
+func (s *Session) routerRequest(src *face, key string, m *protocol.Request) {
+	s.mu.Lock()
+	rq := &routedQuery{origin: src, originRID: m.ID, pending: map[*face]bool{}}
+	tree, ok := s.meshSourceLocked(src, m.NodeID)
+	if !ok {
+		tree = 0
+	}
+	routers := s.meshTargetsLocked(kindQbl, tree, key, m.Target, src)
+	for f := range routers {
+		rq.pending[f] = true
+	}
+	for _, f := range s.faces {
+		if f != src && f.wantsQueryLocked(key, m.Target) {
+			rq.pending[f] = true
+		}
+	}
+	for _, q := range s.queryables {
+		if keyexpr.Intersect(q.key.String(), key) && (m.Target != TargetAllComplete || q.complete) {
+			rq.local = true
+			break
+		}
+	}
+	if len(rq.pending) == 0 && !rq.local {
+		s.mu.Unlock()
+		_ = src.send(true, &protocol.ResponseFinal{RequestID: m.ID, QoS: protocol.QoSRequest})
+		return
+	}
+	rid := s.nextQID
+	s.nextQID++
+	s.routes[rid] = rq
+	dst := make([]*face, 0, len(rq.pending))
+	for f := range rq.pending {
+		dst = append(dst, f)
+	}
+	s.mu.Unlock()
+
+	timeout := s.cfg.QueryTimeout
+	if m.TimeoutMS > 0 {
+		timeout = time.Duration(m.TimeoutMS) * time.Millisecond
+	}
+	rq.timer = time.AfterFunc(timeout, func() { s.routeDone(rid, nil, true) })
+
+	fwd := *m
+	fwd.ID = rid
+	fwd.WireExpr = protocol.WireExpr{Suffix: key}
+	fwd.NodeID = 0
+	meshFwd := fwd
+	meshFwd.NodeID = uint16(tree)
+	for _, f := range dst {
+		msg := &fwd
+		if routers[f] {
+			msg = &meshFwd
+		}
+		if err := f.send(true, msg); err != nil {
+			s.routeDone(rid, f, false)
+		}
+	}
+	if rq.local {
+		q := m.Query
+		if q == nil {
+			q = &protocol.Query{}
+		}
+		s.dispatchRoutedQuery(rid, src, m.ID, key, q, m.Target)
+	}
+}
+
+// routeDone records that dst (nil: the local queryables) is done with routed
+// request rid; with all set, the whole route is finished (timeout). When
+// nobody is left, the origin gets its RESPONSE_FINAL.
+func (s *Session) routeDone(rid uint32, dst *face, all bool) {
+	s.mu.Lock()
+	rq := s.routes[rid]
+	if rq == nil {
+		s.mu.Unlock()
+		return
+	}
+	switch {
+	case all:
+		rq.pending, rq.local = nil, false
+	case dst == nil:
+		rq.local = false
+	default:
+		delete(rq.pending, dst)
+	}
+	if len(rq.pending) > 0 || rq.local {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.routes, rid)
+	s.mu.Unlock()
+	rq.timer.Stop()
+	_ = rq.origin.send(true, &protocol.ResponseFinal{RequestID: rq.originRID, QoS: protocol.QoSRequest})
+}
+
+// routerResponse relays a RESPONSE for a routed request back to its origin.
+// It reports false if rid is not a routed request.
+func (s *Session) routerResponse(src *face, m *protocol.Response) bool {
+	s.mu.Lock()
+	rq := s.routes[m.RequestID]
+	s.mu.Unlock()
+	if rq == nil {
+		return false
+	}
+	key, ok := src.resolve(m.WireExpr)
+	if !ok {
+		return true
+	}
+	fwd := *m
+	fwd.RequestID = rq.originRID
+	fwd.WireExpr = protocol.WireExpr{Suffix: key}
+	_ = rq.origin.send(true, &fwd)
+	return true
+}
+
+// dispatchRoutedQuery runs the router's own queryables for a routed request:
+// replies go straight to the origin, the final counts toward the route.
+func (s *Session) dispatchRoutedQuery(rid uint32, origin *face, originRID uint32, key string, q *protocol.Query, target QueryTarget) {
+	s.dispatchQueryWith(originRID, origin, func() { s.routeDone(rid, nil, false) },
+		key, q.Parameters, q.Body, q.Attachment, target)
+}
