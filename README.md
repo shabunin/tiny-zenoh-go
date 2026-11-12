@@ -619,18 +619,29 @@ go build -o bench/bin/ ./examples/z_* ./cmd/tzd
 bench/xbench.sh
 ```
 
-On a Ryzen 7 8845HS laptop over loopback (noisy, ±30%): ping-pong round
-trips are on par with zenoh-rust (64 B: ~70–90 µs peer to peer, ~200 µs
-through a router, either implementation). Small-message throughput is
-not yet, zenoh-rust is ~3–4× ahead:
+Separate processes on a Ryzen 7 8845HS laptop over loopback (noisy,
+±30%), same implementation at both ends:
 
-| 8 B messages | zenoh-rust | tiny-zenoh-go |
+| | zenoh-rust | tiny-zenoh-go |
 |---|---|---|
-| peer → peer | ~1.6–2.7 M msg/s | ~0.7 M msg/s |
-| client → router → client (same implementation at both ends) | ~1.9 M msg/s (zenohd) | ~0.45–0.5 M msg/s (tzd) |
-| 64 KiB peer → peer | ~10 k msg/s | ~4 k msg/s |
+| 8 B, peer → peer | ~1.6–3.1 M msg/s | ~1.35–1.6 M msg/s |
+| 1 KiB, peer → peer | ~1.3 M msg/s | ~0.75 M msg/s |
+| 64 KiB, peer → peer | ~38 k msg/s (2.5 GB/s) | ~31 k msg/s (2.0 GB/s) |
+| 8 B, client → router → client | ~1.9–2.3 M msg/s (zenohd) | ~0.76–0.86 M msg/s (tzd) |
+| 1 KiB, client → router → client | ~1.3 M msg/s (zenohd) | ~0.49 M msg/s (tzd) |
+| ping-pong 64 B, peer ↔ peer (median RTT) | ~75 µs | ~36 µs |
+| ping-pong 64 B, through a router | ~155 µs (zenohd) | ~100 µs (tzd) |
 
-Shared memory moves ~2.4 GB/s at 1 MiB.
+Mixed pairs (Go publisher, Rust subscriber and the reverse; Go clients
+on zenohd, Rust clients on tzd) land between the two columns. Shared
+memory moves ~2.4 GB/s at 1 MiB.
+
+Like zenoh-rust, small messages are batched: a batch that is still
+filling waits up to `TxQueue.BatchingTimeLimit` (default 1 ms; in tzd
+`transport/link/tx/queue/batching`) while publishers keep adding to it,
+and express messages go out at once. Statistics are on by default and
+cost ~7% of small-message throughput (zenoh-rust release builds have
+none); `Config.Stats.Enabled` set to false turns them off.
 
 ## Roadmap
 
