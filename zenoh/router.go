@@ -103,6 +103,23 @@ func (s *Session) sourceVisibleLocked(g, dst *face) bool {
 	return dst == nil || s.crossesLocked(g, dst)
 }
 
+// echoesOwnLocked reports whether face g's own entities of kind k are told
+// back to it: a client's liveliness tokens are, as zenohd does it (a client
+// session sees its own tokens only that way).
+func echoesOwnLocked(k declKind, g, dst *face) bool {
+	return k == kindToken && g == dst && g.live && g.whatami == protocol.Client
+}
+
+// hasTokenLocked reports whether the face itself declared a token on key.
+func (f *face) hasTokenLocked(key string) bool {
+	for _, k := range f.tokens {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
 // sourcesLocked reports whether any source of (k, key) visible to dst
 // exists (our session, our faces by region, other routers), and for
 // queryables whether any of them is complete. A north face (relay) is told
@@ -145,7 +162,7 @@ func (s *Session) localSourcesLocked(k declKind, key string, dst *face) (present
 		}
 	}
 	for _, f := range s.faces {
-		if !s.sourceVisibleLocked(f, dst) {
+		if !s.sourceVisibleLocked(f, dst) && !echoesOwnLocked(k, f, dst) {
 			continue
 		}
 		switch k {
@@ -209,7 +226,7 @@ func (s *Session) keysLocked(k declKind, filter string, dst *face) []string {
 		}
 	}
 	for _, f := range s.faces {
-		if !s.sourceVisibleLocked(f, dst) {
+		if !s.sourceVisibleLocked(f, dst) && !echoesOwnLocked(k, f, dst) {
 			continue
 		}
 		switch k {
@@ -278,11 +295,12 @@ func (o outbox) send() {
 }
 
 // routerUpdateLocked re-evaluates entity (k, key) for every face after its
-// sources changed: south faces with a matching Future interest get it
-// declared once it exists (or re-declared when a queryable's completeness
-// changes), and undeclared when its last source is gone; north faces
-// (relay) are kept told about every entity of our south regions.
-func (s *Session) routerUpdateLocked(k declKind, key string, out outbox) {
+// sources changed (because of face src, if not nil): south faces with a
+// matching Future interest get it declared once it exists (or re-declared
+// when a queryable's completeness changes), and undeclared when its last
+// source is gone; north faces (relay) are kept told about every entity of
+// our south regions.
+func (s *Session) routerUpdateLocked(k declKind, key string, src *face, out outbox) {
 	s.meshOwnUpdateLocked(k, key, out)
 	for _, f := range s.faces {
 		rs, relay := f.router, false
@@ -299,10 +317,12 @@ func (s *Session) routerUpdateLocked(k declKind, key string, out outbox) {
 		case have != nil && !present:
 			delete(rs.declared[k], key)
 			out.add(f, undeclMsg(k, have.id, key))
-		case have == nil && !present && !relay && k == kindToken && interested:
+		case have == nil && !present && !relay && k == kindToken && interested && f != src && !f.hasTokenLocked(key):
 			// Like zenoh-rust: a token the face was never told about (its
 			// interest is future-only) still gets a one-shot undeclaration,
-			// so liveliness subscribers without history see it go.
+			// so liveliness subscribers without history see it go. Not the
+			// face that declared or undeclared it: a peer does not hear of
+			// its own tokens (a client hears of them by the echo above).
 			out.add(f, undeclMsg(k, 0, key))
 		case present && have == nil && interested:
 			d := &declared{id: s.declIDLocked(rs, relay), complete: complete}
@@ -485,13 +505,13 @@ func (s *Session) answerInterest(f *face, m *protocol.Interest, in *remoteIntere
 // f must already be out of s.faces.
 func (s *Session) routerFaceGoneLocked(f *face, out outbox) {
 	for _, key := range f.subs {
-		s.routerUpdateLocked(kindSub, key, out)
+		s.routerUpdateLocked(kindSub, key, f, out)
 	}
 	for _, q := range f.qbls {
-		s.routerUpdateLocked(kindQbl, q.key, out)
+		s.routerUpdateLocked(kindQbl, q.key, f, out)
 	}
 	for _, key := range f.tokens {
-		s.routerUpdateLocked(kindToken, key, out)
+		s.routerUpdateLocked(kindToken, key, f, out)
 	}
 }
 

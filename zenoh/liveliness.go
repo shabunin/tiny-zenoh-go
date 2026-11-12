@@ -39,6 +39,9 @@ func (l Liveliness) DeclareToken(key string) (*LivelinessToken, error) {
 		l.s.mu.Unlock()
 		return nil, err
 	}
+	if l.s.seesOwnTokens() {
+		l.s.livelinessEvent(nil, t.key, SampleKindPut)
+	}
 	return t, nil
 }
 
@@ -54,9 +57,19 @@ func (t *LivelinessToken) Undeclare() error {
 		t.s.mu.Unlock()
 		return nil
 	}
-	return t.s.declareLocalLocked(kindToken, t.key, &protocol.Declare{QoS: protocol.QoSDeclare,
+	err := t.s.declareLocalLocked(kindToken, t.key, &protocol.Declare{QoS: protocol.QoSDeclare,
 		Body: &protocol.UndeclareToken{ID: t.id}})
+	if t.s.seesOwnTokens() {
+		t.s.livelinessEvent(nil, t.key, SampleKindDelete)
+	}
+	return err
 }
+
+// seesOwnTokens reports whether the session tells its own liveliness
+// subscribers about its own tokens. Peers and routers do, as zenoh-rust's;
+// a client hears of them from its router, which echoes them (zenohd, and
+// tzd likewise), and would otherwise see them twice.
+func (s *Session) seesOwnTokens() bool { return s.cfg.Mode != ModeClient }
 
 // LivelinessSubscriber receives a PUT sample when a matching token appears and
 // a DELETE sample when it disappears.
@@ -139,6 +152,13 @@ func (l Liveliness) DeclareSubscriber(key string, handler func(Sample), history 
 	var known []string
 	if history {
 		known = s.pushTokensLocked(k.String())
+		if s.seesOwnTokens() {
+			for _, t := range s.localTokens {
+				if keyexpr.Intersect(k.String(), t.key) {
+					known = append(known, t.key)
+				}
+			}
+		}
 	}
 	s.mu.Unlock()
 	for _, key := range known {

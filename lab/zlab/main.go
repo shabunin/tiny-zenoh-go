@@ -6,6 +6,11 @@
 //
 //	zlab pub -e tcp/10.0.1.1:7447 -k lab/flow -rate 1000 -d 30s
 //	zlab sub -e tcp/10.0.3.1:7447 -k lab/flow -d 35s
+//	zlab alive -e ... -k lab/alive/c1 -watch 'lab/alive/**' -d 60s
+//	zlab put -e ... -k lab/store/a -v A1
+//	zlab get -e ... -k 'lab/store/**'
+//
+// -mode peer (with -l to listen) makes it a peer instead of a client.
 package main
 
 import (
@@ -19,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 	"github.com/shabunin/tiny-zenoh-go/zenoh"
 )
 
@@ -42,11 +48,26 @@ func main() {
 	size := fs.Int("size", 16, "pub: payload size (at least 16)")
 	dur := fs.Duration("d", 30*time.Second, "how long to run")
 	besteffort := fs.Bool("best-effort", false, "pub: best-effort reliability")
+	var listen list
+	fs.Var(&listen, "l", "locator to listen on (peer mode; repeatable)")
+	zid := fs.String("id", "", "ZID in hex (default random)")
+	watch := fs.String("watch", "", "alive: liveliness tokens to watch")
+	value := fs.String("v", "", "put: value")
 	_ = fs.Parse(os.Args[2:])
 
-	cfg := zenoh.Config{Connect: connect, Scouting: zenoh.ScoutingConfig{Disable: true}}
+	cfg := zenoh.Config{Connect: connect, Listen: listen, Scouting: zenoh.ScoutingConfig{Disable: true}}
 	if *mode == "peer" {
 		cfg.Mode = zenoh.ModePeer
+		if len(listen) == 0 {
+			cfg.Listen = []string{}
+		}
+	}
+	if *zid != "" {
+		z, err := protocol.ParseZID(*zid)
+		if err != nil {
+			fatal(err)
+		}
+		cfg.ZID = z
 	}
 	var s *zenoh.Session
 	var err error
@@ -64,6 +85,15 @@ func main() {
 		pub(s, *key, *rate, max(*size, 16), *dur, *besteffort)
 	case "sub":
 		sub(s, *key, *dur)
+	case "alive":
+		alive(s, *key, *watch, *dur)
+	case "put":
+		if err := s.Put(*key, []byte(*value)); err != nil {
+			fatal(err)
+		}
+		time.Sleep(200 * time.Millisecond) // let it leave before closing
+	case "get":
+		get(s, *key, *dur)
 	default:
 		fatal(fmt.Errorf("unknown command %q", cmd))
 	}
@@ -193,4 +223,60 @@ func sub(s *zenoh.Session, key string, dur time.Duration) {
 func out(v any) {
 	b, _ := json.Marshal(v)
 	fmt.Println(string(b))
+}
+
+// alive declares token key and logs, as JSON lines, the liveliness
+// tokens matching watch as they come and go (those alive when it starts
+// first), then the set alive at the end.
+func alive(s *zenoh.Session, key, watch string, dur time.Duration) {
+	start := time.Now()
+	var mu sync.Mutex
+	alive := map[string]bool{}
+	_, err := s.Liveliness().DeclareSubscriber(watch, func(smp zenoh.Sample) {
+		mu.Lock()
+		defer mu.Unlock()
+		ev := "put"
+		if smp.Kind == zenoh.SampleKindDelete {
+			ev = "delete"
+			delete(alive, smp.KeyExpr)
+		} else {
+			alive[smp.KeyExpr] = true
+		}
+		out(map[string]any{"t": time.Since(start).Seconds(), "event": ev, "key": smp.KeyExpr})
+	}, true)
+	if err != nil {
+		fatal(err)
+	}
+	if key != "" {
+		if _, err := s.Liveliness().DeclareToken(key); err != nil {
+			fatal(err)
+		}
+	}
+	time.Sleep(dur)
+	mu.Lock()
+	defer mu.Unlock()
+	keys := make([]string, 0, len(alive))
+	for k := range alive {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	out(map[string]any{"t": time.Since(start).Seconds(), "event": "end", "alive": keys})
+}
+
+// get prints the replies to a query on key as one JSON object (key: value).
+func get(s *zenoh.Session, key string, timeout time.Duration) {
+	if timeout <= 0 || timeout > 10*time.Second {
+		timeout = 5 * time.Second
+	}
+	replies, err := s.Get(key, zenoh.WithTimeout(timeout), zenoh.WithTarget(zenoh.TargetAll))
+	if err != nil {
+		fatal(err)
+	}
+	vals := map[string]string{}
+	for r := range replies {
+		if r.Sample != nil {
+			vals[r.Sample.KeyExpr] = string(r.Sample.Payload)
+		}
+	}
+	out(vals)
 }

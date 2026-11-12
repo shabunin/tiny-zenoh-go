@@ -668,7 +668,7 @@ func (s *Session) declareLocalLocked(k declKind, key string, msg transport.Encod
 	defer s.checkMatching()
 	out := outbox{}
 	if s.cfg.Mode != ModeClient {
-		s.routerUpdateLocked(k, key, out)
+		s.routerUpdateLocked(k, key, nil, out)
 	}
 	var faces []*face
 	for _, f := range s.faceListLocked() {
@@ -953,7 +953,7 @@ func (s *Session) connector(ep string, f *face, err error) {
 			case <-s.done:
 				return
 			}
-			backoff = min(backoff*2, 8*time.Second)
+			backoff = min(backoff*2, 4*time.Second) // zenohd: 1 s, x2, at most 4 s
 		}
 		f, err = s.dial(ep)
 	}

@@ -252,7 +252,7 @@ func (s *Session) meshDeclare(f *face, m *protocol.Declare) {
 	s.sendToChildrenLocked(mesh, src, k, key, info, remove, f, out)
 	newcomer := k == kindToken && !remove && !existed && !s.tokenKnownElsewhereLocked(key, router)
 	gone := k == kindToken && remove && !s.tokenKnownElsewhereLocked(key, "")
-	s.routerUpdateLocked(k, key, out)
+	s.routerUpdateLocked(k, key, nil, out)
 	s.mu.Unlock()
 	out.send()
 	if newcomer {
@@ -371,7 +371,7 @@ func (s *Session) meshRoutersGoneLocked(m *meshState, removed []ZID, out outbox)
 		}
 	}
 	for _, c := range changes {
-		s.routerUpdateLocked(c.k, c.key, out)
+		s.routerUpdateLocked(c.k, c.key, nil, out)
 	}
 }
 

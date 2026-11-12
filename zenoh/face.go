@@ -600,7 +600,7 @@ func (f *face) propagateLocked(k declKind, key string) {
 		return
 	}
 	out := outbox{}
-	s.routerUpdateLocked(k, key, out)
+	s.routerUpdateLocked(k, key, f, out)
 	s.mu.Unlock()
 	out.send()
 }
