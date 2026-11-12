@@ -99,8 +99,10 @@ type Config struct {
 	// Mode is ModeClient (default) or ModePeer.
 	Mode Mode
 	// Connect lists locators to connect to. In client mode they are tried in
-	// order until one works; default ["tcp/127.0.0.1:7447"]. In peer mode all
-	// are connected, and reconnected in the background when lost.
+	// order until one works, and again (from the first) whenever the
+	// connection is lost; default ["tcp/127.0.0.1:7447"]. In peer mode all
+	// are connected, and reconnected in the background when lost. Either
+	// way our declarations are made again on the new connection.
 	Connect []string
 	// Listen lists locators to accept connections on (peer and router mode).
 	// Default (nil) ["tcp/0.0.0.0:0"] for a peer, ["tcp/0.0.0.0:7447"] for a
@@ -417,6 +419,7 @@ func Open(cfg Config) (*Session, error) {
 			}
 			return nil, err
 		}
+		go s.clientKeeper()
 		return s, nil
 	}
 	if err := s.openPeer(); err != nil {
@@ -443,6 +446,43 @@ func (s *Session) openClient() error {
 		return nil
 	}
 	return fmt.Errorf("zenoh: could not connect: %w", errors.Join(errs...))
+}
+
+// clientKeeper reconnects a client that lost its router, trying the
+// configured endpoints in turn with the connectors' backoff (zenoh-rust
+// clients likewise reconnect). The new face gets our subscribers, tokens,
+// queryables and interests, as the first one did.
+func (s *Session) clientKeeper() {
+	for {
+		s.mu.Lock()
+		var f *face
+		for _, x := range s.faces {
+			f = x
+		}
+		s.mu.Unlock()
+		if f != nil {
+			select {
+			case <-f.closed:
+			case <-s.done:
+				return
+			}
+			// Wait for its teardown: a client takes one router at a time.
+			for s.faceByZID(f.zid) == f {
+				select {
+				case <-time.After(20 * time.Millisecond):
+				case <-s.done:
+					return
+				}
+			}
+		}
+		for backoff := time.Second; s.openClient() != nil; backoff = min(backoff*2, 4*time.Second) {
+			select {
+			case <-time.After(backoff):
+			case <-s.done:
+				return
+			}
+		}
+	}
 }
 
 func (s *Session) openPeer() error {

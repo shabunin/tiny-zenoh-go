@@ -346,10 +346,7 @@ func (f *face) teardown() {
 	if s.closed.Load() {
 		return // the session is shutting down (and may be the caller)
 	}
-	if s.cfg.Mode == ModeClient {
-		s.shutdown()
-		return
-	}
+	// A client that lost its router stays open: clientKeeper connects again.
 	{
 		for _, key := range gone {
 			s.livelinessEvent(nil, key, SampleKindDelete)
