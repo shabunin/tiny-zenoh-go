@@ -259,7 +259,7 @@ func (p Params) OnClosure() (deleteAll bool, err error) {
 // FormatTimestamp renders ts as uhlc does: "<NTP64 time>/<ID in hex>",
 // the form backends store timestamps in.
 func FormatTimestamp(ts zenoh.Timestamp) string {
-	return strconv.FormatUint(ts.Time, 10) + "/" + ts.ID.String()
+	return ts.String()
 }
 
 // ParseTimestamp parses FormatTimestamp's form.

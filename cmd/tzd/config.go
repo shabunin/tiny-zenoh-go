@@ -281,7 +281,7 @@ func applyTxQueue(size map[string]int, q *transport.TxQueue) error {
 	return nil
 }
 
-// pluginsConfig is what gozenohd runs of zenoh's plugins section.
+// pluginsConfig is what tzd runs of zenoh's plugins section.
 type pluginsConfig struct {
 	restAddr string // plugins/rest/http_port
 	volumes  []namedVolume
@@ -304,7 +304,7 @@ type namedStorage struct {
 	raw    string         // its configuration as given, to see whether it changed
 }
 
-// applyConfig applies the sections gozenohd understands to cfg and warns
+// applyConfig applies the sections tzd understands to cfg and warns
 // about the others. Endpoints given as flags (already in cfg) win over the
 // file's.
 func applyConfig(tree map[string]any, cfg *zenoh.Config) (*pluginsConfig, error) {
@@ -474,7 +474,7 @@ func applyConfig(tree map[string]any, cfg *zenoh.Config) (*pluginsConfig, error)
 
 const defaultScoutAddr = "224.0.0.224:7446"
 
-func warnf(f string, a ...any) { fmt.Fprintf(os.Stderr, "gozenohd: config: "+f+"\n", a...) }
+func warnf(f string, a ...any) { fmt.Fprintf(os.Stderr, "tzd: config: "+f+"\n", a...) }
 
 // modeValue decodes a zenoh mode-dependent value: the value itself, or
 // {"router": v, "peer": v, "client": v} (the entry for mode is used).
@@ -574,7 +574,7 @@ func decodePlugins(raw json.RawMessage, p *pluginsConfig) error {
 				p.storages = append(p.storages, ns)
 			}
 		default:
-			warnf("plugin %q is not available in gozenohd (built in: rest, storage_manager)", name)
+			warnf("plugin %q is not available in tzd (built in: rest, storage_manager)", name)
 		}
 	}
 	return nil
@@ -597,7 +597,7 @@ func decodeVolume(name string, raw json.RawMessage) (namedVolume, error) {
 		return v, fmt.Errorf("\"memory\" is built in")
 	}
 	if !slices.Contains(storage.Backends(), v.backend) {
-		return v, fmt.Errorf("backend %q is not available (gozenohd has: %s)", v.backend,
+		return v, fmt.Errorf("backend %q is not available (tzd has: %s)", v.backend,
 			strings.Join(storage.Backends(), ", "))
 	}
 	delete(v.cfg, "__path__")

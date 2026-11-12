@@ -4,7 +4,7 @@
 // M5StickC over its UART, with LZ4 compression and user/password
 // authentication. The host side:
 //
-//	gozenohd -l 'serial//dev/ttyUSB0#baudrate=115200' -e tcp/127.0.0.1:7447 \
+//	tzd -l 'serial//dev/ttyUSB0#baudrate=115200' -e tcp/127.0.0.1:7447 \
 //	    --compression --usrpwd-dict users.txt      # users.txt: board:board-test-pw
 //	python host.py tcp/127.0.0.1:7447 board/stickc/serial
 //

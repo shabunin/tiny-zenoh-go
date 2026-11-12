@@ -4,7 +4,7 @@
 // its UART (e.g. the USB-serial bridge of an ESP32 board), using zenoh's
 // serial framing. On the host, a router listens on the serial port:
 //
-//	gozenohd -l 'serial//dev/ttyUSB0#baudrate=115200' -e tcp/127.0.0.1:7447
+//	tzd -l 'serial//dev/ttyUSB0#baudrate=115200' -e tcp/127.0.0.1:7447
 //
 // The device publishes a counter on demo/<name>/counter every second,
 // answers queries on demo/<name>/info, and blinks its LED on demo/<name>/led

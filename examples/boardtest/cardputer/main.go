@@ -4,10 +4,10 @@
 // M5Stack Cardputer (ESP32-S3) over Wi-Fi, once per profile:
 //
 //	plain     tcp to the host's port 7447 (zenohd, the Rust router)
-//	auth-lz4  tcp to 7460: a gozenohd with --compression --usrpwd-dict
-//	lowlat    tcp to 7461: a gozenohd with --lowlatency
+//	auth-lz4  tcp to 7460: a tzd with --compression --usrpwd-dict
+//	lowlat    tcp to 7461: a tzd with --lowlatency
 //	tls-rust  tls to 7463: zenohd (rustls), the server certificate signed by tlsCA
-//	mtls-go   tls to 7464: a gozenohd requiring a client certificate (tlsCert, tlsKey)
+//	mtls-go   tls to 7464: a tzd requiring a client certificate (tlsCert, tlsKey)
 //
 // The TLS profiles run when the CA (and, for mtls-go, the client
 // certificate and key) are given as base64 PEM:

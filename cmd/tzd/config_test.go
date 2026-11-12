@@ -162,7 +162,7 @@ func TestConfigVolumes(t *testing.T) {
 	}
 }
 
-// TestPlugins runs a storage and the REST API on a router the way gozenohd
+// TestPlugins runs a storage and the REST API on a router the way tzd
 // does: a client's put lands in the storage, and REST reads it back.
 func TestPlugins(t *testing.T) {
 	tree, err := configTree("", "127.0.0.1:0", []string{

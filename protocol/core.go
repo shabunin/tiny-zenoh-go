@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/shabunin/tiny-zenoh-go/internal/codec"
@@ -200,6 +201,11 @@ func (ts Timestamp) GoTime() time.Time {
 	secs := int64(ts.Time >> 32)
 	nanos := int64((ts.Time & 0xffffffff) * 1_000_000_000 >> 32)
 	return time.Unix(secs, nanos)
+}
+
+// String renders the timestamp as uhlc does: "<NTP64 time>/<ID in hex>".
+func (ts Timestamp) String() string {
+	return strconv.FormatUint(ts.Time, 10) + "/" + ts.ID.String()
 }
 
 func (ts *Timestamp) encode(w *codec.Writer) {

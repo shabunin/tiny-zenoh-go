@@ -8,9 +8,9 @@ pure-Go [quic-go](https://github.com/quic-go/quic-go).
 
 > **Status: client, peer and router networks work with real Zenoh.**
 > A tiny-zenoh-go session connects to `zenohd` as a client, runs as a peer talking
-> directly to other peers (Go or Rust), or runs as a **router** (`gozenohd`)
+> directly to other peers (Go or Rust), or runs as a **router** (`tzd`)
 > that Rust and Go clients and peers attach to — found by multicast scouting —
-> and that joins router meshes with other gozenohd and `zenohd` routers.
+> and that joins router meshes with other tzd and `zenohd` routers.
 > Pub/sub, queries/queryables and liveliness interoperate with the official
 > Rust stack in every direction, over TCP, UDP, TLS (incl. mutual TLS), QUIC,
 > WebSocket, Unix sockets and **serial lines** (zenoh's COBS/CRC framing, as
@@ -65,17 +65,17 @@ defer sc.Stop()
 A pure-Go router, standing in for `zenohd` (also builds with TinyGo):
 
 ```bash
-go run ./cmd/gozenohd                     # listens on tcp/0.0.0.0:7447, answers scouting
-go run ./cmd/gozenohd -l tcp/0.0.0.0:7447 -i 1234abcd --no-multicast-scouting
-go run ./cmd/gozenohd -l tcp/0.0.0.0:7449 -e tcp/10.0.0.5:7447   # join a zenohd mesh
-go run ./cmd/gozenohd -l udp/0.0.0.0:7447 -l tls/0.0.0.0:7448 --tls-cert srv.pem --tls-key srv.key
-go run ./cmd/gozenohd -c zenoh.json5      # a zenohd JSON5 config (see below)
-go run ./cmd/gozenohd --rest-http-port 8000 \
+go run ./cmd/tzd                     # listens on tcp/0.0.0.0:7447, answers scouting
+go run ./cmd/tzd -l tcp/0.0.0.0:7447 -i 1234abcd --no-multicast-scouting
+go run ./cmd/tzd -l tcp/0.0.0.0:7449 -e tcp/10.0.0.5:7447   # join a zenohd mesh
+go run ./cmd/tzd -l udp/0.0.0.0:7447 -l tls/0.0.0.0:7448 --tls-cert srv.pem --tls-key srv.key
+go run ./cmd/tzd -c zenoh.json5      # a zenohd JSON5 config (see below)
+go run ./cmd/tzd --rest-http-port 8000 \
    --cfg 'plugins/storage_manager/storages/demo:{key_expr:"demo/**",volume:"memory"}'
 curl -X PUT -d hello http://localhost:8000/demo/a && curl http://localhost:8000/demo/**
 ```
 
-gozenohd reads zenohd's configuration files (JSON5) and command line: `-c`,
+tzd reads zenohd's configuration files (JSON5) and command line: `-c`,
 `--cfg 'path/to/key:<json5>'` (and `--cfg ':<whole config>'`),
 `--rest-http-port`, `--no-timestamp`, `--adminspace-permissions`, with
 explicit flags winning over the file as in zenohd. Understood sections:
@@ -116,7 +116,7 @@ each key's latest value and `_time=[start..end]` the values in the range.
 declared as in zenoh (`plugins/storage_manager/volumes/<name>`, its
 `backend` defaulting to the name); other backends can be added from Go with
 `storage.RegisterBackend` (interfaces `storage.Volume` / `storage.Backend`).
-TinyGo builds of gozenohd have `memory` and `fs`. With
+TinyGo builds of tzd have `memory` and `fs`. With
 `adminspace/permissions/write` (`--adminspace-permissions rw`), the plugins'
 configuration can be changed while running, as with zenohd: PUT a JSON5
 value on `@/<zid>/router/config/plugins/<path>` (an array item by
@@ -152,7 +152,7 @@ A configuration with persistent storages:
 ```
 
 QUIC uses the same TLS settings; enable it with a blank import:
-`import _ "github.com/shabunin/tiny-zenoh-go/link/quic"` (gozenohd already does,
+`import _ "github.com/shabunin/tiny-zenoh-go/link/quic"` (tzd already does,
 `-l quic/0.0.0.0:7447 --tls-cert … --tls-key …`).
 
 TLS for a session — or put zenoh's keys in the locator itself
@@ -264,6 +264,78 @@ server side.
 or embedded: `zenoh.Open(zenoh.Config{Mode: zenoh.ModeRouter})` — the router
 session can publish, subscribe and serve queries itself.
 
+## Examples
+
+`examples/z_*` are Go versions of zenoh's own examples, with the same
+names, default key expressions, options and output. They work with each
+other, with zenoh-rust's examples (and the Python/C bindings), with `zenohd`
+and with `tzd`. Every one takes the common options:
+
+| Option | Meaning |
+|---|---|
+| `-m`, `--mode` | `peer` (default), `client` or `router` |
+| `-e`, `--connect` | an endpoint to connect to, e.g. `tcp/127.0.0.1:7447` (repeatable) |
+| `-l`, `--listen` | an endpoint to listen on, e.g. `tcp/0.0.0.0:7448` (repeatable) |
+| `--no-multicast-scouting` | don't look for others on 224.0.0.224:7446 |
+| `--enable-shm` | shared memory with same-host nodes (Linux; pub/sub, ping/pong, throughput, info) |
+
+| Example | What it does |
+|---|---|
+| `z_put`, `z_delete` | one put / delete on `demo/example/zenoh-go-put` |
+| `z_pub` | publishes `[   n] Pub from Go!` every second (`--add-matching-listener`) |
+| `z_sub` | prints everything on `demo/example/**` |
+| `z_get` | queries a selector (`-s`, `-p` payload, `-t` target, `-o` timeout ms) |
+| `z_queryable` | answers queries on `demo/example/zenoh-go-queryable` (`--complete`) |
+| `z_querier` | queries repeatedly through a declared querier |
+| `z_storage` | a minimal in-memory storage: subscriber + queryable |
+| `z_liveliness`, `z_get_liveliness`, `z_sub_liveliness` | declare / list / watch liveliness tokens (`--history`) |
+| `z_advanced_pub`, `z_advanced_sub` | publisher cache, history for late joiners, lost-sample recovery, miss reports |
+| `z_pub_shm` | publishes from a shared-memory buffer, sent by reference |
+| `z_ping`, `z_pong` | round-trip latency on `test/ping` / `test/pong` |
+| `z_pub_thr`, `z_sub_thr` | throughput on `test/thr` |
+| `z_info` | own ZID, the connected routers and peers, the transports |
+| `z_scout` | lists the routers and peers that answer multicast scouting |
+
+Peer to peer on one machine or LAN, nothing else running (they find each
+other by multicast scouting):
+
+```bash
+go run ./examples/z_sub                 # terminal 1
+go run ./examples/z_pub                 # terminal 2
+```
+
+Through a router: start one of the two, then point clients at it:
+
+```bash
+go run ./cmd/tzd                        # pure-Go router, or:
+docker run --rm --net host eclipse/zenoh       # zenohd
+go run ./examples/z_sub -m client -e tcp/127.0.0.1:7447
+go run ./examples/z_put -m client -e tcp/127.0.0.1:7447 -p hello
+```
+
+Queries, with a storage in tzd instead of `z_storage`:
+
+```bash
+go run ./cmd/tzd --cfg 'plugins/storage_manager/storages/demo:{key_expr:"demo/example/**",volume:"memory"}'
+go run ./examples/z_put -m client -e tcp/127.0.0.1:7447
+go run ./examples/z_get -m client -e tcp/127.0.0.1:7447 -s 'demo/example/**'
+```
+
+Latency and throughput between two peers, without scouting:
+
+```bash
+go run ./examples/z_pong --no-multicast-scouting -l tcp/127.0.0.1:7450
+go run ./examples/z_ping --no-multicast-scouting -e tcp/127.0.0.1:7450 64
+go run ./examples/z_sub_thr --no-multicast-scouting -l tcp/127.0.0.1:7451
+go run ./examples/z_pub_thr --no-multicast-scouting -e tcp/127.0.0.1:7451 8
+```
+
+On boards with TinyGo: `examples/tinyput` (client over Wi-Fi),
+`examples/tinypeer` (peer), `examples/tinyserial` (a client over the
+board's USB-UART, bridged by `tzd -l serial//dev/ttyUSB0#baudrate=115200`)
+are small starting points to copy; `examples/boardtest` is the full test
+firmware for the M5StickC and the Cardputer.
+
 ## What works today
 
 | Package          | Status | Notes |
@@ -274,9 +346,9 @@ session can publish, subscribe and serve queries itself.
 | `transport`      | ✅ | Unicast session over stream links (length-prefixed batches) or packet links (one batch per datagram, batch size capped at the link MTU), both sides of the handshake (`Open` and `Accept`, with duplicate/self rejection) + negotiation, stream framing, FRAME batching with SNs, FRAGMENT split/reassembly, keep-alive, lease expiry, CLOSE. **QoS** (INIT ext `QoS`/`QoSLink`, 8 priorities × reliable/best-effort SN channels, priority in FRAME/FRAGMENT); **compression** (INIT ext 0x6, batch header byte, own pure-Go LZ4 block codec in `internal/lz4`); **multilink** (`Config.MaxLinks`: INIT/OPEN ext 0x4 with zenoh's RSA-512 PKCS#1 key proof, one transport over several links with per-link batch size/compression/lease, zenoh-rust's link selection by reliability and priority range, link loss without session loss); **multicast** (`NewMulticast` over a `MulticastLink`: periodic `JOIN` with next SNs, per-sender SN windows and reassembly, sender leases, CLOSE); **low latency** (`Config.LowLatency`: INIT ext 0x5, every network message sent alone with no FRAME/SN/fragmentation, u32 LE length prefix on streams); **patch** (INIT ext 0x7: fragment start/drop markers); **transmission queues** (`Config.TxQueue`: per-link, per-priority bounded batch queues with writer goroutines, adaptive batching, congestion control Drop / Block / BlockFirst with zenoh's waits, drop FRAGMENT for messages abandoned midway, transport closed on a blocked link; TinyGo: synchronous unless `-tags zenoh_txqueue`). Imports no `net`. |
 | `link`           | ✅ TCP, UDP, UDP multicast, TLS, QUIC, WS, Unix, named pipes, vsock, serial | Locator parsing incl. `?metadata` / `#config`; TCP; UDP (MTU 65487 like zenoh on Linux, one listener socket demultiplexed per remote address); UDP multicast groups `udp/224.x.x.x:port#iface=<name>;ttl=<n>` (send socket bound to the interface, own datagrams filtered); TLS with zenoh's config keys (`root_ca_certificate`, `listen_*`/`connect_*` certificate & key as `_file`/`_base64`/`_raw`, `enable_mtls`, `verify_name_on_connect`); QUIC in `link/quic` (via `link.Register`; zenoh's variants chosen by ALPN from the locator metadata: single stream, multistream with a stream per priority (default), mixed reliability with best-effort traffic in QUIC datagrams `?mixed_rel=1`, datagrams only `?rel=0`); WebSocket `ws/host:port` (own minimal RFC 6455 code, one binary message per batch); Unix sockets `unixsock-stream/<path>` (flock'd `<path>.lock`, stale sockets replaced); named pipes `unixpipe/<path>` (zenoh's FIFO handshake: flock'd `<path>_uplink` request FIFO, DEADBEEF+suffix invitations, a dedicated FIFO pair per link, `#file_mask=`); VM sockets `vsock/<cid>:<port>` (Linux AF_VSOCK, `VMADDR_CID_*` names, host↔VM or `vsock_loopback`); serial `serial/<dev>#baudrate=N` (z-serial framing: COBS, CRC-32, I/A/R connect handshake, 1500-byte frames; Linux ttys opened raw with exclusive access; `link.NewSerial` wraps any byte stream, e.g. a TinyGo `machine.UART`). |
 | `tls13`          | ✅ client | TLS 1.3 client (RFC 8446) that builds with TinyGo, used by `link/tls13link`: X25519 key share, TLS_AES_128_GCM_SHA256 / TLS_AES_256_GCM_SHA384, own HKDF key schedule, record layer with concurrent Read/Write, KeyUpdate both ways (and before AES-GCM's record limit), alerts, close_notify; a minimal X.509 reader (names, validity, basicConstraints, key usage, extended key usage, unknown critical extensions rejected) and chain check against configured roots or a pinned certificate, SAN DNS (wildcards) / IP name check, validity skipped while a board's clock is unset; ECDSA P-256/P-384 verify and sign on own Montgomery field arithmetic (no allocations), RSA-PSS / PKCS #1 v1.5 via `crypto/rsa`, Ed25519; client certificates with PKCS #8, SEC 1 or PKCS #1 keys. |
-| `plugins`        | ✅ rest, storage (memory, fs, influxdb, influxdb2, s3) | `plugins/rest`: zenoh-plugin-rest over any session (`rest.Serve(s, ":8000")`, `rest.Handler(s)`), JSON samples with zenoh's payload-to-JSON rules. `plugins/storage`: zenoh-plugin-storage-manager's in-memory volume (`storage.NewMemory(s, storage.Config{KeyExpr: "demo/**"})`) with **replication** (`Config.Replication`: zenoh's digest/aligner protocol — XXH3 fingerprints of a log cut into intervals and sub-intervals, hot/warm/cold eras, bincode digests on `@-digest/<zid>/<config hash>`, alignment queries to `@zid/<zid>/<config hash>/aligner`, initial alignment of an empty replica). Backends `fs`, `influxdb`, `influxdb2`, `s3` (`storage.New(s, cfg, vol, params)`), data-compatible with zenoh-rust's; no `rocksdb`. Both in gozenohd. REST, InfluxDB and S3 are not in TinyGo builds. |
+| `plugins`        | ✅ rest, storage (memory, fs, influxdb, influxdb2, s3) | `plugins/rest`: zenoh-plugin-rest over any session (`rest.Serve(s, ":8000")`, `rest.Handler(s)`), JSON samples with zenoh's payload-to-JSON rules. `plugins/storage`: zenoh-plugin-storage-manager's in-memory volume (`storage.NewMemory(s, storage.Config{KeyExpr: "demo/**"})`) with **replication** (`Config.Replication`: zenoh's digest/aligner protocol — XXH3 fingerprints of a log cut into intervals and sub-intervals, hot/warm/cold eras, bincode digests on `@-digest/<zid>/<config hash>`, alignment queries to `@zid/<zid>/<config hash>/aligner`, initial alignment of an empty replica). Backends `fs`, `influxdb`, `influxdb2`, `s3` (`storage.New(s, cfg, vol, params)`), data-compatible with zenoh-rust's; no `rocksdb`. Both in tzd. REST, InfluxDB and S3 are not in TinyGo builds. |
 | `zext`           | ✅ | zenoh-ext **serialization** (`z_serialize` / `z_deserialize` format): fixed-width little-endian numbers incl. 128-bit, bool, LEB128 lengths, strings, bytes, sequences, maps, tuples as concatenation; `Serializer`/`Deserializer`, generic `WriteSlice`/`ReadMap`..., `Serialize(vals...)`/`Deserialize(b, ptrs...)` without reflection (TinyGo), `Marshaler`/`Unmarshaler` for structs. |
-| `shm`            | ✅ Linux | zenoh's POSIX shared memory, layout-compatible with zenoh-rust 1.x (SHM protocol v2): `/dev/shm/<id>.zenoh` metadata/data/auth segments, INIT/OPEN negotiation (challenges read from each other's auth segment), per-priority handoff counters, watchdog confirmation (50 ms) and validation (100 ms), refcounts and generations, garbage collection, orphan-segment cleanup. Enabled with `Config.SharedMemory` (`gozenohd --shm`): payloads ≥ 3 KiB to SHM-capable faces go through a 16 MiB pool; buffers the application allocates itself (`Session.ShmProvider().Alloc`, published with `WithShmBuf` from puts, publishers and replies) go by reference, without a copy, whatever their size; received SHM payloads are copied out. Stub returning `ErrUnsupported` elsewhere and on TinyGo. |
+| `shm`            | ✅ Linux | zenoh's POSIX shared memory, layout-compatible with zenoh-rust 1.x (SHM protocol v2): `/dev/shm/<id>.zenoh` metadata/data/auth segments, INIT/OPEN negotiation (challenges read from each other's auth segment), per-priority handoff counters, watchdog confirmation (50 ms) and validation (100 ms), refcounts and generations, garbage collection, orphan-segment cleanup. Enabled with `Config.SharedMemory` (`tzd --shm`): payloads ≥ 3 KiB to SHM-capable faces go through a 16 MiB pool; buffers the application allocates itself (`Session.ShmProvider().Alloc`, published with `WithShmBuf` from puts, publishers and replies) go by reference, without a copy, whatever their size; received SHM payloads are copied out. Stub returning `ErrUnsupported` elsewhere and on TinyGo. |
 | `zenoh`          | ✅ client + peer + router | Router mode (router meshes: link-state gossip, network graph, shortest-path trees, sourced declarations, multi-hop data/query routing; data/query forwarding, INTEREST answering with aggregated declarations kept up to date, incl. *aggregate* interests); client mode; peer mode (listeners, reconnecting connectors, multicast scouting + autoconnect, gossip scouting (peers that know only some of the others get linked to all; `Gossip`, with `Multihop` relaying link states across any number of hops), declaration push between peers, writer-side filtering, peers attached to routers); **regions** (zenoh 1.10: every node sorted into its north region or a south subregion it is the gateway of; routers gossip with their peers and don't relay inside a peer region; peers are gateways of their clients; custom subregions by role/ZID/interface/announced `RegionName` with `Gateway.South`, so a peer can be the gateway of a group of peers and a router the gateway of router subregions, each its own link-state mesh; one forwarding gateway per peer or router subregion when several serve it); `Scout`; `Session`, `Put`/`Delete`, `Publisher` (declared key-expr ids), `Subscriber` (callback or channel), `Get` with targets/consolidation/timeout/payload/attachment, `Querier` (declared queries with fixed target/consolidation/timeout; undeclare drops its running queries), **query cancellation** (`CancellationToken` + `WithCancellation` on gets, querier gets and liveliness gets, as zenoh's unstable API: local, stops replies, waits for running callbacks), matching status and matching listeners on publishers and queriers, **advanced pub/sub** (zenoh-ext compatible: `DeclareAdvancedPublisher` with cache, sequence numbers + heartbeats for miss detection, publisher detection; `DeclareAdvancedSubscriber` with history incl. late-joining publishers (`_max`, `_time` limits), in-order delivery, recovery of lost samples by gap queries / periodic queries / heartbeats, miss listeners, subscriber detection), `_anyke` replies, `_time` ranges (`ParseTimeRange`), source info on samples, `Queryable` (reply, reply-delete, reply-err, detach), liveliness tokens/subscribers (with history)/get, encodings, attachments, HLC timestamps, local delivery inside one session; **namespaces** (`Config.Namespace`: every key the session is given goes under `<ns>/`, every key it gives back loses it, traffic outside it is dropped; the admin space stays outside); **locality** (`WithAllowedOrigin` on subscribers and queryables, `WithAllowedDestination` on puts, publishers, gets and queriers: same session only, remote only, or both; session-local entities are not declared, matching status follows the destination); priorities on the wire (QoS on by default, `DisableQoS`), `Compression`, `MaxLinks` (redialed links rejoin the live transport), multicast groups in `Listen` (publications go to the group, group data reaches local subscribers); handshake authentication (`Auth`: user/password, RSA public keys); access control (`ACL`: zenoh's rules/subjects/policies, ingress and egress); **interceptors** (zenoh's `downsampling`, `low_pass_filter` and `qos/network` sections as `Downsampling`, `LowPassFilter`, `QoSOverwrite`: per-rule rate limits, size limits on payload + attachment, priority / congestion control / express overwrite filtered by key, QoS and payload size; per face by interface, link protocol and ZID, ingress and/or egress) and **timestamping** (`Timestamping`: routers stamp PUTs that cross them, future timestamps replaced or dropped); **admin space** (`AdminSpace`, on by default in router mode: `@/<zid>/<mode>` with zid/version/`Metadata`/locators/sessions (links, region, router-link weights), `/metrics` (OpenMetrics, gzip), `/linkstate/<region>` (Graphviz graphs of every mesh and peer region), `/subscriber`, `/queryable`, `/token`, `/publisher`, `/querier` `/<key>` (who declared what), `/route/successor/src/<zid>/dst/<zid>`; config writes on `/config/plugins/**` with `AdminSpace.Write` and `OnConfig`, as zenoh-rust; and in every session the session-local `@/<zid>/session/transport/unicast/<zid>[/link/<id>]` with PUT/DELETE events as transports and links come and go, also queryable through its `@adv/…` form for advanced subscribers); **connectivity** (`Transports()` incl. multicast group members, `Links()`, and zenoh's transport / link events listeners: `DeclareTransportEventsListener`, `DeclareLinkEventsListener` with `WithHistory` and `WithLinkTransport`, opened/closed as PUT/DELETE, links withdrawn before their transport; linked in only when used); **traffic statistics** (zenohd's `stats` feature: per-link bytes / transport / network messages, per-transport payload and dropped-payload histograms, per-key filters; `Stats()`, `Metrics()`, `/metrics` with zenohd's metric names and labels, `?_stats=true` admin JSON; TinyGo: `-tags zenoh_stats`); **congestion control** (`CongestionDrop` / `CongestionBlock` / `CongestionBlockFirst` applied by the transmission queues, `Config.TxQueue`). |
 
 ### Verified interop
@@ -305,20 +377,20 @@ session can publish, subscribe and serve queries itself.
 - **REST plugin**: same requests answered identically by zenohd's REST
   plugin and `plugins/rest` (JSON, HTML, `_raw`, SSE, PUT/DELETE, errors).
 - **Go peer attached to zenohd** alongside clients: data, queries, liveliness.
-- **gozenohd routing for Rust**: the whole interop + cross suite passes with
+- **tzd routing for Rust**: the whole interop + cross suite passes with
   `ZENOH_ROUTER=go` (an in-process Go router instead of zenohd), plus
   Rust↔Rust tests where Go only routes — a Rust *declared publisher* and
   *querier* (which send nothing until the router answers their INTERESTs),
   liveliness, Rust peers and Go clients on one router, and Rust clients
-  finding gozenohd by multicast scouting. A TinyGo-built gozenohd routes
+  finding tzd by multicast scouting. A TinyGo-built tzd routes
   between Rust clients too.
-- **Router meshes**: gozenohd ↔ gozenohd (direct and in a chain, where the
-  middle router forwards for the others) and gozenohd ↔ zenohd, plus
-  zenohd ↔ gozenohd ↔ zenohd, where two zenohd routers that don't know each
+- **Router meshes**: tzd ↔ tzd (direct and in a chain, where the
+  middle router forwards for the others) and tzd ↔ zenohd, plus
+  zenohd ↔ tzd ↔ zenohd, where two zenohd routers that don't know each
   other exchange pub/sub, queries and liveliness only through the Go router
-  (also checked with the TinyGo-built gozenohd and Rust clients).
+  (also checked with the TinyGo-built tzd and Rust clients).
 - **zenoh-pico 1.10.2** (the official C implementation, driven by
-  `zenoh/testdata/zpico/zpico.c`): pico clients through gozenohd and through
+  `zenoh/testdata/zpico/zpico.c`): pico clients through tzd and through
   zenohd with Go clients on the other side, both ways: put/delete with
   encoding and attachment, declared publishers, 3000-byte payloads
   fragmented over pico's 2048-byte batches, `get` with payload, error
@@ -326,12 +398,12 @@ session can publish, subscribe and serve queries itself.
   echo), liveliness tokens/subscribers with history/get. Go peers ↔ pico
   peers over TCP without a router (either side listening), and on a UDP
   multicast group (JOIN transport, fragmented payloads); pico clients
-  finding gozenohd by multicast scouting.
+  finding tzd by multicast scouting.
 - **UDP, TLS, QUIC, WebSocket and Unix-socket links**: Rust clients ↔ Go router, Go clients ↔ Rust router,
   Go peer ↔ Rust peer (each side dialing), Go ↔ Go including 300 KB
   fragmented payloads over UDP, mutual TLS, untrusted servers rejected;
-  gozenohd routing between a Rust TLS client and a Rust UDP client, and a
-  Rust QUIC client on gozenohd receiving from a Rust client on zenohd via
+  tzd routing between a Rust TLS client and a Rust UDP client, and a
+  Rust QUIC client on tzd receiving from a Rust client on zenohd via
   the router mesh.
 - **Multihop gossip**: in a chain A–B–C–D where only A connects to
   peers it learns about, and nobody can dial C, A finds D only through link
@@ -372,7 +444,7 @@ session can publish, subscribe and serve queries itself.
   both ways in each case. Rust clients reach Rust peers and each other through a Go
   peer, and through a Go peer that sits under a router (client
   publishers and queriers need the router's subscribers and queryables
-  relayed). Rust peers announcing names are sorted by `gozenohd -gateway`.
+  relayed). Rust peers announcing names are sorted by `tzd -gateway`.
   Router subregions work both ways: Go routers named `cell` form a mesh
   south of a Rust gateway router (they see it as a mesh router with "you
   are south of me", and the north router never sees them), and Rust
@@ -392,7 +464,7 @@ session can publish, subscribe and serve queries itself.
   Go ↔ Go too, and SHM stays off unless both sides enable it.
 - **QoS, compression, multilink, multicast** (zenoh-rust 1.10 via the Python
   binding): priorities set in Go arrive in Rust and vice versa through zenohd
-  and through gozenohd; a Rust peer with `transport/unicast/compression/
+  and through tzd; a Rust peer with `transport/unicast/compression/
   enabled` exchanges 100 KB payloads with a Go peer, compressed both ways (Rust's
   `lz4_flex` reads our blocks and we read its); a Rust peer with
   `transport/unicast/max_links: 2` dials a Go peer's TCP and UDP locators and
@@ -405,7 +477,7 @@ session can publish, subscribe and serve queries itself.
   the direct link, as peers do not route for each other); Go peers keep
   gossiping to zenohd without disturbing it.
 - **Authentication and access control**: Rust clients authenticate to a Go
-  peer and to gozenohd with user/password (wrong password and missing
+  peer and to tzd with user/password (wrong password and missing
   credentials refused), and with RSA keys (unknown key refused); a Go client
   authenticates to a Rust peer reading a zenoh `dictionary_file`. One
   `access_control` config with per-user rules (ingress puts, egress deny
@@ -435,7 +507,7 @@ session can publish, subscribe and serve queries itself.
   router carry zenoh sessions dialed with it, including 500 KB payloads.
 - **Microcontrollers** (TinyGo 0.44): an M5StickC (ESP32) running
   `examples/tinyserial` over its USB-UART reaches a Rust client through
-  `gozenohd -l serial//dev/ttyUSB1#baudrate=115200 -e tcp/<zenohd>` (counter
+  `tzd -l serial//dev/ttyUSB1#baudrate=115200 -e tcp/<zenohd>` (counter
   publications, queries answered by the device, LED driven by puts); an
   M5Stack Cardputer (ESP32-S3) on Wi-Fi connects to `zenohd` directly over
   TCP. Serial framing matches z-serial's byte vectors.
@@ -445,12 +517,12 @@ session can publish, subscribe and serve queries itself.
   an advanced publisher serving a late zenoh-ext subscriber its history and
   heartbeat, an advanced subscriber fetching a Rust publisher's history, and
   liveliness tokens, gets and subscribers both ways. The M5StickC runs it over
-  serial with LZ4 and user/password authentication (through `gozenohd`), using
+  serial with LZ4 and user/password authentication (through `tzd`), using
   about 93 KB of its 176 KB heap. The Cardputer runs it over Wi-Fi three
-  times: against zenohd, against `gozenohd` with LZ4 and user/password, and
+  times: against zenohd, against `tzd` with LZ4 and user/password, and
   with the low-latency transport. It uses about 170–195 KB of its 303 KB heap
   after a GC. Over TLS 1.3 (`tls13`) it passes against zenohd/rustls, and
-  against `gozenohd` with mutual TLS, each on its own boot. Five sessions in a
+  against `tzd` with mutual TLS, each on its own boot. Five sessions in a
   row can run out of memory, for two reasons:
   - lneto v0.4.0, the Wi-Fi TCP/IP stack, keeps closed connections and their
     5 KB of buffers reachable from its port table.
@@ -537,7 +609,7 @@ go run ./examples/zprobe                        # hex-dump a raw handshake
       (initial interest), reconnection.
 - [x] **M6b — Router.** Pure-Go router for clients and peers: forwarding,
       interest answering/propagation, query routing with finals and timeouts,
-      admin space, `cmd/gozenohd`.
+      admin space, `cmd/tzd`.
 - [x] **M6c — Router meshes.** Router-to-router link-state (OAM gossip,
       network graph, shortest-path trees with zenoh's SipHash edge weights),
       sourced declarations, multi-hop routing, interoperating with zenohd.
@@ -598,7 +670,7 @@ tiny-zenoh-go/
 │                     #   fs/, influxdb/ (v1, v2), s3/ backends, storagetest/)
 ├── internal/json5/   # JSON5 → JSON for zenoh config files
 ├── internal/xxh3/    # XXH3-64 (storage replication fingerprints)
-├── cmd/gozenohd/      # pure-Go router
+├── cmd/tzd/      # pure-Go router
 └── examples/         # zprobe, tinycheck, tinyput, tinypeer, tinyserial,
                       # boardtest (device test agent, Rust harness, StickC/Cardputer firmware)
 ```
@@ -620,7 +692,7 @@ tiny-zenoh-go/
   same way, and a conflict closes the transport.
 - Since 1.10 a router no longer relays between two peers attached to it:
   they are in its south peer region and must link to each other, helped by
-  the router's single-hop gossip. Earlier gozenohd versions relayed, which
+  the router's single-hop gossip. Earlier tzd versions relayed, which
   doubled every sample between peers that were also linked directly.
 - With several gateways, zenoh-rust lets only the highest ZID among the
   gateways a peer is linked to forward that peer's traffic across.
@@ -851,7 +923,7 @@ tiny-zenoh-go/
   (right after `z_open`, it is: pico sends its interests), so the stock
   `z_put` example often fails; a pico liveliness get with two or more
   matching tokens gets the same replies re-sent by zenohd 1.10.2 until it
-  times out (gozenohd replies once); a pico *peer* attached to a router
+  times out (tzd replies once); a pico *peer* attached to a router
   exchanges nothing with the router's clients (pico clients do).
 
 - Storage replication is the storage manager's own protocol over plain

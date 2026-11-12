@@ -1,15 +1,15 @@
-// Command gozenohd is a pure-Go Zenoh router, a stand-in for zenohd.
+// Command tzd is a pure-Go Zenoh router, a stand-in for zenohd.
 //
-//	gozenohd                                  # listen on tcp/0.0.0.0:7447
-//	gozenohd -l tcp/0.0.0.0:7447 -l tcp/[::]:7448 -l udp/0.0.0.0:7447
-//	gozenohd --no-multicast-scouting
-//	gozenohd -l quic/0.0.0.0:7447 --tls-cert srv.pem --tls-key srv.key
-//	gozenohd -l tls/0.0.0.0:7447 --tls-cert srv.pem --tls-key srv.key [--tls-ca ca.pem --tls-mtls]
-//	gozenohd -e tcp/10.0.0.5:7447            # join another router (gozenohd or zenohd)
-//	gozenohd -c zenoh.json5                  # zenoh JSON5 config: listen, connect, scouting, downsampling, qos, ...
-//	gozenohd --rest-http-port 8000           # REST API (plugins/rest)
-//	gozenohd --cfg 'plugins/storage_manager/storages/demo:{key_expr:"demo/**",volume:"memory"}'
-//	gozenohd --cfg 'plugins/storage_manager/volumes/fs:{}' \
+//	tzd                                  # listen on tcp/0.0.0.0:7447
+//	tzd -l tcp/0.0.0.0:7447 -l tcp/[::]:7448 -l udp/0.0.0.0:7447
+//	tzd --no-multicast-scouting
+//	tzd -l quic/0.0.0.0:7447 --tls-cert srv.pem --tls-key srv.key
+//	tzd -l tls/0.0.0.0:7447 --tls-cert srv.pem --tls-key srv.key [--tls-ca ca.pem --tls-mtls]
+//	tzd -e tcp/10.0.0.5:7447             # join another router (tzd or zenohd)
+//	tzd -c zenoh.json5                   # zenoh JSON5 config: listen, connect, scouting, downsampling, qos, ...
+//	tzd --rest-http-port 8000            # REST API (plugins/rest)
+//	tzd --cfg 'plugins/storage_manager/storages/demo:{key_expr:"demo/**",volume:"memory"}'
+//	tzd --cfg 'plugins/storage_manager/volumes/fs:{}' \
 //	  --cfg 'plugins/storage_manager/storages/files:{key_expr:"files/**",strip_prefix:"files",volume:{id:"fs",dir:"files"}}'
 //
 // Clients and peers attach to it; it routes publications, queries and
@@ -91,19 +91,19 @@ func main() {
 	var err error
 	if *aclFile != "" {
 		if cfg.ACL, err = loadACL(*aclFile); err != nil {
-			fmt.Fprintln(os.Stderr, "gozenohd:", err)
+			fmt.Fprintln(os.Stderr, "tzd:", err)
 			os.Exit(2)
 		}
 	}
 	if *gatewayFile != "" {
 		if cfg.Gateway, err = loadGateway(*gatewayFile); err != nil {
-			fmt.Fprintln(os.Stderr, "gozenohd:", err)
+			fmt.Fprintln(os.Stderr, "tzd:", err)
 			os.Exit(2)
 		}
 	}
 	tree, err := configTree(*configFile, *restPort, cfgOverrides)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "gozenohd:", err)
+		fmt.Fprintln(os.Stderr, "tzd:", err)
 		os.Exit(2)
 	}
 	// Flags given explicitly win over the configuration, as in zenohd.
@@ -151,21 +151,21 @@ func main() {
 	case "r", "rw", "none":
 		insertPath(tree, "adminspace/permissions", map[string]any{"read": *adminPerms != "none", "write": *adminPerms == "rw"})
 	default:
-		fmt.Fprintln(os.Stderr, "gozenohd: --adminspace-permissions: r, rw or none")
+		fmt.Fprintln(os.Stderr, "tzd: --adminspace-permissions: r, rw or none")
 		os.Exit(2)
 	}
 	plugins, err := applyConfig(tree, &cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "gozenohd: config:", err)
+		fmt.Fprintln(os.Stderr, "tzd: config:", err)
 		os.Exit(2)
 	}
 	if err = pubkeyAuth(&cfg, *authKey, knownKeys); err != nil {
-		fmt.Fprintln(os.Stderr, "gozenohd:", err)
+		fmt.Fprintln(os.Stderr, "tzd:", err)
 		os.Exit(2)
 	}
 	if *id != "" {
 		if cfg.ZID, err = parseZIDHex(*id); err != nil {
-			fmt.Fprintln(os.Stderr, "gozenohd: bad -i:", err)
+			fmt.Fprintln(os.Stderr, "tzd: bad -i:", err)
 			os.Exit(2)
 		}
 	}
@@ -175,14 +175,14 @@ func main() {
 	cfg.AdminSpace.OnConfigError = func(key string, err error) { warnf("config %s: %v", key, err) }
 	r, err := zenoh.Open(cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "gozenohd:", err)
+		fmt.Fprintln(os.Stderr, "tzd:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("gozenohd %s listening on %s\n", r.ZID(), strings.Join(r.Locators(), " "))
+	fmt.Printf("tzd %s listening on %s\n", r.ZID(), strings.Join(r.Locators(), " "))
 	stopPlugins := runner.stop
 	err = runner.start(r, plugins)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "gozenohd:", err)
+		fmt.Fprintln(os.Stderr, "tzd:", err)
 		_ = r.Close()
 		os.Exit(1)
 	}
