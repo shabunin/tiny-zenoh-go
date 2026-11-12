@@ -149,13 +149,18 @@ once for 5–6 s.
 | 100 zenohd | 12 MiB | 512 B/s | 0 | 4.2 s | 3 | 1 token missing |
 | 100 mixed | 18 MiB | 400 B/s | 0 | 6.4 s | 1 | complete |
 | 60 mixed, random | 17 MiB | 381 B/s | 1.5 s | 3.9 s | 1 | 2 tokens missing |
+| 225 tzd (15x15), cut 8 s | 16 MiB | 256 B/s | 1.5 s | 7.4 s, 8.3 s (2 runs) | 0 | complete |
 
 (Flows never back: still nothing 20 s after the restore; zenohd's flows
 and tokens come back later or not before the agents end.) The hosts are Go
 clients (zlab), which matters where the centre router is their own: h3
 reconnects (see below).
 
-The scale runs found three bugs, all fixed:
+(RSS includes the mapped binary, about 9 MiB for tzd and 10 MiB for
+zenohd, shared between the containers; see the memory section below. The
+225-router row is after the fixes below; the others before the last two.)
+
+The scale runs found five bugs, all fixed:
 
 - a client whose router went away for longer than the lease shut its
   session down instead of reconnecting (zenoh-rust clients reconnect);
@@ -166,18 +171,50 @@ The scale runs found three bugs, all fixed:
   container). The trees now cost 15–30x less (adjacency built once per
   computation) and are recomputed 100 ms after a change, once per burst,
   as zenoh-rust does; 100 routers came back in 20.9 s before, 6.0 s now;
-- in mixed meshes the burst left up to 478k duplicates (now 3.8k).
+- in mixed meshes the burst left up to 478k duplicates (now 3.8k);
+- a 15x15 grid never settled and froze the VM: handling a link state
+  cost O(N^2) (nodes looked up by scanning all of them, for every link of
+  every state, stale duplicates included, and each of those rescheduled
+  the trees), and each tree's next hops cost O(N^2) more. The routers fell
+  behind, leases expired, the churn fed itself (load past 1000) and memory
+  ran out. Now nodes are indexed, stale lists are dropped at once, next
+  hops take O(N) per tree: one update at 225 routers 0.83 ms -> 25 us, the
+  144-router lab forms at load 5 instead of 115 (zenohd: 47);
+- every router that left the mesh and came back took a new slot in the
+  link-state graph, so the trees (N x N) grew with every mass reconnect:
+  60 MiB of heap on the 225-grid's centre after three. Slots are reused
+  (as zenoh-rust's StableGraph does); two runs in a row now leave the
+  routers at 16 MiB.
 
 In a mixed mesh (as with zenohd alone), a flow sometimes stays broken
 after every link was cut and restored: 0 to 4 of 64 in repeated runs,
 never with tzd alone. Not tracked down yet.
 
-What the lab host takes: a 4-core VM with 16 GB ran 100 routers and 10
-hosts in 4.7 GB (tzd) or 3.3 GB (zenohd), deploying in 25 s; the routers
-idle at about 0.1% CPU each, and the traffic above keeps 2 of its 4
-cores busy. A 15x15 grid of tzd (225 routers, 10 hosts) deployed in 87 s
-but took all 16 GB (285 MiB left) and the VM stopped responding: memory
-per node grows with the mesh (every router holds the whole link-state
-graph and a tree per router), so on this host about 150 tzd or 200
-zenohd routers is the limit; beyond that use a bigger host or several
-hosts (containerlab can span them with vxlan links).
+What the lab host takes: a 4-core VM with 16 GB runs 225 tzd routers and
+10 hosts in about 3 GB, deploying in 90 s; idle, the routers take 0.1% CPU
+each, and the traffic above keeps 3 of the 4 cores busy. Memory per node
+is nearly flat with the mesh size (below), so RAM would allow well over
+500; CPU while a mesh forms and the deploy time (containerlab creates
+about 3 nodes per second) set the practical limit first. `run.sh up`
+starts a watchdog that kills the lab when the host's available memory
+drops below `GUARD_MIB` (default 2000).
+
+**Memory, tzd vs zenohd** (idle grids, per router; anon = the process's
+own memory, what each router really costs; host = the host's memory taken
+by the whole lab per router, kernel and the 8 host agents included):
+
+| routers | tzd anon | zenohd anon | tzd host | zenohd host |
+|---|---|---|---|---|
+| 25 | 3.3 MiB | 1.2 MiB | 10.0 MiB | 8.1 MiB |
+| 49 | 5.3 MiB | 1.5 MiB | 11.2 MiB | 7.0 MiB |
+| 100 | 6.7 MiB | 2.0 MiB | 12.6 MiB | 7.6 MiB |
+| 144 | 6.7 MiB | 2.5 MiB | 12.9 MiB | 7.7 MiB |
+| 225 | 7.3 MiB | | 13.0 MiB | |
+
+A tzd router costs about 5 MiB more than a zenohd one, and that is the Go
+runtime rather than tzd's state: on 144 routers the live heap is 2–4 MiB
+(the link-state graph and trees under 0.5 MiB), and the rest is the GC's
+4 MiB minimum heap target with freed heap the runtime keeps a while, GC
+metadata and goroutine stacks. A lone idle tzd takes 1.5 MiB. `docker
+kill -s USR2` on a tzd container prints its Go memory figures and writes
+a heap profile (`/tmp/tzd-heap-1.pprof`, for `go tool pprof`).

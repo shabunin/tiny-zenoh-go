@@ -19,7 +19,9 @@ as it does those in `topos/`.
 | `rnd60-mixed` | 60 routers on a random connected graph (seed 7, average degree 3), alternating; h3 on the busiest router (r46, 10 links) | `scale` |
 
 All routers use a 2 s lease and no multicast; nodes have no management
-network, only the lab links.
+network, only the lab links, and do not restart with the host. While a lab
+is up, a watchdog kills it if the host runs low on memory (`GUARD_MIB`,
+default 2000).
 
 ## Running one
 
@@ -73,6 +75,9 @@ sudo ip netns exec "$(ns r1)" tc qdisc del dev eth1 root
 # seems stuck).
 docker logs "$(ns r1)"
 docker kill -s USR1 "$(ns r1)" && docker logs "$(ns r1)" 2>&1 | tail -100
+# ... and on SIGUSR2 prints its Go memory figures and writes a heap profile.
+docker kill -s USR2 "$(ns r1)" && docker logs "$(ns r1)" 2>&1 | grep '^mem:' | tail -1
+docker cp "$(ns r1)":/tmp/tzd-heap-1.pprof . && go tool pprof -top tzd-heap-1.pprof
 
 # Memory and CPU of everything.
 docker stats --no-stream | grep "clab-$LAB-"

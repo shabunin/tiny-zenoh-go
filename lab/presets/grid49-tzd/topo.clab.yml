@@ -1,5 +1,7 @@
 name: grid49-tzd
 topology:
+  defaults:
+    restart-policy: "no"
   nodes:
     r1:
       kind: linux

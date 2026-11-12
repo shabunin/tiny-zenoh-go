@@ -1,5 +1,7 @@
 name: line3-netem-mixed
 topology:
+  defaults:
+    restart-policy: "no"
   nodes:
     r1:
       kind: linux

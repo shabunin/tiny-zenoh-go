@@ -1,5 +1,7 @@
 name: rnd60-mixed
 topology:
+  defaults:
+    restart-policy: "no"
   nodes:
     r1:
       kind: linux

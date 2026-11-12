@@ -1,5 +1,7 @@
 name: ring8-storage-mixed
 topology:
+  defaults:
+    restart-policy: "no"
   nodes:
     r1:
       kind: linux
