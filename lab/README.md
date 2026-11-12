@@ -60,8 +60,8 @@ alone.
 | routers | data back after heal | liveliness | storages after heal |
 |---|---|---|---|
 | tzd ×4 | 1.3 s, 0.0 s | delete 2.2 s after the split, put 1.3 s after heal | converged (x = from-c2) |
-| zenohd ×4 | 1.6 s, 3.4 s (+21 lost after) | same, put 1.5 s / 3.4 s after heal | converged |
-| tzd, tzd, zenohd, zenohd | 1.4 s, 3.4 s | same | converged |
+| zenohd ×4 | 1.5 s, 3.5 s (+21 lost after) | same, put 1.5 s / 3.4 s after heal | converged |
+| tzd, tzd, zenohd, zenohd | 1.2 s, 3.5 s | same | converged |
 
 During the split each half reads only its own writes; after the heal both
 storages hold every write and agree on the later `x`, and they still do
