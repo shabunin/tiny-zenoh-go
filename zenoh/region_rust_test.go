@@ -144,19 +144,23 @@ func TestRegionsGoPeerGatewayRust(t *testing.T) {
 			sub := startRust(t, jsonConf(peer(subName)), true, "sub", key, "3")
 			waitFor(t, "subscriber attached", func() bool { return len(g.PeersZID()) == 1 })
 			startRust(t, jsonConf(peer(pubName)), false, "publisher", key, "3")
+			// Checked while both are attached: either leaves once done.
+			south := func() (n int) {
+				g.mu.Lock()
+				defer g.mu.Unlock()
+				for _, f := range g.faces {
+					if f.region.South && f.regionName == "cell" {
+						n++
+					}
+				}
+				return n
+			}
+			waitFor(t, "a face in the cell subregion", func() bool { return len(g.PeersZID()) == 2 && south() == 1 })
+			if n := south(); n != 1 {
+				t.Fatalf("%d faces in the cell subregion", n)
+			}
 			if got := rustSamples(t, sub, 3); got[0] != "pub-0" || got[2] != "pub-2" {
 				t.Fatalf("got %v", got)
-			}
-			var south int
-			g.mu.Lock()
-			for _, f := range g.faces {
-				if f.region.South && f.regionName == "cell" {
-					south++
-				}
-			}
-			g.mu.Unlock()
-			if south != 1 {
-				t.Fatalf("%d faces in the cell subregion", south)
 			}
 		})
 	}
