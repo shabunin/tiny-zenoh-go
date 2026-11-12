@@ -215,6 +215,11 @@ type lsTree struct {
 	parent     int   // -1: none
 	children   []int // nodes whose path to the root goes through us
 	directions []int // per destination: our next hop toward it on this tree, -1 if none
+	// root and kids are the zkeys of the root and children when computed:
+	// node slots are reused, so indices alone do not say whether a child
+	// is new to a tree.
+	root string
+	kids []string
 }
 
 type lsNetwork struct {
@@ -272,10 +277,25 @@ func (n *lsNetwork) idxKey(k string) int {
 	return -1
 }
 
+// addNode puts nd in the first free slot (as zenoh-rust's StableGraph
+// does): otherwise every router that drops out of the mesh and comes back
+// takes a new one, and the trees, N x N, grew with each mass reconnect
+// (38 MB on a 225-router lab after three).
 func (n *lsNetwork) addNode(nd *lsNode) int {
-	n.nodes = append(n.nodes, nd)
-	n.byZID[zkey(nd.zid)] = len(n.nodes) - 1
-	return len(n.nodes) - 1
+	i := len(n.nodes)
+	for j := 1; j < len(n.nodes); j++ {
+		if n.nodes[j] == nil {
+			i = j
+			break
+		}
+	}
+	if i == len(n.nodes) {
+		n.nodes = append(n.nodes, nd)
+	} else {
+		n.nodes[i] = nd
+	}
+	n.byZID[zkey(nd.zid)] = i
+	return i
 }
 
 // dropNode removes node i from the graph.
@@ -833,6 +853,7 @@ func (n *lsNetwork) computeTrees() [][]int {
 		}
 		pred, order := sc.run(nn, r, adj)
 		t.parent = pred[0]
+		t.root = zkey(nd.zid)
 		// Our next hop toward d on this tree is the node right below us on
 		// the root's path to d, when we are on it: hop[d] = d if pred[d] is
 		// us, else hop[pred[d]]; settle order puts pred[d] first. Otherwise
@@ -844,6 +865,7 @@ func (n *lsNetwork) computeTrees() [][]int {
 			case p == 0:
 				hop[d] = d
 				t.children = append(t.children, d)
+				t.kids = append(t.kids, zkey(n.nodes[d].zid))
 			default:
 				hop[d] = hop[p]
 			}
@@ -856,11 +878,11 @@ func (n *lsNetwork) computeTrees() [][]int {
 				hop[d] = t.parent
 			}
 		}
-		for _, c := range t.children {
+		for k, c := range t.children {
 			isNew := true
-			if r < len(old) {
-				for _, oc := range old[r].children {
-					if oc == c {
+			if r < len(old) && old[r].root == t.root {
+				for _, ok := range old[r].kids {
+					if ok == t.kids[k] {
 						isNew = false
 						break
 					}

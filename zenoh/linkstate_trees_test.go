@@ -73,3 +73,44 @@ func TestComputeTreesDirections(t *testing.T) {
 		}
 	}
 }
+
+// TestNodeSlotsReused: routers that leave and come back reuse the graph's
+// slots, and a router in a reused slot is a new child for the trees (so
+// declarations are sent to it).
+func TestNodeSlotsReused(t *testing.T) {
+	zid := func(i int) ZID {
+		z, err := protocol.ParseZID(fmt.Sprintf("%04x", 0x1000+i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return z
+	}
+	self := zid(0)
+	n := newNetworkAs(self, protocol.Router)
+	join := func(i int) int {
+		k := n.addNode(&lsNode{zid: zid(i), whatami: protocol.Router, links: map[string]uint16{zkey(self): 0}})
+		n.nodes[0].links[zkey(zid(i))] = 0
+		return k
+	}
+	leave := func(k int) {
+		delete(n.nodes[0].links, zkey(n.nodes[k].zid))
+		n.dropNode(k)
+	}
+	a := join(1)
+	if nc := n.computeTrees(); len(nc[0]) != 1 || nc[0][0] != a {
+		t.Fatalf("first child: new children of our tree %v", nc[0])
+	}
+	for round := 2; round < 50; round++ {
+		leave(a)         // and another router takes its place before the trees are
+		b := join(round) // recomputed (they are 100 ms after a change)
+		if b != a {
+			t.Fatalf("round %d: slot %d, want the freed %d", round, b, a)
+		}
+		if nc := n.computeTrees(); len(nc[0]) != 1 || nc[0][0] != b {
+			t.Fatalf("round %d: a router in a reused slot is not a new child: %v", round, nc[0])
+		}
+	}
+	if len(n.nodes) != 2 {
+		t.Fatalf("%d node slots for 2 nodes", len(n.nodes))
+	}
+}

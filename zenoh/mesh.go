@@ -331,7 +331,8 @@ func (s *Session) meshOAM(f *face, m *protocol.OAM) {
 	removed, sends := mesh.net.linkStates(list, f)
 	s.queueLinkStates(sends, out)
 	s.meshRoutersGoneLocked(mesh, removed, out)
-	if len(mesh.net.changed) > 0 || len(removed) > 0 {
+	// Stale lists (the same states come over every link) change nothing.
+	if mesh.net.singlehop || len(mesh.net.changed) > 0 || len(removed) > 0 {
 		s.meshTreesChangedLocked(mesh, out)
 	}
 	s.mu.Unlock()
@@ -537,13 +538,7 @@ func (s *Session) meshTargetsLocked(m *meshState, k declKind, src int, key strin
 			if seen[r] {
 				continue
 			}
-			i := -1
-			for j, nd := range net.nodes {
-				if nd != nil && zkey(nd.zid) == r {
-					i = j
-					break
-				}
-			}
+			i := net.idxKey(r)
 			if i <= 0 || i >= len(dirs) || dirs[i] < 0 {
 				continue
 			}

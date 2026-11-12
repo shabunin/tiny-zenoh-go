@@ -169,7 +169,9 @@ for r, impl in zip(routers, impls):
     with open(os.path.join(d, "cfg", f"{r}.json5"), "w") as f:
         json.dump(cfg, f, indent=2)
 
-y = [f"name: {a.name}", "topology:", "  nodes:"]
+# No restart policy: after a crash or a reboot of the lab host, the nodes
+# stay down (a lab too big for the host would otherwise come back with it).
+y = [f"name: {a.name}", "topology:", "  defaults:", "    restart-policy: \"no\"", "  nodes:"]
 for r, impl in zip(routers, impls):
     y += [f"    {r}:", "      kind: linux", "      network-mode: none",
           f"      labels: {{impl: {impl}}}",

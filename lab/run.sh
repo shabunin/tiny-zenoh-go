@@ -22,6 +22,10 @@
 #
 # Results (the agents' JSON, an event log, a summary) go to
 # results/TOPO-SCENARIO.
+#
+# While a lab is up, a watchdog kills its containers if the host's
+# available memory drops below GUARD_MIB (default 2000); it logs to
+# /var/log/tzlab-guard.log.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -386,8 +390,12 @@ tx_total() {
 dstats() {
 	docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' |
 		grep "^clab-$LAB-" > "$OUT/stats-$1.txt"
-	for r in $ROUTERS; do echo "$r $(ns "$r")"; done |
-		xargs -P 8 -n 2 sh -c 'echo "$0 $(docker exec "$1" sh -c "grep VmRSS /proc/1/status" | awk "{print \$2}")"' > "$OUT/rss-$1.txt"
+	# the routers' RSS from /proc by their main pid (docker exec into each
+	# took over a minute with 225 busy routers)
+	docker inspect -f '{{.Name}} {{.State.Pid}}' $(docker ps -q --filter "name=clab-$LAB-r") |
+		while read -r n pid; do
+			echo "${n##*-} $(sudo -n awk '/VmRSS/{print $2}' "/proc/$pid/status")"
+		done | grep -E '^r[0-9]+ [0-9]+$' > "$OUT/rss-$1.txt"
 }
 
 scale() {
@@ -406,22 +414,27 @@ scale() {
 	sleep 10
 	tb=$(date +%s.%N); b=$(tx_total)
 	echo "$a $b $ta $tb $nl" > "$OUT/idle-tx"
+	local s0 x
+	s0=$(date +%s)
 	dstats idle
-	event "idle measured"
+	# Measuring takes a while on a big lab (docker stats of every container):
+	# the traffic lasts that much longer, so that it spans every phase.
+	x=$(( $(date +%s) - s0 + 2 ))
+	event "idle measured (in $((x - 2)) s)"
 	T0=$(date +%s.%N)
 	for h in $hs; do
-		agent "$h" alive -k "lab/alive/$h" -watch 'lab/alive/**' -d 78s > "$OUT/alive-$h.jsonl" &
-		agent "$h" sub -k 'lab/scale/**' -per-key -d 76s > "$OUT/sub-$h.json" &
+		agent "$h" alive -k "lab/alive/$h" -watch 'lab/alive/**' -d $((78 + x))s > "$OUT/alive-$h.jsonl" &
+		agent "$h" sub -k 'lab/scale/**' -per-key -d $((76 + x))s > "$OUT/sub-$h.json" &
 	done
 	sleep 3
-	event "pubs start: every host, 100/s each, for 70 s"
+	event "pubs start: every host, 100/s each, for $((70 + x)) s"
 	for h in $hs; do
-		agent "$h" pub -k "lab/scale/$h" -rate 100 -d 70s -linger 2s > "$OUT/pub-$h.json" &
+		agent "$h" pub -k "lab/scale/$h" -rate 100 -d $((70 + x))s -linger 2s > "$OUT/pub-$h.json" &
 	done
 	sleep 10
-	dstats busy
-	event "busy measured"
-	sleep 2
+	# measured meanwhile, so that a slow docker stats cannot shift the phases
+	event "measuring busy" && dstats busy &
+	sleep 12
 	local cv="" v
 	for v in $(links_of "$CENTRE"); do cv="$cv $v"; done
 	event "cut the centre router $CENTRE" && links_par "$cv" down
@@ -502,7 +515,8 @@ print(f"centre {centre} cut for {back-cut:.0f} s: flows not to or from it: {len(
       f"{max(cr) if cr else 0:.1f} s after the cut")
 mr = [r for r in mass_rec if r is not None]
 print(f"every router link cut for {mback-mass:.0f} s: all flows back at full rate "
-      f"{max(mr):.1f} s after restore (median {sorted(mr)[len(mr)//2]:.1f} s); "
+      f"{max(mr) if mr else float('nan'):.1f} s after restore "
+      f"(median {sorted(mr)[len(mr)//2] if mr else float('nan'):.1f} s); "
       f"{len(mass_rec)-len(mr)} flows never back")
 # Liveliness: the tokens each host sees 20 s after the mass cut was restored
 # (the agents end a few ms apart, so not at the very end), and when the last
@@ -527,12 +541,41 @@ print(f"liveliness: every host sees every token 20 s after the restore: {complet
 PY
 }
 
+# guard_start runs a watchdog for the lab: if the host's available memory
+# drops below GUARD_MIB (default 2000), it kills the lab's containers before
+# the host starts thrashing (a 225-router mesh once froze the 16 GB lab VM).
+# It ends with "down" or once the lab's containers are gone.
+guard_start() {
+	guard_stop
+	sudo -n setsid sh -c '
+		lab=$1 min=$2
+		echo $$ >/run/tzlab-guard-$lab.pid
+		sleep 5
+		while [ -n "$(docker ps -q --filter name=clab-$lab-)" ]; do
+			a=$(awk "/^MemAvailable/{print int(\$2/1024)}" /proc/meminfo)
+			if [ "$a" -lt "$min" ]; then
+				echo "$(date) MemAvailable $a MiB < $min MiB: killing lab $lab" >>/var/log/tzlab-guard.log
+				docker ps -q --filter name=clab-$lab- | xargs -r docker kill >/dev/null
+				break
+			fi
+			sleep 0.5
+		done
+		rm -f /run/tzlab-guard-$lab.pid' guard "$LAB" "${GUARD_MIB:-2000}" </dev/null >/dev/null 2>&1 &
+}
+
+guard_stop() {
+	local f=/run/tzlab-guard-$LAB.pid
+	[ -f "$f" ] && sudo -n kill "$(cat "$f")" 2>/dev/null
+	sudo -n rm -f "$f"
+}
+
 case "${1:-}" in
 image)
 	docker build -q -t tzlab:latest image
 	;;
 up)
 	load "$2"
+	guard_start
 	(cd "$TD" && sudo containerlab deploy -t topo.clab.yml --reconfigure >/dev/null)
 	addresses
 	echo "$LAB up: routers $ROUTERS ($IMPLS)"
@@ -540,13 +583,14 @@ up)
 down)
 	load "$2"
 	(cd "$TD" && sudo containerlab destroy -t topo.clab.yml --cleanup >/dev/null)
+	guard_stop
 	;;
 failover | partition | gateway | netem | scale)
 	load "$2"
 	"$1"
 	;;
 *)
-	sed -n '2,25p' "$0"
+	sed -n '2,28p' "$0"
 	exit 2
 	;;
 esac

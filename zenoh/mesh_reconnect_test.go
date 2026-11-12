@@ -157,7 +157,19 @@ func TestMeshMassReconnect(t *testing.T) {
 			_ = p.Put(buf)
 		}
 	}()
-	waitFor(t, "data across the grid", func() bool { mu.Lock(); defer mu.Unlock(); return len(arrivals) > 10 })
+	// The routers dial neighbours that may not listen yet, so the grid can
+	// take a few connector backoffs to form on a loaded machine.
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		mu.Lock()
+		n := len(arrivals)
+		mu.Unlock()
+		if n > 10 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timeout waiting for data across the grid")
+		}
+	}
 
 	for _, px := range proxies {
 		px.cut.Store(true)
