@@ -624,24 +624,27 @@ Separate processes on a Ryzen 7 8845HS laptop over loopback (noisy,
 
 | | zenoh-rust | tiny-zenoh-go |
 |---|---|---|
-| 8 B, peer → peer | ~1.6–3.1 M msg/s | ~1.35–1.6 M msg/s |
-| 1 KiB, peer → peer | ~1.3 M msg/s | ~0.75 M msg/s |
-| 64 KiB, peer → peer | ~38 k msg/s (2.5 GB/s) | ~31 k msg/s (2.0 GB/s) |
-| 8 B, client → router → client | ~1.9–2.3 M msg/s (zenohd) | ~0.76–0.86 M msg/s (tzd) |
-| 1 KiB, client → router → client | ~1.3 M msg/s (zenohd) | ~0.49 M msg/s (tzd) |
-| ping-pong 64 B, peer ↔ peer (median RTT) | ~75 µs | ~36 µs |
-| ping-pong 64 B, through a router | ~155 µs (zenohd) | ~100 µs (tzd) |
+| 8 B, peer → peer | ~1.6–3.1 M msg/s | ~1.9 M msg/s |
+| 1 KiB, peer → peer | ~1.3–1.4 M msg/s | ~0.97 M msg/s |
+| 64 KiB, peer → peer | ~28–38 k msg/s (1.8–2.5 GB/s) | ~27–31 k msg/s (1.8–2.0 GB/s) |
+| 8 B, client → router → client | ~1.9–2.3 M msg/s (zenohd) | ~1.2 M msg/s (tzd) |
+| 1 KiB, client → router → client | ~1.0–1.3 M msg/s (zenohd) | ~0.5 M msg/s (tzd) |
+| ping-pong 64 B, peer ↔ peer (median RTT) | ~75 µs | ~36–46 µs |
+| ping-pong 64 B, through a router | ~150 µs (zenohd) | ~100 µs (tzd) |
 
-Mixed pairs (Go publisher, Rust subscriber and the reverse; Go clients
-on zenohd, Rust clients on tzd) land between the two columns. Shared
-memory moves ~2.4 GB/s at 1 MiB.
+Mixed pairs land between the two columns, except that Go clients on
+zenohd go as fast as Rust ones (8 B: ~2.0 M msg/s). Shared memory moves
+~2.4 GB/s at 1 MiB.
 
 Like zenoh-rust, small messages are batched: a batch that is still
 filling waits up to `TxQueue.BatchingTimeLimit` (default 1 ms; in tzd
 `transport/link/tx/queue/batching`) while publishers keep adding to it,
-and express messages go out at once. Statistics are on by default and
-cost ~7% of small-message throughput (zenoh-rust release builds have
-none); `Config.Stats.Enabled` set to false turns them off.
+and express messages go out at once. Routes are cached per key
+expression and dropped all at once when routing state changes
+(`zenoh/routecache.go`); a forwarded message costs a router three
+allocations. Statistics are on by default and cost a few percent of
+small-message throughput (zenoh-rust release builds have none);
+`Config.Stats.Enabled` set to false turns them off.
 
 ## Roadmap
 
