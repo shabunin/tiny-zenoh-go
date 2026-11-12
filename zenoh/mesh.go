@@ -331,7 +331,9 @@ func (s *Session) meshOAM(f *face, m *protocol.OAM) {
 	removed, sends := mesh.net.linkStates(list, f)
 	s.queueLinkStates(sends, out)
 	s.meshRoutersGoneLocked(mesh, removed, out)
-	s.meshTreesChangedLocked(mesh, out)
+	if len(mesh.net.changed) > 0 || len(removed) > 0 {
+		s.meshTreesChangedLocked(mesh, out)
+	}
 	s.mu.Unlock()
 	out.send()
 }

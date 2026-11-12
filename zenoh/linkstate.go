@@ -2,7 +2,6 @@ package zenoh
 
 import (
 	"bytes"
-	"container/heap"
 	"errors"
 	"math"
 
@@ -220,6 +219,10 @@ type lsTree struct {
 
 type lsNetwork struct {
 	nodes []*lsNode // index = our psid; self is 0; nil = removed
+	// byZID indexes nodes by zkey (live ones only): a mesh of a few hundred
+	// routers looked nodes up by scanning them all, several times per link
+	// of every link state received, and fell behind while forming.
+	byZID map[string]int
 	links map[*face]*lsLink
 	trees []lsTree
 
@@ -245,7 +248,7 @@ func newNetwork(self ZID) *lsNetwork { return newNetworkAs(self, protocol.Router
 
 // newNetworkAs makes a link-state graph rooted at a node of role w.
 func newNetworkAs(self ZID, w WhatAmI) *lsNetwork {
-	n := &lsNetwork{links: map[*face]*lsLink{}}
+	n := &lsNetwork{links: map[*face]*lsLink{}, byZID: map[string]int{zkey(self): 0}}
 	n.nodes = []*lsNode{{zid: self, whatami: w, hasWAI: true, sn: 1, links: map[string]uint16{}}}
 	n.trees = []lsTree{{parent: -1, directions: []int{-1}}}
 	return n
@@ -255,26 +258,32 @@ func zkey(z ZID) string { return string(z.Bytes()) }
 
 // knows reports whether the node with zkey r is in the graph (other than us).
 func (n *lsNetwork) knows(r string) bool {
-	for i, nd := range n.nodes {
-		if i > 0 && nd != nil && zkey(nd.zid) == r {
-			return true
-		}
-	}
-	return false
+	i, ok := n.byZID[r]
+	return ok && i > 0
 }
 
-func (n *lsNetwork) idx(z ZID) int {
-	for i, nd := range n.nodes {
-		if nd != nil && nd.zid.Equal(z) {
-			return i
-		}
+func (n *lsNetwork) idx(z ZID) int { return n.idxKey(zkey(z)) }
+
+// idxKey is idx by zkey.
+func (n *lsNetwork) idxKey(k string) int {
+	if i, ok := n.byZID[k]; ok {
+		return i
 	}
 	return -1
 }
 
 func (n *lsNetwork) addNode(nd *lsNode) int {
 	n.nodes = append(n.nodes, nd)
+	n.byZID[zkey(nd.zid)] = len(n.nodes) - 1
 	return len(n.nodes) - 1
+}
+
+// dropNode removes node i from the graph.
+func (n *lsNetwork) dropNode(i int) {
+	if nd := n.nodes[i]; nd != nil {
+		delete(n.byZID, zkey(nd.zid))
+		n.nodes[i] = nil
+	}
 }
 
 func (n *lsNetwork) entry(i int, withZID, withLinks bool) linkState {
@@ -294,13 +303,7 @@ func (n *lsNetwork) entry(i int, withZID, withLinks bool) linkState {
 		var weights []uint16
 		custom := false
 		for z, w := range nd.links {
-			j := -1
-			for k, other := range n.nodes {
-				if other != nil && zkey(other.zid) == z {
-					j = k
-					break
-				}
-			}
+			j := n.idxKey(z)
 			if j < 0 {
 				continue
 			}
@@ -374,7 +377,7 @@ func (n *lsNetwork) removeLink(f *face) ([]ZID, []lsSend) {
 	if n.singlehop {
 		if !n.isNeighbour(f.zid) {
 			if i := n.idx(f.zid); i > 0 {
-				n.nodes[i] = nil
+				n.dropNode(i)
 			}
 		}
 		return nil, nil
@@ -401,10 +404,8 @@ func (n *lsNetwork) removeDetached() []ZID {
 		}
 		seen[i] = true
 		for z := range n.nodes[i].links {
-			for j, nd := range n.nodes {
-				if nd != nil && !seen[j] && zkey(nd.zid) == z {
-					stack = append(stack, j)
-				}
+			if j := n.idxKey(z); j >= 0 && !seen[j] {
+				stack = append(stack, j)
 			}
 		}
 	}
@@ -412,7 +413,7 @@ func (n *lsNetwork) removeDetached() []ZID {
 	for i, nd := range n.nodes {
 		if nd != nil && !seen[i] {
 			removed = append(removed, nd.zid)
-			n.nodes[i] = nil
+			n.dropNode(i)
 		}
 	}
 	return removed
@@ -486,18 +487,14 @@ func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
 			newNodes = append(newNodes, i)
 		}
 		for z := range st.links {
-			found := false
-			for _, nd := range n.nodes {
-				if nd != nil && zkey(nd.zid) == z {
-					found = true
-					break
-				}
-			}
-			if !found {
+			if n.idxKey(z) < 0 {
 				zz, _ := protocol.NewZID([]byte(z))
 				newNodes = append(newNodes, n.addNode(&lsNode{zid: zz, links: map[string]uint16{}}))
 			}
 		}
+	}
+	if len(newNodes) == 0 && len(updated) == 0 {
+		return nil, nil // all known already (the same states come over every link)
 	}
 	removed := n.removeDetached()
 	keep := func(i int) bool { return n.nodes[i] != nil }
@@ -722,80 +719,142 @@ type pqItem struct {
 	node int
 	dist float64
 }
+
+// pq is a binary min-heap on dist (container/heap boxed every item).
 type pq []pqItem
 
-func (p pq) Len() int           { return len(p) }
-func (p pq) Less(i, j int) bool { return p[i].dist < p[j].dist }
-func (p pq) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
-func (p *pq) Push(x any)        { *p = append(*p, x.(pqItem)) }
-func (p *pq) Pop() any          { o := *p; x := o[len(o)-1]; *p = o[:len(o)-1]; return x }
+func (p *pq) push(it pqItem) {
+	h := append(*p, it)
+	for i := len(h) - 1; i > 0; {
+		up := (i - 1) / 2
+		if h[up].dist <= h[i].dist {
+			break
+		}
+		h[up], h[i] = h[i], h[up]
+		i = up
+	}
+	*p = h
+}
+
+func (p *pq) pop() pqItem {
+	h := *p
+	top := h[0]
+	last := len(h) - 1
+	h[0] = h[last]
+	h = h[:last]
+	for i := 0; ; {
+		l, r, m := 2*i+1, 2*i+2, i
+		if l < len(h) && h[l].dist < h[m].dist {
+			m = l
+		}
+		if r < len(h) && h[r].dist < h[m].dist {
+			m = r
+		}
+		if m == i {
+			break
+		}
+		h[i], h[m] = h[m], h[i]
+		i = m
+	}
+	*p = h
+	return top
+}
 
 // shortestPaths returns the predecessor of every node on its shortest path
-// from root (-1 for the root and unreachable nodes), over adj.
+// from root (-1 for the root and unreachable nodes), over adj, and the
+// reachable nodes in the order they were settled (each after its
+// predecessor). dist, pred, order and h are scratch space, reused.
 func (n *lsNetwork) shortestPaths(root int, adj [][]lsEdge) []int {
-	dist := make([]float64, len(n.nodes))
-	pred := make([]int, len(n.nodes))
+	var sc spScratch
+	pred, _ := sc.run(len(n.nodes), root, adj)
+	return pred
+}
+
+type spScratch struct {
+	dist  []float64
+	pred  []int
+	order []int
+	h     pq
+}
+
+func (sc *spScratch) run(nn, root int, adj [][]lsEdge) (pred, order []int) {
+	if cap(sc.dist) < nn {
+		sc.dist, sc.pred = make([]float64, nn), make([]int, nn)
+	}
+	dist, pred := sc.dist[:nn], sc.pred[:nn]
 	for i := range dist {
 		dist[i], pred[i] = math.Inf(1), -1
 	}
+	order = sc.order[:0]
 	dist[root] = 0
-	h := &pq{{root, 0}}
-	for h.Len() > 0 {
-		it := heap.Pop(h).(pqItem)
+	h := append(sc.h[:0], pqItem{root, 0})
+	for len(h) > 0 {
+		it := h.pop()
 		if it.dist > dist[it.node] {
 			continue
 		}
+		order = append(order, it.node)
 		for _, e := range adj[it.node] {
 			d := it.dist + e.w
 			if d < dist[e.to] {
 				dist[e.to], pred[e.to] = d, it.node
-				heap.Push(h, pqItem{e.to, d})
+				h.push(pqItem{e.to, d})
 			}
 		}
 	}
-	return pred
+	sc.order, sc.h = order, h
+	return pred, order
 }
 
 // computeTrees rebuilds the per-root trees and returns, per root, the
 // children that are new compared with the previous trees.
 func (n *lsNetwork) computeTrees() [][]int {
 	old := n.trees
-	n.trees = make([]lsTree, len(n.nodes))
+	nn := len(n.nodes)
+	n.trees = make([]lsTree, nn)
 	adj := n.adjacency()
-	reach := n.shortestPaths(0, adj) // reachability from us
-	newChildren := make([][]int, len(n.nodes))
+	var sc spScratch
+	reach := make([]bool, nn) // reachable from us
+	_, order := sc.run(nn, 0, adj)
+	for _, i := range order {
+		reach[i] = true
+	}
+	newChildren := make([][]int, nn)
+	dirs := make([]int, nn*nn) // the trees' directions, one backing array
 	for r, nd := range n.nodes {
 		t := &n.trees[r]
 		t.parent = -1
-		t.directions = make([]int, len(n.nodes))
+		t.directions = dirs[r*nn : (r+1)*nn : (r+1)*nn]
 		for i := range t.directions {
 			t.directions[i] = -1
 		}
 		if nd == nil {
 			continue
 		}
-		pred := n.shortestPaths(r, adj)
+		pred, order := sc.run(nn, r, adj)
 		t.parent = pred[0]
-		for i, p := range pred {
-			if p == 0 {
-				t.children = append(t.children, i)
+		// Our next hop toward d on this tree is the node right below us on
+		// the root's path to d, when we are on it: hop[d] = d if pred[d] is
+		// us, else hop[pred[d]]; settle order puts pred[d] first. Otherwise
+		// it is our parent.
+		hop := t.directions // filled in place, then the -1s get the parent
+		for _, d := range order {
+			switch p := pred[d]; {
+			case p < 0:
+			case p == 0:
+				hop[d] = d
+				t.children = append(t.children, d)
+			default:
+				hop[d] = hop[p]
 			}
 		}
-		for d := range n.nodes {
-			if d == 0 || n.nodes[d] == nil || reach[d] < 0 {
-				continue
+		for d := range hop {
+			switch {
+			case d == 0 || n.nodes[d] == nil || !reach[d]:
+				hop[d] = -1
+			case hop[d] < 0:
+				hop[d] = t.parent
 			}
-			dir := -1
-			for cur := d; pred[cur] >= 0; cur = pred[cur] {
-				if pred[cur] == 0 {
-					dir = cur
-					break
-				}
-			}
-			if dir < 0 {
-				dir = t.parent
-			}
-			t.directions[d] = dir
 		}
 		for _, c := range t.children {
 			isNew := true
