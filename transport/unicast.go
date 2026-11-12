@@ -106,6 +106,16 @@ type Config struct {
 	// TxQueue configures the links' transmission queues and congestion
 	// control (zenoh-rust transport/link/tx/queue).
 	TxQueue TxQueue
+
+	// CloseLinger bounds the graceful close of stream links (TCP, TLS, unix
+	// sockets) when we close the transport: after our CLOSE, the link is
+	// half-closed and read (and discarded) until the peer closes its side,
+	// so that what is still on its way through the socket buffers reaches
+	// the peer. Closing outright would reset the connection as soon as the
+	// peer sent anything more (a keep-alive), losing it all. The wait also
+	// ends once the peer has been silent for half its lease. Default: the
+	// lease; negative: close outright.
+	CloseLinger time.Duration
 }
 
 func (c *Config) setDefaults() {
@@ -114,6 +124,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.KeepAliveDivisor <= 0 {
 		c.KeepAliveDivisor = 4
+	}
+	if c.CloseLinger == 0 {
+		c.CloseLinger = c.Lease
 	}
 	if c.BatchSize == 0 {
 		c.BatchSize = 65535
@@ -194,10 +207,13 @@ type tlink struct {
 
 	done      chan struct{}
 	closeOnce sync.Once
+	started   atomic.Bool   // its goroutines run
+	rxDone    chan struct{} // closed when the link's (main) reader returns
 }
 
 func newTLink(link Link, batch uint16) *tlink {
-	l := &tlink{link: link, prefix: streamPrefix, propose: batch, done: make(chan struct{})}
+	l := &tlink{link: link, prefix: streamPrefix, propose: batch, done: make(chan struct{}),
+		rxDone: make(chan struct{})}
 	rxSize := int(batch)
 	if pl, ok := link.(PacketLink); ok {
 		l.prefix = 0
@@ -227,19 +243,55 @@ func (l *tlink) close() {
 }
 
 // sendClose queues (or writes) CLOSE on l and waits, at most d, for what
-// is queued on l to be written, before l is closed.
-func (t *Unicast) sendClose(l *tlink, c *protocol.Close, d time.Duration) {
+// is queued on l to be written, before l is closed. It reports whether
+// everything, CLOSE included, was written.
+func (t *Unicast) sendClose(l *tlink, c *protocol.Close, d time.Duration) bool {
 	if l.txq == nil {
-		_ = t.writeTransport(l, c)
-		return
+		return t.writeTransport(l, c) == nil
 	}
 	deadline := time.Now().Add(d)
 	// What is queued goes first: CLOSE takes the Control queue, which the
 	// writers serve before the others, and the peer drops what follows it
 	// (zenoh-rust likewise drains its pipeline before closing).
 	l.txq.flush(d)
-	_, _ = l.txq.pushTransport(c, time.Until(deadline))
+	if _, err := l.txq.pushTransport(c, time.Until(deadline)); err != nil {
+		return false
+	}
 	l.txq.flush(time.Until(deadline))
+	return l.txq.drained()
+}
+
+// linger half-closes stream link l, whose CLOSE was written, and waits, at
+// most d, for the peer to close its side (see Config.CloseLinger). The
+// reader meanwhile discards what comes; keep-alives have stopped.
+func (t *Unicast) linger(l *tlink, d time.Duration) {
+	cw, ok := l.link.(interface{ CloseWrite() error })
+	if !ok || d <= 0 || l.prefix == 0 || l.prioW != nil || !l.started.Load() {
+		return
+	}
+	if l.txq != nil {
+		l.txq.stop(ErrClosed)
+	}
+	if cw.CloseWrite() != nil {
+		return
+	}
+	quiet := l.peerLease / 2
+	if quiet <= 0 {
+		quiet = t.cfg.Lease / 2
+	}
+	deadline := time.Now().Add(d)
+	tick := time.NewTicker(min(quiet/4, 100*time.Millisecond))
+	defer tick.Stop()
+	for {
+		select {
+		case <-l.rxDone:
+			return
+		case now := <-tick.C:
+			if now.After(deadline) || now.Sub(time.Unix(0, l.lastRx.Load())) > quiet {
+				return
+			}
+		}
+	}
 }
 
 // closeWait bounds how long closing waits for queued batches.
@@ -417,7 +469,11 @@ func (t *Unicast) start(l *tlink) {
 			go t.rxLoop(l, pl.PriorityReader(protocol.Priority(p)), make([]byte, len(l.rxBuf)))
 		}
 	}
-	go t.rxLoop(l, l.link, l.rxBuf)
+	l.started.Store(true)
+	go func() {
+		t.rxLoop(l, l.link, l.rxBuf)
+		close(l.rxDone)
+	}()
 	go t.keepAliveLoop(l)
 }
 
@@ -1260,6 +1316,9 @@ func (t *Unicast) rxLoop(l *tlink, r io.Reader, buf []byte) {
 		batch, err := l.readBatch(r, buf)
 		if err == nil {
 			l.lastRx.Store(time.Now().UnixNano())
+			if t.closed.Load() {
+				continue // closing (see linger): drained, not delivered
+			}
 			l.stats.addBytes(Rx, l.prefix+len(batch))
 			if l.compress {
 				batch, err = l.decompress(batch, &zbuf)
@@ -1350,6 +1409,9 @@ func (t *Unicast) keepAliveLoop(l *tlink) {
 		case <-l.done:
 			return
 		case now := <-tick.C:
+			if t.closed.Load() {
+				continue // closing: CLOSE was the last word
+			}
 			if l.peerLease > 0 && now.Sub(time.Unix(0, l.lastRx.Load())) > l.peerLease {
 				t.dropLink(l, ErrLeaseExpired)
 				return
@@ -1397,7 +1459,7 @@ func (t *Unicast) dropLink(l *tlink, cause error) {
 	t.links = append(t.links[:i:i], t.links[i+1:]...)
 	t.lmu.Unlock()
 	if !errors.Is(cause, errLinkClosed) {
-		t.sendClose(l, &protocol.Close{Reason: closeCause(cause)}, t.closeWait())
+		_ = t.sendClose(l, &protocol.Close{Reason: closeCause(cause)}, t.closeWait())
 	}
 	l.close()
 }
@@ -1422,7 +1484,9 @@ func (t *Unicast) shutdown(cause error) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					t.sendClose(l, &protocol.Close{Session: true, Reason: closeCause(cause)}, t.closeWait())
+					if t.sendClose(l, &protocol.Close{Session: true, Reason: closeCause(cause)}, t.closeWait()) {
+						t.linger(l, t.cfg.CloseLinger)
+					}
 				}()
 			}
 			wg.Wait()

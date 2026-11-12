@@ -258,6 +258,14 @@ func (q *txQueue) flush(d time.Duration) {
 	}
 }
 
+// drained reports whether everything queued was written (and the queue
+// still works).
+func (q *txQueue) drained() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.err == nil && !q.busyLocked()
+}
+
 func (q *txQueue) busyLocked() bool {
 	for _, n := range q.used {
 		if n > 0 {

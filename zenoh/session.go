@@ -127,6 +127,12 @@ type Config struct {
 	ZID ZID
 	// Lease is the session lease announced to other nodes. Default 10s.
 	Lease time.Duration
+	// CloseLinger bounds how long Close waits, per TCP/TLS/unix link, for
+	// the other side to read what is still on its way (see
+	// transport.Config.CloseLinger): data put before Close is delivered as
+	// long as the link works. It ends early once the other side has been
+	// silent for half its lease. Default: Lease; negative: close at once.
+	CloseLinger time.Duration
 	// BatchSize is the largest batch we accept. Default 65535; lower it on
 	// memory-constrained targets. Multicast groups use min(BatchSize, 8192),
 	// and all members of a group must agree on it (2048 to join zenoh-pico
@@ -605,9 +611,16 @@ func (s *Session) shutdown() {
 		if sc != nil {
 			sc.close()
 		}
+		// In parallel: each may wait a little for its peer (CloseLinger).
+		var wg sync.WaitGroup
 		for _, f := range faces {
-			f.close()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				f.close()
+			}()
 		}
+		wg.Wait()
 		for _, q := range queries {
 			q.finish()
 		}
@@ -714,6 +727,7 @@ func (s *Session) transportConfig(f *face) transport.Config {
 		ZID:          s.zid,
 		WhatAmI:      s.cfg.Mode.whatAmI(),
 		Lease:        s.cfg.Lease,
+		CloseLinger:  s.cfg.CloseLinger,
 		BatchSize:    s.cfg.BatchSize,
 		Admit:        func(z protocol.ZID, w protocol.WhatAmI) error { return s.admit(f, z, w) },
 		Ext:          s.shmExt(),
