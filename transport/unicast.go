@@ -330,8 +330,9 @@ type Unicast struct {
 	txPrio    protocol.Priority // priority of txBatch, for per-priority streams
 	txPayload codec.Writer
 
-	rxMu   sync.Mutex // links receive concurrently
-	rxLink *tlink     // the link whose batch is being handled (guarded by rxMu)
+	rxMu   sync.Mutex  // links receive concurrently
+	inRx   atomic.Bool // a received batch is being handled (under rxMu)
+	rxLink *tlink      // the link whose batch is being handled (guarded by rxMu)
 	rx     rxState
 
 	ext HandshakeExt
@@ -568,7 +569,9 @@ func (t *Unicast) Ext() HandshakeExt { return t.ext }
 // Done is closed when the transport has shut down.
 func (t *Unicast) Done() <-chan struct{} { return t.done }
 
-// Close sends CLOSE to the peer and tears the transport down.
+// Close sends CLOSE to the peer, after what is queued, and tears the
+// transport down. On stream links it first waits for the peer to read it all
+// (see Config.CloseLinger), unless called from a callback of the transport.
 func (t *Unicast) Close() error {
 	t.shutdown(nil)
 	return nil
@@ -1326,12 +1329,14 @@ func (t *Unicast) rxLoop(l *tlink, r io.Reader, buf []byte) {
 		}
 		if err == nil {
 			t.rxMu.Lock()
+			t.inRx.Store(true)
 			t.rxLink = l
 			if l.lowLatency {
 				err = t.handleLowLatency(batch)
 			} else {
 				err = t.handleBatch(batch)
 			}
+			t.inRx.Store(false)
 			t.rxMu.Unlock()
 		}
 		if err != nil {
@@ -1479,12 +1484,15 @@ func (t *Unicast) shutdown(cause error) {
 		t.links = nil
 		t.lmu.Unlock()
 		if !errors.Is(cause, ErrPeerClosed) {
+			// Only a deliberate Close lingers: not on errors, and not from
+			// a callback of the reader, which would then wait for itself.
+			graceful := cause == nil && !t.inRx.Load()
 			var wg sync.WaitGroup
 			for _, l := range links {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					if t.sendClose(l, &protocol.Close{Session: true, Reason: closeCause(cause)}, t.closeWait()) {
+					if t.sendClose(l, &protocol.Close{Session: true, Reason: closeCause(cause)}, t.closeWait()) && graceful {
 						t.linger(l, t.cfg.CloseLinger)
 					}
 				}()
