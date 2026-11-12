@@ -312,7 +312,7 @@ func (f *face) teardown() {
 		s.meshLinkDown(f, out)
 	}
 	if s.gossip != nil {
-		s.gossipLinkDownLocked(f)
+		s.gossipLinkDownLocked(f, out)
 	}
 	if s.gossipNet != nil {
 		s.gossipNetLinkDownLocked(f, out)

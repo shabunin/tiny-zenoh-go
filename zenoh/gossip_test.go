@@ -3,6 +3,8 @@ package zenoh
 import (
 	"testing"
 	"time"
+
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Gossip scouting: peers configured to reach only a middle peer B end up
@@ -103,5 +105,32 @@ func TestGossipGoMiddle(t *testing.T) {
 	_ = c.Put(pfx, []byte("via-gossip"))
 	if e := rs.next(); e.Key != pfx || e.Payload != "via-gossip" {
 		t.Fatalf("rust got %+v", e)
+	}
+}
+
+// TestGossipNonListeningDialsAtOnce: a peer that does not listen cannot be
+// dialed, so it connects to a gossiped peer at once even with the smaller
+// ZID (which otherwise waits a second for the other side to dial).
+func TestGossipNonListeningDialsAtOnce(t *testing.T) {
+	b := openGossipPeer(t, false)
+	small, _ := protocol.ParseZID("01")
+	great, _ := protocol.ParseZID("ff")
+	quiet, err := Open(Config{Mode: ModePeer, ZID: small, Listen: []string{},
+		Connect: b.Locators(), Scouting: ScoutingConfig{Disable: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = quiet.Close() })
+	waitFor(t, "quiet-b", func() bool { return connected(quiet, b) })
+	loud, err := Open(Config{Mode: ModePeer, ZID: great, Listen: []string{"tcp/127.0.0.1:0"},
+		Connect: b.Locators(), Scouting: ScoutingConfig{Disable: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = loud.Close() })
+	start := time.Now()
+	waitFor(t, "quiet-loud via gossip", func() bool { return connected(quiet, loud) })
+	if d := time.Since(start); d > 700*time.Millisecond {
+		t.Errorf("connected after %v, want at once", d)
 	}
 }

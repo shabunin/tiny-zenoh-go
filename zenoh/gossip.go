@@ -1,7 +1,6 @@
 package zenoh
 
 import (
-	"github.com/shabunin/tiny-zenoh-go/link"
 	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
@@ -107,10 +106,13 @@ func gossipTarget(w WhatAmI) bool { return w == protocol.Router || w == protocol
 // addresses expanded without loopback (zenoh-rust get_locators_noloopback).
 func (s *Session) gossipLocators() []string {
 	s.mu.Lock()
-	lns := append([]link.Listener(nil), s.listeners...)
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	return s.gossipLocatorsLocked()
+}
+
+func (s *Session) gossipLocatorsLocked() []string {
 	out := []string{}
-	for _, ln := range lns {
+	for _, ln := range s.listeners {
 		out = append(out, expandLocator(ln.Locator(), false)...)
 	}
 	return out
@@ -163,8 +165,13 @@ func (s *Session) gossipLinkUp(f *face) {
 	out.send()
 }
 
-// gossipLinkDownLocked is zenoh-rust Gossip::remove_link.
-func (s *Session) gossipLinkDownLocked(f *face) {
+// gossipLinkDownLocked is zenoh-rust Gossip::remove_link, and then tells
+// our gateways our links without it, as gossipLinkUp does with a new one.
+// zenoh-rust (1.10) does not: its gateways keep counting a gateway we lost
+// among ours, and when that one was the primary, none forwards for us any
+// more (seen in the lab: no failover between two gateways of a peer
+// subregion). Gateways take the update like any newer link state.
+func (s *Session) gossipLinkDownLocked(f *face, out outbox) {
 	g := s.gossip
 	if g == nil || g.link(f) == nil {
 		return
@@ -184,6 +191,17 @@ func (s *Session) gossipLinkDownLocked(f *face) {
 	}
 	if i := g.idx(f.zid); i > 0 {
 		g.nodes[i] = nil
+	}
+	g.nodes[0].sn++
+	var locs []string
+	for _, l := range g.links {
+		if !l.south {
+			continue
+		}
+		if locs == nil {
+			locs = s.gossipLocatorsLocked()
+		}
+		s.queueGossip(out, l.f, []linkState{g.entry(0, false, true, true, locs)})
 	}
 }
 

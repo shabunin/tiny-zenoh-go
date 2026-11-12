@@ -975,8 +975,10 @@ func (s *Session) faceByZID(z ZID) *face {
 // once, each could keep its own outgoing handshake and refuse the other's,
 // leaving no link at all. So the node with the greater ZID dials at once and
 // the other waits a little, dialing only if still not connected (in case the
-// greater one cannot reach it). zenoh-rust peers always dial at once; that is
-// fine, a Go node then just accepts.
+// greater one cannot reach it). A node that does not listen cannot be dialed
+// and dials at once whatever its ZID (seen in the lab: a non-listening peer
+// missed a second of its cell's data waiting). zenoh-rust peers always dial
+// at once; that is fine, a Go node then just accepts.
 func (s *Session) connectScouted(z ZID, locators []string) {
 	key := string(z.Bytes())
 	s.mu.Lock()
@@ -985,13 +987,14 @@ func (s *Session) connectScouted(z ZID, locators []string) {
 		return
 	}
 	s.connecting[key] = true
+	dialable := len(s.listeners) > 0
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		delete(s.connecting, key)
 		s.mu.Unlock()
 	}()
-	if zidLess(s.zid, z) {
+	if dialable && zidLess(s.zid, z) {
 		select {
 		case <-time.After(time.Second + rand.N(500*time.Millisecond)):
 		case <-s.done:
