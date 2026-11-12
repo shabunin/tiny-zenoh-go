@@ -1,0 +1,11 @@
+[package]
+name = "rbench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zenoh = { version = "=1.10.2", features = ["unstable"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[profile.release]
+debug = false

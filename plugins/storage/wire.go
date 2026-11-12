@@ -122,10 +122,11 @@ func (d *bdec) u64() uint64 {
 	return 0
 }
 
-// count reads a length, refusing ones that can't fit in what is left.
+// count reads a length, refusing ones that can't fit in what is left
+// (dividing: n*elem overflows for n near 2^64/elem).
 func (d *bdec) count(elem uint64) uint64 {
 	n := d.u64()
-	if d.err == nil && n*elem > uint64(len(d.b)) {
+	if d.err == nil && n > uint64(len(d.b))/elem {
 		d.err = errShort
 		return 0
 	}

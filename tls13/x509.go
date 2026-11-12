@@ -129,6 +129,15 @@ const (
 	kuKeyCertSign      = 1 << 5
 )
 
+const (
+	// maxRSABits bounds the work a server can make us do per RSA
+	// signature check (crypto/tls has the same limit).
+	maxRSABits = 8192
+	// maxSignatureChecks bounds the signature checks of a chain: a server
+	// could send many certificates with the same subject.
+	maxSignatureChecks = 32
+)
+
 // Certificate is a parsed X.509 certificate.
 type Certificate struct {
 	Raw        []byte
@@ -304,6 +313,9 @@ func (k *publicKey) parse(spki []byte) error {
 		if err != nil || !e.IsInt64() || e.Int64() < 3 || e.Int64() > 1<<31-1 {
 			return errDER
 		}
+		if n.BitLen() > maxRSABits {
+			return errors.New("tls13: RSA key too large")
+		}
 		k.typ, k.rsa.n, k.rsa.e = keyRSA, n, int(e.Int64())
 	case bytes.Equal(oid, oidEC):
 		curveOID, _, err := expect(params, 0x06)
@@ -382,7 +394,9 @@ func (c *Certificate) parseExtensions(b []byte) error {
 				return errDER
 			}
 			c.keyUsage = 0
-			for i, by := range bits[1:] {
+			// Bits 0-8 are defined; more would overflow into the sign bit
+			// (-1 means no extension).
+			for i, by := range bits[1:min(len(bits), 3)] {
 				for j := 0; j < 8; j++ {
 					if by&(0x80>>j) != 0 {
 						c.keyUsage |= 1 << (8*i + j)
@@ -529,6 +543,11 @@ func verifyChain(chain []*Certificate, roots []*Certificate, now time.Time, eku 
 	if leaf.keyUsage >= 0 && leaf.keyUsage&kuDigitalSignature == 0 {
 		return errors.New("tls13: certificate key usage lacks digitalSignature")
 	}
+	checks := 0
+	signedBy := func(c, parent *Certificate) bool {
+		checks++
+		return checks <= maxSignatureChecks && c.checkSignatureFrom(parent) == nil
+	}
 	cur := leaf
 	for depth := 0; depth < 10; depth++ {
 		for _, r := range roots {
@@ -537,13 +556,13 @@ func verifyChain(chain []*Certificate, roots []*Certificate, now time.Time, eku 
 			}
 		}
 		for _, r := range roots {
-			if bytes.Equal(r.rawSubject, cur.rawIssuer) && cur.checkSignatureFrom(r) == nil {
+			if bytes.Equal(r.rawSubject, cur.rawIssuer) && signedBy(cur, r) {
 				return r.checkTime(now)
 			}
 		}
 		var next *Certificate
 		for _, ic := range chain[1:] {
-			if ic != cur && bytes.Equal(ic.rawSubject, cur.rawIssuer) && cur.checkSignatureFrom(ic) == nil {
+			if ic != cur && bytes.Equal(ic.rawSubject, cur.rawIssuer) && signedBy(cur, ic) {
 				next = ic
 				break
 			}

@@ -23,15 +23,14 @@
 // Routing forwards a sample published on key A to a subscriber declared on key
 // B if and only if A and B intersect.
 //
-// The chunk-level relations are computed on a small nondeterministic automaton
-// so matching, intersection and inclusion share one provably-consistent core
-// rather than three hand-rolled special cases. The package is dependency-free
+// The relations are computed by dynamic programming over the chunks (and,
+// within a chunk, over the glob tokens), in time quadratic at worst, as keys
+// come from remote nodes. The package is dependency-free
 // beyond the standard library and TinyGo-compatible (no reflection).
 package keyexpr
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 )
 
@@ -172,88 +171,128 @@ func Include(a, b string) bool { return includesChunks(compile(a), compile(b)) }
 // Key-expression-level relations (handle the '/' structure and "**").
 // -----------------------------------------------------------------------------
 
-func allDoubleWild(pcs []patChunk) bool {
-	for _, c := range pcs {
-		if !c.dw {
-			return false
-		}
+// The relations below are decided over the suffixes a[i:], b[j:] by dynamic
+// programming, a row (fixed i) at a time: trying every way a "**" can
+// absorb chunks by recursion takes exponential time on keys like
+// "**/a/**/a/**/a/**/b" against "a/a/a/a/a/a/c". next[j] is the relation of
+// a[i+1:] and b[j:], cur[j] that of a[i:] and b[j:].
+
+func matchChunk(p patChunk, c string) bool {
+	if p.verb || strings.HasPrefix(c, "@") {
+		return p.raw == c
 	}
-	return true
+	return matchGlob(p.toks, c)
 }
 
 func matchChunks(pat []patChunk, key []string) bool {
-	if len(pat) == 0 {
-		return len(key) == 0
-	}
-	if pat[0].dw {
-		// "**" matches zero chunks...
-		if matchChunks(pat[1:], key) {
-			return true
-		}
-		// ...or one or more (never a verbatim chunk).
-		if len(key) > 0 && !strings.HasPrefix(key[0], "@") && matchChunks(pat, key[1:]) {
-			return true
-		}
-		return false
-	}
-	if len(key) == 0 {
-		return false
-	}
-	if pat[0].verb || strings.HasPrefix(key[0], "@") {
-		if pat[0].raw != key[0] {
+	m := len(key)
+	if !hasDoubleWild(pat) { // chunk by chunk (the table would be len(pat)·m)
+		if len(pat) != m {
 			return false
 		}
-	} else if !matchGlob(pat[0].toks, key[0]) {
-		return false
+		for i := range pat {
+			if !matchChunk(pat[i], key[i]) {
+				return false
+			}
+		}
+		return true
 	}
-	return matchChunks(pat[1:], key[1:])
+	next, cur := make([]bool, m+1), make([]bool, m+1)
+	next[m] = true
+	for i := len(pat) - 1; i >= 0; i-- {
+		p := pat[i]
+		cur[m] = p.dw && next[m]
+		for j := m - 1; j >= 0; j-- {
+			switch {
+			case p.dw:
+				// "**" matches zero chunks, or one more (never a verbatim one).
+				cur[j] = next[j] || (!strings.HasPrefix(key[j], "@") && cur[j+1])
+			default:
+				cur[j] = next[j+1] && matchChunk(p, key[j])
+			}
+		}
+		next, cur = cur, next
+	}
+	return next[0]
+}
+
+func hasDoubleWild(pcs []patChunk) bool {
+	for _, c := range pcs {
+		if c.dw {
+			return true
+		}
+	}
+	return false
 }
 
 func intersectChunks(a, b []patChunk) bool {
-	if len(a) == 0 {
-		return allDoubleWild(b)
+	if !hasDoubleWild(a) && !hasDoubleWild(b) {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if !chunkInter(a[i], b[i]) {
+				return false
+			}
+		}
+		return true
 	}
-	if len(b) == 0 {
-		return allDoubleWild(a)
+	m := len(b)
+	next, cur := make([]bool, m+1), make([]bool, m+1)
+	next[m] = true
+	for j := m - 1; j >= 0; j-- {
+		next[j] = b[j].dw && next[j+1] // a is empty: b must be all "**"
 	}
-	if a[0].dw {
-		// "**" consumes zero chunks, or absorbs one non-verbatim chunk from b.
-		return intersectChunks(a[1:], b) || (!b[0].verb && intersectChunks(a, b[1:]))
+	for i := len(a) - 1; i >= 0; i-- {
+		cur[m] = a[i].dw && next[m]
+		for j := m - 1; j >= 0; j-- {
+			switch {
+			case a[i].dw:
+				// "**" consumes zero chunks, or absorbs one non-verbatim chunk from b.
+				cur[j] = next[j] || (!b[j].verb && cur[j+1])
+			case b[j].dw:
+				cur[j] = cur[j+1] || (!a[i].verb && next[j])
+			default:
+				cur[j] = next[j+1] && chunkInter(a[i], b[j])
+			}
+		}
+		next, cur = cur, next
 	}
-	if b[0].dw {
-		return intersectChunks(a, b[1:]) || (!a[0].verb && intersectChunks(a[1:], b))
-	}
-	if !chunkInter(a[0], b[0]) {
-		return false
-	}
-	return intersectChunks(a[1:], b[1:])
+	return next[0]
 }
 
 func includesChunks(a, b []patChunk) bool { // does a include b?
-	if len(a) == 0 {
-		return len(b) == 0
-	}
-	if a[0].dw {
-		// "**" covers zero chunks of b, or one-or-more (any value, including "**").
-		if includesChunks(a[1:], b) {
-			return true
+	m := len(b)
+	if !hasDoubleWild(a) {
+		if len(a) != m {
+			return false
 		}
-		if len(b) > 0 && !b[0].verb && includesChunks(a, b[1:]) {
-			return true
+		for i := range a {
+			if b[i].dw || !chunkIncl(a[i], b[i]) {
+				return false
+			}
 		}
-		return false
+		return true
 	}
-	if len(b) == 0 {
-		return false
+	next, cur := make([]bool, m+1), make([]bool, m+1)
+	next[m] = true
+	for i := len(a) - 1; i >= 0; i-- {
+		cur[m] = a[i].dw && next[m]
+		for j := m - 1; j >= 0; j-- {
+			switch {
+			case a[i].dw:
+				// "**" covers zero chunks of b, or one-or-more (any value, including "**").
+				cur[j] = next[j] || (!b[j].verb && cur[j+1])
+			case b[j].dw:
+				// A single chunk cannot cover "**" (which spans any number of chunks).
+				cur[j] = false
+			default:
+				cur[j] = next[j+1] && chunkIncl(a[i], b[j])
+			}
+		}
+		next, cur = cur, next
 	}
-	if b[0].dw {
-		// A single chunk cannot cover "**" (which spans any number of chunks).
-		return false
-	}
-	if !chunkIncl(a[0], b[0]) {
-		return false
-	}
-	return includesChunks(a[1:], b[1:])
+	return next[0]
 }
 
 // -----------------------------------------------------------------------------
@@ -288,167 +327,68 @@ func matchGlob(toks []tok, s string) bool {
 }
 
 // -----------------------------------------------------------------------------
-// Chunk-level automaton: a glob pattern over the byte alphabet is treated as an
-// NFA whose positions are token indices. A "star" token has an epsilon edge to
-// the next position (skip) and a self-loop on every symbol (consume one char);
-// a literal token advances on its own byte only. Intersection and inclusion are
-// decided by exploring the product of two such automata.
+// Chunk-level relations between two glob patterns. Both are quadratic at
+// worst: an exploration of the product of the patterns' automata (over the
+// literals plus one "other" byte) took seconds on remote chunks of a few
+// kilobytes.
 // -----------------------------------------------------------------------------
 
-const other = 256 // a symbol standing for "some byte not among the literals"
-
-// epsClosure expands a set of positions along star-skip epsilon edges.
-func epsClosure(toks []tok, in []int) []int {
-	seen := make(map[int]bool, len(in)+2)
-	stack := append([]int(nil), in...)
-	for _, i := range in {
-		seen[i] = true
-	}
-	for len(stack) > 0 {
-		i := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if i < len(toks) && toks[i].star && !seen[i+1] {
-			seen[i+1] = true
-			stack = append(stack, i+1)
-		}
-	}
-	return sortedKeys(seen)
-}
-
-// step advances a position set by consuming one symbol, then takes the epsilon
-// closure of the result.
-func step(toks []tok, set []int, sym int) []int {
-	seen := make(map[int]bool, len(set))
-	for _, i := range set {
-		if i >= len(toks) {
-			continue
-		}
-		if toks[i].star {
-			seen[i] = true // star consumes any symbol and stays
-		} else if int(toks[i].ch) == sym {
-			seen[i+1] = true
-		}
-	}
-	return epsClosure(toks, sortedKeys(seen))
-}
-
-func accepts(toks []tok, set []int) bool {
-	for _, i := range set {
-		if i == len(toks) {
-			return true
-		}
-	}
-	return false
-}
-
-// alphabet returns the distinct literal bytes used by either pattern, plus the
-// "other" sentinel. A string over this alphabet is representative of all
-// concrete strings for the purpose of intersection/inclusion.
-func alphabet(a, b []tok) []int {
-	m := make(map[int]bool)
-	for _, t := range a {
-		if !t.star {
-			m[int(t.ch)] = true
-		}
-	}
-	for _, t := range b {
-		if !t.star {
-			m[int(t.ch)] = true
-		}
-	}
-	syms := sortedKeys(m)
-	return append(syms, other)
-}
-
 // chunkIntersect reports whether two single-chunk glob patterns share a
-// concrete string (product-automaton reachability of a jointly-accepting state).
+// concrete string, by dynamic programming over the suffixes a[i:], b[j:] (a
+// product-automaton search costs about n² states of n·256 steps each, which
+// a long remote chunk turns into seconds): a star either stops, or takes the
+// other side's next token (a byte, or what the other star matches). next[j]
+// is the answer for a[i+1:], b[j:]; cur[j] for a[i:], b[j:].
 func chunkIntersect(a, b []tok) bool {
-	syms := alphabet(a, b)
-	start := prodState{epsClosure(a, []int{0}), epsClosure(b, []int{0})}
-	visited := map[string]bool{}
-	stack := []prodState{start}
-	for len(stack) > 0 {
-		st := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		key := st.key()
-		if visited[key] {
-			continue
-		}
-		visited[key] = true
-		if accepts(a, st.a) && accepts(b, st.b) {
-			return true
-		}
-		for _, sym := range syms {
-			na := step(a, st.a, sym)
-			nb := step(b, st.b, sym)
-			if len(na) == 0 || len(nb) == 0 {
-				continue
-			}
-			stack = append(stack, prodState{na, nb})
-		}
+	m := len(b)
+	next, cur := make([]bool, m+1), make([]bool, m+1)
+	next[m] = true
+	for j := m - 1; j >= 0; j-- {
+		next[j] = b[j].star && next[j+1]
 	}
-	return false
+	for i := len(a) - 1; i >= 0; i-- {
+		cur[m] = a[i].star && next[m]
+		for j := m - 1; j >= 0; j-- {
+			switch {
+			case a[i].star:
+				cur[j] = next[j] || cur[j+1]
+			case b[j].star:
+				cur[j] = cur[j+1] || next[j]
+			default:
+				cur[j] = a[i].ch == b[j].ch && next[j+1]
+			}
+		}
+		next, cur = cur, next
+	}
+	return next[0]
 }
 
 // chunkIncludes reports whether L(b) ⊆ L(a): every concrete string matched by b
-// is matched by a. It fails as soon as it reaches a product state where b
-// accepts but a does not — a witness string in b but not in a.
+// is matched by a. That is a matching b's tokens, b's stars being a symbol
+// only a star of a matches: then a star of a covers whatever b's star
+// stands for; and if a can't match that way, it can't match b's stars
+// replaced by a byte a never uses.
 func chunkIncludes(a, b []tok) bool {
-	syms := alphabet(a, b)
-	start := prodState{epsClosure(a, []int{0}), epsClosure(b, []int{0})}
-	visited := map[string]bool{}
-	stack := []prodState{start}
-	for len(stack) > 0 {
-		st := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		key := st.key()
-		if visited[key] {
-			continue
-		}
-		visited[key] = true
-		if accepts(b, st.b) && !accepts(a, st.a) {
+	ti, si := 0, 0
+	star, match := -1, 0
+	for si < len(b) {
+		switch {
+		case ti < len(a) && a[ti].star:
+			star, match = ti, si
+			ti++
+		case ti < len(a) && !b[si].star && a[ti].ch == b[si].ch:
+			ti++
+			si++
+		case star != -1:
+			ti = star + 1
+			match++
+			si = match
+		default:
 			return false
 		}
-		for _, sym := range syms {
-			nb := step(b, st.b, sym)
-			if len(nb) == 0 {
-				continue // b is dead on this symbol: no witness this way
-			}
-			na := step(a, st.a, sym) // may be empty (a dead): kept so a stays non-accepting
-			stack = append(stack, prodState{na, nb})
-		}
 	}
-	return true
-}
-
-type prodState struct {
-	a, b []int
-}
-
-func (p prodState) key() string {
-	var sb strings.Builder
-	for _, i := range p.a {
-		sb.WriteString(strconv.Itoa(i))
-		sb.WriteByte(',')
+	for ti < len(a) && a[ti].star {
+		ti++
 	}
-	sb.WriteByte('|')
-	for _, i := range p.b {
-		sb.WriteString(strconv.Itoa(i))
-		sb.WriteByte(',')
-	}
-	return sb.String()
-}
-
-func sortedKeys(m map[int]bool) []int {
-	out := make([]int, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	// insertion sort: sets are tiny.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j-1] > out[j]; j-- {
-			out[j-1], out[j] = out[j], out[j-1]
-		}
-	}
-	return out
+	return ti == len(a)
 }

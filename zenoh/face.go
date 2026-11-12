@@ -73,7 +73,12 @@ type face struct {
 	joinTo    *face           // multilink: the face whose transport the link joined
 	closed    chan struct{}   // closed when the face is gone
 	closeOnce sync.Once
-	initial   []transport.Encoder // declarations to send right after the handshake
+	// lifeMu guards setUp (Session.established is done with the face) and
+	// closePending (the transport closed before that).
+	lifeMu       sync.Mutex
+	setUp        bool
+	closePending bool
+	initial      []transport.Encoder // declarations to send right after the handshake
 
 	// Guarded by s.mu.
 	remoteExprs map[uint16]string // key-expr ids it declared
@@ -206,8 +211,36 @@ func (s *Session) snapshotLocked(f *face) []transport.Encoder {
 // onClose forgets the face: its pending query finals and liveliness interests
 // are resolved, its tokens are reported gone. In client mode losing the face
 // ends the session.
+// onClose is the transport's close callback. It may come while
+// Session.established is still setting the face up (the link died right
+// after the handshake), even from inside it: the teardown then waits for
+// the setup to finish, so it undoes all of it.
 func (f *face) onClose(error) {
 	f.closeOnce.Do(func() { close(f.closed) })
+	f.lifeMu.Lock()
+	if !f.setUp {
+		f.closePending = true
+		f.lifeMu.Unlock()
+		return
+	}
+	f.lifeMu.Unlock()
+	f.teardown()
+}
+
+// setupFinished ends Session.established's setup of a face whose transport
+// started, running the teardown if the transport closed meanwhile.
+func (f *face) setupFinished() {
+	f.lifeMu.Lock()
+	f.setUp = true
+	pending := f.closePending
+	f.lifeMu.Unlock()
+	if pending {
+		f.teardown()
+	}
+}
+
+// teardown forgets a closed face: its routes, entities and admin state.
+func (f *face) teardown() {
 	s := f.s
 	s.mu.Lock()
 	if s.faces[string(f.zid.Bytes())] == f {

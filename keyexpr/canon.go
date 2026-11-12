@@ -9,6 +9,7 @@ import "strings"
 // and '$' only in "$*".
 //
 // Canonical additionally requires: no chunk is the bare "$*" (write "*"); no
+// "$*$*" (write "$*", as zenoh-rust, which refuses "$*" followed by '$'); no
 // "**" is adjacent to another "**"; and a "**" is never immediately followed by
 // a "*" (the canonical order is "*/**"). Canonicalize rewrites a valid-but-
 // non-canonical expression into this form.
@@ -65,7 +66,7 @@ func isHex(ch byte) bool {
 func IsCanonical(s string) bool { return Validate(s) == nil }
 
 // Canonicalize returns the canonical form of a well-formed key expression:
-// collapses runs of "**", rewrites a bare "$*" chunk to "*", and reorders
+// collapses runs of "**" and of "$*", rewrites a bare "$*" chunk to "*", and reorders
 // "**/*" to "*/**". It does not validate characters; feed it well-formed input.
 func Canonicalize(s string) string {
 	if s == "" {
@@ -76,6 +77,9 @@ func Canonicalize(s string) string {
 	for _, c := range parts {
 		if c == "" {
 			continue // drop empty chunks
+		}
+		for strings.Contains(c, "$*$*") {
+			c = strings.ReplaceAll(c, "$*$*", "$*")
 		}
 		if c == "$*" {
 			c = "*"

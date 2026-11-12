@@ -4,3 +4,5 @@
 *.out
 *.bin
 *.elf
+/bench/rbench/target
+/bench/bin

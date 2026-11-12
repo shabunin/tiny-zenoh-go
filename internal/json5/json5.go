@@ -6,10 +6,16 @@
 package json5
 
 import (
+	"bytes"
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
+
+// maxDepth bounds the nesting of objects and arrays, so that hostile input
+// can't exhaust the stack (small on TinyGo).
+const maxDepth = 64
 
 // ToJSON converts JSON5 to JSON.
 func ToJSON(src []byte) ([]byte, error) {
@@ -26,9 +32,10 @@ func ToJSON(src []byte) ([]byte, error) {
 }
 
 type conv struct {
-	s   []byte
-	i   int
-	out strings.Builder
+	s     []byte
+	i     int
+	depth int
+	out   strings.Builder
 }
 
 func (c *conv) errf(f string, a ...any) error {
@@ -51,7 +58,7 @@ func (c *conv) ws() {
 				c.i++
 			}
 		case ch == '/' && c.i+1 < len(c.s) && c.s[c.i+1] == '*':
-			end := strings.Index(string(c.s[c.i+2:]), "*/")
+			end := bytes.Index(c.s[c.i+2:], []byte("*/"))
 			if end < 0 {
 				c.i = len(c.s)
 				return
@@ -92,7 +99,17 @@ func (c *conv) value() error {
 	}
 }
 
+func (c *conv) nest() error {
+	if c.depth++; c.depth > maxDepth {
+		return c.errf("nested too deep")
+	}
+	return nil
+}
+
 func (c *conv) object() error {
+	if err := c.nest(); err != nil {
+		return err
+	}
 	c.i++ // {
 	c.out.WriteByte('{')
 	first := true
@@ -103,6 +120,7 @@ func (c *conv) object() error {
 		}
 		if c.s[c.i] == '}' {
 			c.i++
+			c.depth--
 			c.out.WriteByte('}')
 			return nil
 		}
@@ -119,7 +137,7 @@ func (c *conv) object() error {
 			if id == "" {
 				return c.errf("expected a key, got %q", ch)
 			}
-			c.out.WriteString(strconv.Quote(id))
+			c.quote(id)
 		}
 		c.ws()
 		if c.i >= len(c.s) || c.s[c.i] != ':' {
@@ -141,6 +159,9 @@ func (c *conv) object() error {
 }
 
 func (c *conv) array() error {
+	if err := c.nest(); err != nil {
+		return err
+	}
 	c.i++ // [
 	c.out.WriteByte('[')
 	first := true
@@ -151,6 +172,7 @@ func (c *conv) array() error {
 		}
 		if c.s[c.i] == ']' {
 			c.i++
+			c.depth--
 			c.out.WriteByte(']')
 			return nil
 		}
@@ -197,7 +219,7 @@ func (c *conv) str() error {
 		c.i++
 		switch {
 		case ch == q:
-			c.out.WriteString(strconv.Quote(b.String()))
+			c.quote(b.String())
 			return nil
 		case ch == '\n':
 			return c.errf("newline in string")
@@ -286,19 +308,34 @@ func (c *conv) number() error {
 		c.out.WriteString(strconv.FormatUint(v, 10))
 		return nil
 	}
-	d := c.i
-	for c.i < len(c.s) && strings.IndexByte("0123456789.eE+-", c.s[c.i]) >= 0 {
+	// JSON5 decimal: digits with no leading zero, '.' and digits, an
+	// exponent; the integer or the fraction may be missing, not both.
+	intPart := c.digits()
+	if c.i < len(c.s) && c.s[c.i] == '.' {
 		c.i++
 	}
-	num := string(c.s[d:c.i])
-	if strings.HasPrefix(num, ".") {
-		num = "0" + num
+	frac := c.digits()
+	if intPart == "" && frac == "" || len(intPart) > 1 && intPart[0] == '0' {
+		return c.errf("bad number %q", string(c.s[start:c.i]))
 	}
-	if strings.HasSuffix(num, ".") {
-		num += "0"
+	if intPart == "" {
+		intPart = "0"
 	}
-	num = strings.Replace(num, ".e", ".0e", 1)
-	num = strings.Replace(num, ".E", ".0E", 1)
+	num := intPart
+	if frac != "" {
+		num += "." + frac
+	}
+	if c.i < len(c.s) && (c.s[c.i] == 'e' || c.s[c.i] == 'E') {
+		e := c.i
+		c.i++
+		if c.i < len(c.s) && (c.s[c.i] == '+' || c.s[c.i] == '-') {
+			c.i++
+		}
+		if c.digits() == "" {
+			return c.errf("bad number %q", string(c.s[start:c.i]))
+		}
+		num += string(c.s[e:c.i])
+	}
 	if _, err := strconv.ParseFloat(num, 64); err != nil {
 		return c.errf("bad number %q", num)
 	}
@@ -307,4 +344,37 @@ func (c *conv) number() error {
 	}
 	c.out.WriteString(num)
 	return nil
+}
+
+func (c *conv) digits() string {
+	d := c.i
+	for c.i < len(c.s) && c.s[c.i] >= '0' && c.s[c.i] <= '9' {
+		c.i++
+	}
+	return string(c.s[d:c.i])
+}
+
+// quote writes s as a JSON string (strconv.Quote's \x, \v, \U escapes are
+// not JSON); invalid UTF-8 becomes U+FFFD, as encoding/json does.
+func (c *conv) quote(s string) {
+	const hex = "0123456789abcdef"
+	c.out.WriteByte('"')
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == '"' || r == '\\':
+			c.out.WriteByte('\\')
+			c.out.WriteByte(byte(r))
+		case r < 0x20:
+			c.out.WriteString(`\u00`)
+			c.out.WriteByte(hex[r>>4])
+			c.out.WriteByte(hex[r&0xF])
+		case r == utf8.RuneError && n == 1:
+			c.out.WriteRune(utf8.RuneError)
+		default:
+			c.out.WriteString(s[i : i+n])
+		}
+		i += n
+	}
+	c.out.WriteByte('"')
 }

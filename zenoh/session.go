@@ -842,6 +842,9 @@ func (s *Session) established(f *face, l transport.Link, tr *transport.Unicast, 
 		close(f.ready)
 		return err
 	}
+	// The transport runs: it may close at any time from here on, and the
+	// face's teardown waits until this setup is over.
+	defer f.setupFinished()
 	s.mu.Lock()
 	if err := s.assignRegionLocked(f, tr); err != nil {
 		if s.faces[string(f.zid.Bytes())] == f {

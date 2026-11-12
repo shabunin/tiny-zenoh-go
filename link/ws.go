@@ -25,9 +25,12 @@ import (
 // subprotocols) so the core stays free of dependencies and TinyGo-friendly.
 
 const (
-	wsGUID       = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-	wsMTU        = 0xffff
-	wsMaxMessage = 1 << 24 // refuse larger messages: batches are < 64 KiB
+	wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	wsMTU  = 0xffff
+	// wsMaxMessage refuses larger messages: one carries one batch, at most
+	// the MTU. (A frame's buffer is allocated from its announced length, so
+	// a looser cap lets a header of a few bytes cost megabytes.)
+	wsMaxMessage = wsMTU
 
 	wsCont   = 0x0
 	wsText   = 0x1
