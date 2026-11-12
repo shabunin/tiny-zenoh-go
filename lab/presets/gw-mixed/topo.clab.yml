@@ -1,0 +1,49 @@
+name: gw-mixed
+topology:
+  nodes:
+    r1:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r1.json5:/cfg/r1.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r1.json5
+    r2:
+      kind: linux
+      network-mode: none
+      labels: {impl: zenohd}
+      binds: [cfg/r2.json5:/cfg/r2.json5:ro]
+      image: eclipse/zenoh:1.10.2
+      cmd: -c /cfg/r2.json5
+    r3:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r3.json5:/cfg/r3.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r3.json5
+    p1:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    p2:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    c1:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+  links:
+    - endpoints: ["r1:eth1", "r2:eth1"]
+    - endpoints: ["r1:eth2", "r3:eth1"]
+    - endpoints: ["r2:eth2", "r3:eth2"]
+    - endpoints: ["p1:eth1", "r1:eth3"]
+    - endpoints: ["p1:eth2", "r2:eth3"]
+    - endpoints: ["p2:eth1", "r1:eth4"]
+    - endpoints: ["p2:eth2", "r2:eth4"]
+    - endpoints: ["p2:eth3", "p1:eth3"]
+    - endpoints: ["c1:eth1", "r3:eth3"]

@@ -2,7 +2,8 @@
 # Containerlab scenarios for tzd and zenohd routers (run on the lab host).
 #
 #   run.sh image            build the tzlab image (after build.sh)
-#   run.sh up TOPO          deploy topos/TOPO and address its links
+#   run.sh up TOPO          deploy topos/TOPO (or presets/TOPO) and address
+#                           its links
 #   run.sh down TOPO        destroy it
 #   run.sh failover TOPO    ring: c1 -> c2 traffic while the busiest of r1's
 #                           router links is cut and restored, twice
@@ -15,6 +16,9 @@
 #   run.sh netem TOPO       line of 3: c1 -> c2 traffic while the r1-r2 link
 #                           is degraded with netem (delay, jitter, loss, a
 #                           blackout shorter than the lease, a bandwidth cap)
+#   run.sh scale TOPO       grid/random with --hosts: idle control traffic,
+#                           every host to every other with tokens, the
+#                           centre router cut off, then every router link
 #
 # Results (the agents' JSON, an event log, a summary) go to
 # results/TOPO-SCENARIO.
@@ -26,16 +30,18 @@ nsexec() { local n=$1; shift; sudo ip netns exec "$(ns "$n")" "$@"; }
 
 load() {
 	TOPO=$1
-	[ -f "topos/$TOPO/lab.env" ] || { echo "no topology topos/$TOPO (gen.py)"; exit 1; }
+	TD=topos/$TOPO
+	[ -f "$TD/lab.env" ] || TD=presets/$TOPO
+	[ -f "$TD/lab.env" ] || { echo "no topology $TOPO in topos/ (gen.py) or presets/"; exit 1; }
 	# shellcheck disable=SC1090
-	. "topos/$TOPO/lab.env"
+	. "$TD/lab.env"
 }
 
 addresses() {
 	while read -r node ifc cidr; do
 		nsexec "$node" ip addr replace "$cidr" dev "$ifc"
 		nsexec "$node" ip link set "$ifc" up
-	done < "topos/$TOPO/addrs.txt"
+	done < "$TD/addrs.txt"
 }
 
 # link_set "r1:eth1 r2:eth1" up|down: both ends.
@@ -352,26 +358,195 @@ for c in ["base", "delay", "loss1", "loss5", "wan", "loss20", "dark1s", "dark1.5
 PY
 }
 
+# links_par VARS up|down: both ends of the LINK_ variables VARS, in parallel.
+links_par() {
+	local v end
+	for v in $1; do
+		for end in ${!v}; do
+			echo "$(ns "${end%%:*}") ${end##*:}"
+		done
+	done | xargs -P 16 -n 2 sh -c 'ip netns exec "$0" ip link set "$1" '"$2"
+}
+
+# router_link_vars: the LINK_ variables between two routers.
+router_link_vars() {
+	set | sed -n "s/^\(LINK_r[0-9]*_r[0-9]*\)=.*/\1/p"
+}
+
+# tx_total: bytes sent so far on every router interface.
+tx_total() {
+	local r
+	for r in $ROUTERS; do
+		nsexec "$r" sh -c 'cat /sys/class/net/eth*/statistics/tx_bytes'
+	done | awk '{s += $1} END {print s}'
+}
+
+# dstats TAG: CPU of every lab container (docker stats) to stats-TAG.txt,
+# and every router's resident memory (kB) to rss-TAG.txt.
+dstats() {
+	docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}' |
+		grep "^clab-$LAB-" > "$OUT/stats-$1.txt"
+	for r in $ROUTERS; do echo "$r $(ns "$r")"; done |
+		xargs -P 8 -n 2 sh -c 'echo "$0 $(docker exec "$1" sh -c "grep VmRSS /proc/1/status" | awk "{print \$2}")"' > "$OUT/rss-$1.txt"
+}
+
+scale() {
+	[ -n "${CENTRE:-}" ] && [ -n "$HOSTS" ] || { echo "scale: needs a grid/random topology with --hosts"; exit 1; }
+	OUT=results/$TOPO-scale
+	rm -rf "$OUT" && mkdir -p "$OUT"
+	local hs="" h rr nr nl a b ta tb
+	for h in $HOSTS; do [ "${h#h}" != "$h" ] && hs="$hs $h"; done
+	rr=$(router_link_vars)
+	nr=$(echo "$ROUTERS" | wc -w)
+	nl=$(echo "$rr" | wc -w)
+	T0=$(date +%s.%N)
+	event "$nr routers ($IMPLS), $nl router links, hosts$hs; settling"
+	sleep 10
+	ta=$(date +%s.%N); a=$(tx_total)
+	sleep 10
+	tb=$(date +%s.%N); b=$(tx_total)
+	echo "$a $b $ta $tb $nl" > "$OUT/idle-tx"
+	dstats idle
+	event "idle measured"
+	T0=$(date +%s.%N)
+	for h in $hs; do
+		agent "$h" alive -k "lab/alive/$h" -watch 'lab/alive/**' -d 78s > "$OUT/alive-$h.jsonl" &
+		agent "$h" sub -k 'lab/scale/**' -per-key -d 76s > "$OUT/sub-$h.json" &
+	done
+	sleep 3
+	event "pubs start: every host, 100/s each, for 70 s"
+	for h in $hs; do
+		agent "$h" pub -k "lab/scale/$h" -rate 100 -d 70s -linger 2s > "$OUT/pub-$h.json" &
+	done
+	sleep 10
+	dstats busy
+	event "busy measured"
+	sleep 2
+	local cv="" v
+	for v in $(links_of "$CENTRE"); do cv="$cv $v"; done
+	event "cut the centre router $CENTRE" && links_par "$cv" down
+	sleep 10
+	event "restore $CENTRE" && links_par "$cv" up
+	sleep 15
+	event "cut every router link ($nl)" && links_par "$rr" down
+	sleep 5
+	event "restore every router link" && links_par "$rr" up
+	wait
+	event "done"
+	python3 - "$OUT" "$hs" "$CENTRE" "$TD" <<'PY' | tee "$OUT/summary.txt"
+import json, re, sys
+d, hs, centre, td = sys.argv[1], sys.argv[2].split(), sys.argv[3], sys.argv[4]
+ev = {}
+for line in open(f"{d}/events.log"):
+    m = re.match(r"t=([\d.]+)s (.*)", line)
+    if m:
+        ev[m.group(2)] = float(m.group(1))
+t = lambda prefix: next(v for k, v in ev.items() if k.startswith(prefix))
+a, b, ta, tb, nl = open(f"{d}/idle-tx").read().split()
+rate = (int(b) - int(a)) / (float(tb) - float(ta))
+print(f"idle control traffic: {rate/1024:.1f} KiB/s in all, {rate/int(nl):.0f} B/s per router link")
+def mem(f):
+    out = []
+    for line in open(f"{d}/{f}"):
+        name, use = line.split()[0], line.split()[1]
+        m = re.match(r"([\d.]+)([KMG]i?B)", use)
+        v = float(m.group(1)) * {"KiB": 1/1024, "MiB": 1, "GiB": 1024, "kB": 1/1000, "MB": 1, "GB": 1000}[m.group(2)]
+        cpu = float(line.split()[-1].rstrip("%"))
+        out.append((name, v, cpu))
+    return out
+for tag in ("idle", "busy"):
+    rs = [x for x in mem(f"stats-{tag}.txt") if re.search(r"-r\d+$", x[0])]
+    rss = [int(l.split()[1]) / 1024 for l in open(f"{d}/rss-{tag}.txt") if len(l.split()) == 2]
+    print(f"routers {tag}: RSS {sum(rss):.0f} MiB in all, {sum(rss)/len(rss):.1f} MiB each "
+          f"(max {max(rss):.1f}), CPU {sum(c for *_, c in rs):.0f}% in all (max {max(c for *_, c in rs):.1f}%)")
+pubs = {h: json.load(open(f"{d}/pub-{h}.json")) for h in hs}
+subs = {h: json.load(open(f"{d}/sub-{h}.json"))["keys"] for h in hs}
+# Second k of a subscriber is [k, k+1) after T0 (the events' clock).
+p0, cut, back, mass, mback = (t("pubs start"), t("cut the centre"), t("restore " + centre),
+                               t("cut every"), t("restore every"))
+env = open(f"{td}/lab.env").read()
+at = {h: re.search(rf"^{h.upper()}_AT=(\S+)", env, re.M).group(1) for h in hs}
+tot_sent = tot_recv = tot_dup = tot_holes = 0
+def window(ps, lo, hi):
+    return ps[int(lo):int(hi) + 1]
+def recovery(ps, after, want=90):
+    for k in range(int(after) + 1, len(ps)):
+        if ps[k] >= want:
+            return k - after
+    return None
+cent, mass_rec, cent_rec, missing_pairs = [], [], [], []
+for s in hs:
+    for p in hs:
+        k = subs[s].get(f"lab/scale/{p}")
+        if k is None:
+            missing_pairs.append((p, s))
+            continue
+        tot_sent += pubs[p]["sent"]; tot_recv += k["received"]; tot_dup += k["duplicates"]; tot_holes += k["lost"]
+        ps = k["per_second"]
+        through_centre = centre in (at[s], at[p])
+        lost_c = 100 * (back - cut) - sum(window(ps, cut, back))
+        if not through_centre:
+            cent.append(max(0, lost_c))
+            r = recovery(ps, cut)
+            cent_rec.append(r)
+        r = recovery(ps, mback)
+        mass_rec.append(r)
+n = len(hs)
+print(f"{n} hosts, {n*n} flows (each host also hears itself): sent {tot_sent}, received {tot_recv}, "
+      f"holes {tot_holes}, duplicates {tot_dup}, flows never seen {len(missing_pairs)}")
+aff = [x for x in cent if x > 150]
+cr = [r for r in cent_rec if r is not None]
+print(f"centre {centre} cut for {back-cut:.0f} s: flows not to or from it: {len(cent)}, "
+      f"of which {len(aff)} lost more than 1.5 s; worst lost {max(cent) if cent else 0} samples "
+      f"(~{(max(cent) if cent else 0)/100:.1f} s); all at full rate again "
+      f"{max(cr) if cr else 0:.1f} s after the cut")
+mr = [r for r in mass_rec if r is not None]
+print(f"every router link cut for {mback-mass:.0f} s: all flows back at full rate "
+      f"{max(mr):.1f} s after restore (median {sorted(mr)[len(mr)//2]:.1f} s); "
+      f"{len(mass_rec)-len(mr)} flows never back")
+# Liveliness: the tokens each host sees 20 s after the mass cut was restored
+# (the agents end a few ms apart, so not at the very end), and when the last
+# came back.
+check = mback + 20
+lastput, complete = 0, True
+want = sorted(f"lab/alive/{x}" for x in hs)
+for h in hs:
+    alive = set()
+    for l in open(f"{d}/alive-{h}.jsonl"):
+        e = json.loads(l)
+        if e["event"] == "end" or e["t"] > check:
+            continue
+        (alive.add if e["event"] == "put" else alive.discard)(e["key"])
+        if e["event"] == "put" and e["t"] > mback:
+            lastput = max(lastput, e["t"])
+    if sorted(alive) != want:
+        complete = False
+        print(f"[liveliness] {h} sees only {sorted(alive)}")
+print(f"liveliness: every host sees every token 20 s after the restore: {complete}; "
+      f"last token back {max(0, lastput - mback):.1f} s after the restore")
+PY
+}
+
 case "${1:-}" in
 image)
 	docker build -q -t tzlab:latest image
 	;;
 up)
 	load "$2"
-	(cd "topos/$TOPO" && sudo containerlab deploy -t topo.clab.yml --reconfigure >/dev/null)
+	(cd "$TD" && sudo containerlab deploy -t topo.clab.yml --reconfigure >/dev/null)
 	addresses
 	echo "$LAB up: routers $ROUTERS ($IMPLS)"
 	;;
 down)
 	load "$2"
-	(cd "topos/$TOPO" && sudo containerlab destroy -t topo.clab.yml --cleanup >/dev/null)
+	(cd "$TD" && sudo containerlab destroy -t topo.clab.yml --cleanup >/dev/null)
 	;;
-failover | partition | gateway | netem)
+failover | partition | gateway | netem | scale)
 	load "$2"
 	"$1"
 	;;
 *)
-	sed -n '2,22p' "$0"
+	sed -n '2,25p' "$0"
 	exit 2
 	;;
 esac

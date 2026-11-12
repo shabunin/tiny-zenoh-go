@@ -5,9 +5,19 @@ hosts running the zlab agent, with the router configs and addressing.
     gen.py ring    --impl tzd,zenohd,tzd,zenohd --name ring-mixed
     gen.py line    --impl tzd,tzd,tzd --name line-tzd
     gen.py gateway --impl tzd,tzd,zenohd --name gw-tzd
+    gen.py grid    --impl tzd,zenohd --size 10x10 --hosts 8 --name grid-mixed
+    gen.py random  --impl tzd --size 60 --degree 3 --seed 1 --name rnd-tzd
 
 ring/line: routers r1..rN in a ring (or a line), host c1 on r1 and c2 on
 the router farthest from it.
+
+grid: --size RxC routers, each linked to its right and lower neighbours;
+c1 on the top left corner, c2 on the bottom right one. random: --size N
+routers on a random connected graph (a random spanning tree, then random
+extra links up to an average --degree). Both take --hosts K: hosts h1..hK
+on routers spread over the network (c1, c2 and the centre among them).
+For these --impl is a pattern repeated over the routers ("tzd,zenohd"
+alternates).
 
 gateway: routers r1 (ZID a1) and r2 (b2) are both gateways of the peer
 subregion of peers p1 and p2, which are linked to each other and to both
@@ -25,7 +35,11 @@ import json
 import os
 
 ap = argparse.ArgumentParser()
-ap.add_argument("shape", choices=["ring", "line", "gateway"])
+ap.add_argument("shape", choices=["ring", "line", "gateway", "grid", "random"])
+ap.add_argument("--size", default="", help="grid: RxC; random: N")
+ap.add_argument("--degree", type=float, default=3, help="random: average router degree")
+ap.add_argument("--seed", type=int, default=1, help="random: graph seed")
+ap.add_argument("--hosts", type=int, default=0, help="grid/random: number of hosts h1..hK")
 ap.add_argument("--impl", required=True, help="comma-separated tzd|zenohd per router")
 ap.add_argument("--name", required=True)
 ap.add_argument("--lease", type=int, default=2000, help="transport lease (ms)")
@@ -43,6 +57,13 @@ impls = a.impl.split(",")
 for i in impls:
     if i not in ("tzd", "zenohd"):
         raise SystemExit(f"unknown implementation {i!r}")
+if a.shape in ("grid", "random"):
+    if a.shape == "grid":
+        rows, cols = (int(x) for x in a.size.lower().split("x"))
+        n = rows * cols
+    else:
+        n = int(a.size)
+    impls = [impls[i % len(impls)] for i in range(n)]
 n = len(impls)
 routers = [f"r{i+1}" for i in range(n)]
 ids = {}
@@ -56,6 +77,54 @@ if a.shape in ("ring", "line"):
     far = routers[n // 2] if a.shape == "ring" else routers[-1]
     hosts = {"c1": {}, "c2": {}}
     edges += [("c1", routers[0]), ("c2", far)]
+elif a.shape in ("grid", "random"):
+    import random
+    if a.shape == "grid":
+        at = lambda i, j: routers[i * cols + j]
+        for i in range(rows):
+            for j in range(cols):
+                if j + 1 < cols:
+                    edges.append((at(i, j), at(i, j + 1)))
+                if i + 1 < rows:
+                    edges.append((at(i, j), at(i + 1, j)))
+        centre = at(rows // 2, cols // 2)
+    else:
+        rnd = random.Random(a.seed)
+        order = routers[:]
+        rnd.shuffle(order)
+        have = set()
+        for k in range(1, n):  # a random spanning tree
+            x, y = order[k], order[rnd.randrange(k)]
+            edges.append((x, y))
+            have.add(frozenset((x, y)))
+        while len(edges) < int(a.degree * n / 2):
+            x, y = rnd.sample(routers, 2)
+            if frozenset((x, y)) not in have:
+                edges.append((x, y))
+                have.add(frozenset((x, y)))
+        deg = {r: 0 for r in routers}
+        for x, y in edges:
+            deg[x] += 1
+            deg[y] += 1
+        centre = max(routers, key=lambda r: deg[r])  # the busiest router
+    far = routers[-1]
+    hosts = {"c1": {}, "c2": {}}
+    edges += [("c1", routers[0]), ("c2", far)]
+    if a.hosts:
+        # Spread: the corners, the centre, then evenly over the rest.
+        picks = [routers[0], far, centre]
+        step = n / max(1, a.hosts)
+        k = 0
+        while len(picks) < a.hosts:
+            r = routers[int(k * step + step / 2) % n]
+            if r not in picks:
+                picks.append(r)
+            k += 1
+            if k > 4 * n:
+                break
+        for i, r in enumerate(picks[:a.hosts], start=1):
+            hosts[f"h{i}"] = {}
+            edges.append((f"h{i}", r))
 else:
     if n != 3:
         raise SystemExit("gateway: --impl gives r1, r2, r3")
@@ -65,7 +134,8 @@ else:
     hosts = {"p1": {"mode": "peer", "listen": True}, "p2": {"mode": "peer"}, "c1": {}}
     edges += [("p1", "r1"), ("p1", "r2"), ("p2", "r1"), ("p2", "r2"), ("p2", "p1"), ("c1", "r3")]
 
-# Addressing: link k is 10.0.k.0/24, the dialer .2 and the listener .1.
+# Addressing: link k is 10.<k/256>.<k%256>.0/24, the dialer .2 and the
+# listener .1.
 nexti = {}
 links, addrs, linkvars = [], [], []
 connect = {x: [] for x in routers + list(hosts)}
@@ -73,8 +143,9 @@ for k, (d, l) in enumerate(edges, start=1):
     ed, el = f"eth{nexti.get(d, 1)}", f"eth{nexti.get(l, 1)}"
     nexti[d], nexti[l] = nexti.get(d, 1) + 1, nexti.get(l, 1) + 1
     links.append((f"{d}:{ed}", f"{l}:{el}"))
-    addrs += [(d, ed, f"10.0.{k}.2/24"), (l, el, f"10.0.{k}.1/24")]
-    connect[d].append(f"tcp/10.0.{k}.1:7447")
+    net = f"10.{k // 256}.{k % 256}"
+    addrs += [(d, ed, f"{net}.2/24"), (l, el, f"{net}.1/24")]
+    connect[d].append(f"tcp/{net}.1:7447")
     linkvars.append(f"LINK_{d}_{l}='{d}:{ed} {l}:{el}'")
 
 storages = [s for s in a.storage.split(",") if s]
@@ -123,6 +194,11 @@ with open(os.path.join(d, "lab.env"), "w") as f:
     f.write(f"LAB={a.name}\nSHAPE={a.shape}\nROUTERS='{' '.join(routers)}'\n")
     f.write(f"IMPLS='{' '.join(impls)}'\nFAR={far}\nLEASE_MS={a.lease}\n")
     f.write(f"STORAGES='{' '.join(storages)}'\n")
+    f.write(f"HOSTS='{' '.join(hosts)}'\n")
+    if a.shape in ("grid", "random"):
+        f.write(f"CENTRE={centre}\n")
+    att = {h: l for h, l in edges if h in hosts}
+    f.write("".join(f"{h.upper()}_AT={r}\n" for h, r in att.items()))
     for h, o in hosts.items():
         args = [f"-e {e}" for e in connect[h]]
         if o.get("mode") == "peer":

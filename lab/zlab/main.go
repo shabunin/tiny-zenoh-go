@@ -56,6 +56,7 @@ func main() {
 	zid := fs.String("id", "", "ZID in hex (default random)")
 	watch := fs.String("watch", "", "alive: liveliness tokens to watch")
 	value := fs.String("v", "", "put: value")
+	perKey := fs.Bool("per-key", false, "sub: account per key (several publishers)")
 	_ = fs.Parse(os.Args[2:])
 
 	cfg := zenoh.Config{Connect: connect, Listen: listen, Scouting: zenoh.ScoutingConfig{Disable: true}}
@@ -88,7 +89,7 @@ func main() {
 		pub(s, *key, *rate, max(*size, 16), *dur, *besteffort, *block)
 		time.Sleep(*linger)
 	case "sub":
-		sub(s, *key, *dur)
+		sub(s, *key, *dur, *perKey)
 	case "alive":
 		alive(s, *key, *watch, *dur)
 	case "put":
@@ -147,16 +148,98 @@ type gap struct {
 	From, To uint64 // sequence numbers, inclusive
 }
 
-func sub(s *zenoh.Session, key string, dur time.Duration) {
+// flowStats is what arrived from one publisher (one key).
+type flowStats struct {
+	seen                    map[uint64]bool
+	lat                     []time.Duration
+	dups, reordered, maxSeq uint64
+	first, last             time.Time
+	maxSilence              time.Duration
+	silenceAt               float64
+	perSec                  map[int]int
+	dupSec                  map[int]int
+}
+
+func (f *flowStats) add(seq uint64, sent, now, start time.Time) {
+	if f.seen[seq] {
+		f.dups++
+		f.dupSec[int(now.Sub(start)/time.Second)]++
+		return
+	}
+	f.seen[seq] = true
+	if seq < f.maxSeq {
+		f.reordered++
+	}
+	f.maxSeq = max(f.maxSeq, seq)
+	f.lat = append(f.lat, now.Sub(sent))
+	if f.first.IsZero() {
+		f.first = now
+	}
+	if !f.last.IsZero() && now.Sub(f.last) > f.maxSilence {
+		f.maxSilence, f.silenceAt = now.Sub(f.last), f.last.Sub(start).Seconds()
+	}
+	f.last = now
+	f.perSec[int(now.Sub(start)/time.Second)]++
+}
+
+func (f *flowStats) report(start time.Time, dur time.Duration) map[string]any {
+	// Losses: holes between the first and the last sample received.
+	var gaps []gap
+	var lost uint64
+	if len(f.seen) > 0 {
+		var first uint64 = f.maxSeq
+		for q := range f.seen {
+			first = min(first, q)
+		}
+		for q := first; q <= f.maxSeq; q++ {
+			if f.seen[q] {
+				continue
+			}
+			from := q
+			for q+1 <= f.maxSeq && !f.seen[q+1] {
+				q++
+			}
+			lost += q - from + 1
+			gaps = append(gaps, gap{From: from, To: q})
+		}
+	}
+	slices.Sort(f.lat)
+	pct := func(p float64) float64 {
+		if len(f.lat) == 0 {
+			return 0
+		}
+		return float64(f.lat[min(len(f.lat)-1, int(p*float64(len(f.lat))))].Microseconds()) / 1000
+	}
+	secs := make([]int, 0, len(f.perSec))
+	var dupSecs []int // only if there are any
+	for i := range int(dur / time.Second) {
+		secs = append(secs, f.perSec[i])
+		if f.dups > 0 {
+			dupSecs = append(dupSecs, f.dupSec[i])
+		}
+	}
+	if len(gaps) > 20 {
+		gaps = gaps[:20]
+	}
+	firstAt := 0.0
+	if !f.first.IsZero() {
+		firstAt = f.first.Sub(start).Seconds()
+	}
+	return map[string]any{
+		"received": len(f.seen), "max_seq": f.maxSeq, "lost": lost, "duplicates": f.dups,
+		"reordered": f.reordered, "gaps": gaps, "first_at_s": firstAt,
+		"max_silence_ms": f.maxSilence.Milliseconds(), "max_silence_at_s": f.silenceAt,
+		"latency_ms": map[string]float64{"p50": pct(0.5), "p99": pct(0.99), "max": pct(1)},
+		"per_second": secs, "duplicates_per_second": dupSecs,
+	}
+}
+
+// sub reports what arrived on key: as one flow, or with -per-key (for a
+// wildcard key with several publishers) per key, under "keys".
+func sub(s *zenoh.Session, key string, dur time.Duration, perKey bool) {
 	var mu sync.Mutex
-	seen := map[uint64]bool{}
-	var lat []time.Duration
-	var dups, reordered, maxSeq uint64
-	var last time.Time
-	var maxSilence time.Duration
-	var silenceAt float64
+	flows := map[string]*flowStats{}
 	start := time.Now()
-	perSec := map[int]int{}
 	_, err := s.DeclareSubscriber(key, func(smp zenoh.Sample) {
 		now := time.Now()
 		if len(smp.Payload) < 16 {
@@ -164,23 +247,18 @@ func sub(s *zenoh.Session, key string, dur time.Duration) {
 		}
 		seq := binary.BigEndian.Uint64(smp.Payload)
 		sent := time.Unix(0, int64(binary.BigEndian.Uint64(smp.Payload[8:])))
+		k := ""
+		if perKey {
+			k = smp.KeyExpr
+		}
 		mu.Lock()
 		defer mu.Unlock()
-		if seen[seq] {
-			dups++
-			return
+		f := flows[k]
+		if f == nil {
+			f = &flowStats{seen: map[uint64]bool{}, perSec: map[int]int{}, dupSec: map[int]int{}}
+			flows[k] = f
 		}
-		seen[seq] = true
-		if seq < maxSeq {
-			reordered++
-		}
-		maxSeq = max(maxSeq, seq)
-		lat = append(lat, now.Sub(sent))
-		if !last.IsZero() && now.Sub(last) > maxSilence {
-			maxSilence, silenceAt = now.Sub(last), last.Sub(start).Seconds()
-		}
-		last = now
-		perSec[int(now.Sub(start)/time.Second)]++
+		f.add(seq, sent, now, start)
 	})
 	if err != nil {
 		fatal(err)
@@ -188,47 +266,21 @@ func sub(s *zenoh.Session, key string, dur time.Duration) {
 	time.Sleep(dur)
 	mu.Lock()
 	defer mu.Unlock()
-	// Losses: holes between the first and the last sample received.
-	var gaps []gap
-	var lost uint64
-	if len(seen) > 0 {
-		var first uint64 = maxSeq
-		for q := range seen {
-			first = min(first, q)
+	if !perKey {
+		f := flows[""]
+		if f == nil {
+			f = &flowStats{seen: map[uint64]bool{}, perSec: map[int]int{}, dupSec: map[int]int{}}
 		}
-		for q := first; q <= maxSeq; q++ {
-			if seen[q] {
-				continue
-			}
-			from := q
-			for q+1 <= maxSeq && !seen[q+1] {
-				q++
-			}
-			lost += q - from + 1
-			gaps = append(gaps, gap{From: from, To: q})
-		}
+		r := f.report(start, dur)
+		r["role"] = "sub"
+		out(r)
+		return
 	}
-	slices.Sort(lat)
-	pct := func(p float64) float64 {
-		if len(lat) == 0 {
-			return 0
-		}
-		return float64(lat[min(len(lat)-1, int(p*float64(len(lat))))].Microseconds()) / 1000
+	keys := map[string]any{}
+	for k, f := range flows {
+		keys[k] = f.report(start, dur)
 	}
-	secs := make([]int, 0, len(perSec))
-	for i := range int(dur / time.Second) {
-		secs = append(secs, perSec[i])
-	}
-	if len(gaps) > 20 {
-		gaps = gaps[:20]
-	}
-	out(map[string]any{
-		"role": "sub", "received": len(seen), "max_seq": maxSeq, "lost": lost, "duplicates": dups,
-		"reordered": reordered, "gaps": gaps,
-		"max_silence_ms": maxSilence.Milliseconds(), "max_silence_at_s": silenceAt,
-		"latency_ms": map[string]float64{"p50": pct(0.5), "p99": pct(0.99), "max": pct(1)},
-		"per_second": secs,
-	})
+	out(map[string]any{"role": "sub", "keys": keys})
 }
 
 func out(v any) {

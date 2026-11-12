@@ -1,0 +1,80 @@
+name: ring8-storage-mixed
+topology:
+  nodes:
+    r1:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r1.json5:/cfg/r1.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r1.json5
+    r2:
+      kind: linux
+      network-mode: none
+      labels: {impl: zenohd}
+      binds: [cfg/r2.json5:/cfg/r2.json5:ro]
+      image: eclipse/zenoh:1.10.2
+      cmd: -c /cfg/r2.json5
+    r3:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r3.json5:/cfg/r3.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r3.json5
+    r4:
+      kind: linux
+      network-mode: none
+      labels: {impl: zenohd}
+      binds: [cfg/r4.json5:/cfg/r4.json5:ro]
+      image: eclipse/zenoh:1.10.2
+      cmd: -c /cfg/r4.json5
+    r5:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r5.json5:/cfg/r5.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r5.json5
+    r6:
+      kind: linux
+      network-mode: none
+      labels: {impl: zenohd}
+      binds: [cfg/r6.json5:/cfg/r6.json5:ro]
+      image: eclipse/zenoh:1.10.2
+      cmd: -c /cfg/r6.json5
+    r7:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r7.json5:/cfg/r7.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r7.json5
+    r8:
+      kind: linux
+      network-mode: none
+      labels: {impl: zenohd}
+      binds: [cfg/r8.json5:/cfg/r8.json5:ro]
+      image: eclipse/zenoh:1.10.2
+      cmd: -c /cfg/r8.json5
+    c1:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    c2:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+  links:
+    - endpoints: ["r1:eth1", "r2:eth1"]
+    - endpoints: ["r2:eth2", "r3:eth1"]
+    - endpoints: ["r3:eth2", "r4:eth1"]
+    - endpoints: ["r4:eth2", "r5:eth1"]
+    - endpoints: ["r5:eth2", "r6:eth1"]
+    - endpoints: ["r6:eth2", "r7:eth1"]
+    - endpoints: ["r7:eth2", "r8:eth1"]
+    - endpoints: ["r8:eth2", "r1:eth2"]
+    - endpoints: ["c1:eth1", "r1:eth3"]
+    - endpoints: ["c2:eth1", "r5:eth3"]

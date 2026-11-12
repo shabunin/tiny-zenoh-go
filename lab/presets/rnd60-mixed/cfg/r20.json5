@@ -1,0 +1,29 @@
+{
+  "mode": "router",
+  "listen": {
+    "endpoints": [
+      "tcp/0.0.0.0:7447"
+    ]
+  },
+  "connect": {
+    "endpoints": [
+      "tcp/10.0.9.1:7447"
+    ]
+  },
+  "scouting": {
+    "multicast": {
+      "enabled": false
+    },
+    "gossip": {
+      "enabled": false
+    }
+  },
+  "transport": {
+    "link": {
+      "tx": {
+        "lease": 2000,
+        "keep_alive": 4
+      }
+    }
+  }
+}

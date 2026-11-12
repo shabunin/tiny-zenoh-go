@@ -1,0 +1,491 @@
+name: grid49-tzd
+topology:
+  nodes:
+    r1:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r1.json5:/cfg/r1.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r1.json5
+    r2:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r2.json5:/cfg/r2.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r2.json5
+    r3:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r3.json5:/cfg/r3.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r3.json5
+    r4:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r4.json5:/cfg/r4.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r4.json5
+    r5:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r5.json5:/cfg/r5.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r5.json5
+    r6:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r6.json5:/cfg/r6.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r6.json5
+    r7:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r7.json5:/cfg/r7.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r7.json5
+    r8:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r8.json5:/cfg/r8.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r8.json5
+    r9:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r9.json5:/cfg/r9.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r9.json5
+    r10:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r10.json5:/cfg/r10.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r10.json5
+    r11:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r11.json5:/cfg/r11.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r11.json5
+    r12:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r12.json5:/cfg/r12.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r12.json5
+    r13:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r13.json5:/cfg/r13.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r13.json5
+    r14:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r14.json5:/cfg/r14.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r14.json5
+    r15:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r15.json5:/cfg/r15.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r15.json5
+    r16:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r16.json5:/cfg/r16.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r16.json5
+    r17:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r17.json5:/cfg/r17.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r17.json5
+    r18:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r18.json5:/cfg/r18.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r18.json5
+    r19:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r19.json5:/cfg/r19.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r19.json5
+    r20:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r20.json5:/cfg/r20.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r20.json5
+    r21:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r21.json5:/cfg/r21.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r21.json5
+    r22:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r22.json5:/cfg/r22.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r22.json5
+    r23:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r23.json5:/cfg/r23.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r23.json5
+    r24:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r24.json5:/cfg/r24.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r24.json5
+    r25:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r25.json5:/cfg/r25.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r25.json5
+    r26:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r26.json5:/cfg/r26.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r26.json5
+    r27:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r27.json5:/cfg/r27.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r27.json5
+    r28:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r28.json5:/cfg/r28.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r28.json5
+    r29:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r29.json5:/cfg/r29.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r29.json5
+    r30:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r30.json5:/cfg/r30.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r30.json5
+    r31:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r31.json5:/cfg/r31.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r31.json5
+    r32:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r32.json5:/cfg/r32.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r32.json5
+    r33:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r33.json5:/cfg/r33.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r33.json5
+    r34:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r34.json5:/cfg/r34.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r34.json5
+    r35:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r35.json5:/cfg/r35.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r35.json5
+    r36:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r36.json5:/cfg/r36.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r36.json5
+    r37:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r37.json5:/cfg/r37.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r37.json5
+    r38:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r38.json5:/cfg/r38.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r38.json5
+    r39:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r39.json5:/cfg/r39.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r39.json5
+    r40:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r40.json5:/cfg/r40.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r40.json5
+    r41:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r41.json5:/cfg/r41.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r41.json5
+    r42:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r42.json5:/cfg/r42.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r42.json5
+    r43:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r43.json5:/cfg/r43.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r43.json5
+    r44:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r44.json5:/cfg/r44.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r44.json5
+    r45:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r45.json5:/cfg/r45.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r45.json5
+    r46:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r46.json5:/cfg/r46.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r46.json5
+    r47:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r47.json5:/cfg/r47.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r47.json5
+    r48:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r48.json5:/cfg/r48.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r48.json5
+    r49:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r49.json5:/cfg/r49.json5:ro]
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r49.json5
+    c1:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    c2:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    h1:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    h2:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    h3:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    h4:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    h5:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    h6:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    h7:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    h8:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+  links:
+    - endpoints: ["r1:eth1", "r2:eth1"]
+    - endpoints: ["r1:eth2", "r8:eth1"]
+    - endpoints: ["r2:eth2", "r3:eth1"]
+    - endpoints: ["r2:eth3", "r9:eth1"]
+    - endpoints: ["r3:eth2", "r4:eth1"]
+    - endpoints: ["r3:eth3", "r10:eth1"]
+    - endpoints: ["r4:eth2", "r5:eth1"]
+    - endpoints: ["r4:eth3", "r11:eth1"]
+    - endpoints: ["r5:eth2", "r6:eth1"]
+    - endpoints: ["r5:eth3", "r12:eth1"]
+    - endpoints: ["r6:eth2", "r7:eth1"]
+    - endpoints: ["r6:eth3", "r13:eth1"]
+    - endpoints: ["r7:eth2", "r14:eth1"]
+    - endpoints: ["r8:eth2", "r9:eth2"]
+    - endpoints: ["r8:eth3", "r15:eth1"]
+    - endpoints: ["r9:eth3", "r10:eth2"]
+    - endpoints: ["r9:eth4", "r16:eth1"]
+    - endpoints: ["r10:eth3", "r11:eth2"]
+    - endpoints: ["r10:eth4", "r17:eth1"]
+    - endpoints: ["r11:eth3", "r12:eth2"]
+    - endpoints: ["r11:eth4", "r18:eth1"]
+    - endpoints: ["r12:eth3", "r13:eth2"]
+    - endpoints: ["r12:eth4", "r19:eth1"]
+    - endpoints: ["r13:eth3", "r14:eth2"]
+    - endpoints: ["r13:eth4", "r20:eth1"]
+    - endpoints: ["r14:eth3", "r21:eth1"]
+    - endpoints: ["r15:eth2", "r16:eth2"]
+    - endpoints: ["r15:eth3", "r22:eth1"]
+    - endpoints: ["r16:eth3", "r17:eth2"]
+    - endpoints: ["r16:eth4", "r23:eth1"]
+    - endpoints: ["r17:eth3", "r18:eth2"]
+    - endpoints: ["r17:eth4", "r24:eth1"]
+    - endpoints: ["r18:eth3", "r19:eth2"]
+    - endpoints: ["r18:eth4", "r25:eth1"]
+    - endpoints: ["r19:eth3", "r20:eth2"]
+    - endpoints: ["r19:eth4", "r26:eth1"]
+    - endpoints: ["r20:eth3", "r21:eth2"]
+    - endpoints: ["r20:eth4", "r27:eth1"]
+    - endpoints: ["r21:eth3", "r28:eth1"]
+    - endpoints: ["r22:eth2", "r23:eth2"]
+    - endpoints: ["r22:eth3", "r29:eth1"]
+    - endpoints: ["r23:eth3", "r24:eth2"]
+    - endpoints: ["r23:eth4", "r30:eth1"]
+    - endpoints: ["r24:eth3", "r25:eth2"]
+    - endpoints: ["r24:eth4", "r31:eth1"]
+    - endpoints: ["r25:eth3", "r26:eth2"]
+    - endpoints: ["r25:eth4", "r32:eth1"]
+    - endpoints: ["r26:eth3", "r27:eth2"]
+    - endpoints: ["r26:eth4", "r33:eth1"]
+    - endpoints: ["r27:eth3", "r28:eth2"]
+    - endpoints: ["r27:eth4", "r34:eth1"]
+    - endpoints: ["r28:eth3", "r35:eth1"]
+    - endpoints: ["r29:eth2", "r30:eth2"]
+    - endpoints: ["r29:eth3", "r36:eth1"]
+    - endpoints: ["r30:eth3", "r31:eth2"]
+    - endpoints: ["r30:eth4", "r37:eth1"]
+    - endpoints: ["r31:eth3", "r32:eth2"]
+    - endpoints: ["r31:eth4", "r38:eth1"]
+    - endpoints: ["r32:eth3", "r33:eth2"]
+    - endpoints: ["r32:eth4", "r39:eth1"]
+    - endpoints: ["r33:eth3", "r34:eth2"]
+    - endpoints: ["r33:eth4", "r40:eth1"]
+    - endpoints: ["r34:eth3", "r35:eth2"]
+    - endpoints: ["r34:eth4", "r41:eth1"]
+    - endpoints: ["r35:eth3", "r42:eth1"]
+    - endpoints: ["r36:eth2", "r37:eth2"]
+    - endpoints: ["r36:eth3", "r43:eth1"]
+    - endpoints: ["r37:eth3", "r38:eth2"]
+    - endpoints: ["r37:eth4", "r44:eth1"]
+    - endpoints: ["r38:eth3", "r39:eth2"]
+    - endpoints: ["r38:eth4", "r45:eth1"]
+    - endpoints: ["r39:eth3", "r40:eth2"]
+    - endpoints: ["r39:eth4", "r46:eth1"]
+    - endpoints: ["r40:eth3", "r41:eth2"]
+    - endpoints: ["r40:eth4", "r47:eth1"]
+    - endpoints: ["r41:eth3", "r42:eth2"]
+    - endpoints: ["r41:eth4", "r48:eth1"]
+    - endpoints: ["r42:eth3", "r49:eth1"]
+    - endpoints: ["r43:eth2", "r44:eth2"]
+    - endpoints: ["r44:eth3", "r45:eth2"]
+    - endpoints: ["r45:eth3", "r46:eth2"]
+    - endpoints: ["r46:eth3", "r47:eth2"]
+    - endpoints: ["r47:eth3", "r48:eth2"]
+    - endpoints: ["r48:eth3", "r49:eth2"]
+    - endpoints: ["c1:eth1", "r1:eth3"]
+    - endpoints: ["c2:eth1", "r49:eth3"]
+    - endpoints: ["h1:eth1", "r1:eth4"]
+    - endpoints: ["h2:eth1", "r49:eth4"]
+    - endpoints: ["h3:eth1", "r25:eth5"]
+    - endpoints: ["h4:eth1", "r4:eth4"]
+    - endpoints: ["h5:eth1", "r10:eth5"]
+    - endpoints: ["h6:eth1", "r16:eth5"]
+    - endpoints: ["h7:eth1", "r22:eth4"]
+    - endpoints: ["h8:eth1", "r28:eth4"]

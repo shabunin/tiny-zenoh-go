@@ -1,0 +1,46 @@
+{
+  "mode": "router",
+  "listen": {
+    "endpoints": [
+      "tcp/0.0.0.0:7447"
+    ]
+  },
+  "connect": {
+    "endpoints": [
+      "tcp/10.0.3.1:7447"
+    ]
+  },
+  "scouting": {
+    "multicast": {
+      "enabled": false
+    },
+    "gossip": {
+      "enabled": false
+    }
+  },
+  "transport": {
+    "link": {
+      "tx": {
+        "lease": 2000,
+        "keep_alive": 4
+      }
+    }
+  },
+  "plugins": {
+    "storage_manager": {
+      "storages": {
+        "lab": {
+          "key_expr": "lab/store/**",
+          "volume": "memory",
+          "replication": {
+            "interval": 1,
+            "sub_intervals": 5,
+            "hot": 6,
+            "warm": 30,
+            "propagation_delay": 250
+          }
+        }
+      }
+    }
+  }
+}

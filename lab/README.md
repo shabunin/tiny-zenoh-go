@@ -19,12 +19,15 @@ sudo ./run.sh failover ring-mixed           # results/ring-mixed-failover/
 sudo ./run.sh down ring-mixed
 ```
 
-Topologies for the other scenarios:
+Topologies for the other scenarios (or deploy one of the saved ones in
+`presets/`, see `presets/README.md`):
 
 ```bash
 ./gen.py ring --impl tzd,tzd,zenohd,zenohd --storage r1,r3 --name part-mixed
 ./gen.py gateway --impl tzd,zenohd,tzd --gossip --name gw-mixed
 ./gen.py line --impl tzd,zenohd,tzd --wmem 65536 --name line-mixed
+./gen.py grid --impl tzd,zenohd --size 10x10 --hosts 8 --name grid100-mixed
+./gen.py random --impl tzd --size 60 --degree 3 --seed 7 --hosts 8 --name rnd60-tzd
 ```
 
 `gen.py` makes a ring (or a line) of routers r1..rN, each dialing the next
@@ -128,3 +131,53 @@ for the other side to read it all (`zenoh.Config.CloseLinger`). A Go
 publisher closing at once on the capped link with Block: 5228 of 10001
 delivered before, 8973 now (the rest was still queued when the 10 s lease
 ran out).
+
+**scale**: a grid (`--size RxC`) or a random connected graph (`--size N
+--degree D`) of routers with hosts h1..h8 (two opposite corners, the
+centre or busiest router, the rest spread out). The idle control traffic
+and the routers' memory are measured, then every host publishes 100
+samples/s and subscribes to everyone's (64 flows) and holds a liveliness
+token; the centre router is cut off for 10 s, then every router link at
+once for 5–6 s.
+
+| routers | RSS per router | idle control traffic per link | centre cut: worst flow | every link cut: all flows back | flows never back | liveliness after 20 s |
+|---|---|---|---|---|---|---|
+| 49 tzd (7x7) | 21 MiB | 241 B/s | 1.5 s | 4.9 s | 0 | complete |
+| 49 zenohd | 12 MiB | 484 B/s | 1.2 s | 3.8 s | 2 | 1 token missing |
+| 49 mixed | 17 MiB | 401 B/s | 1.2 s | 4.8 s | 5 | 1 token missing |
+| 100 tzd (10x10) | 23 MiB | 257 B/s | 1.3 s | 6.0 s | 0 | complete |
+| 100 zenohd | 12 MiB | 512 B/s | 0 | 4.2 s | 3 | 1 token missing |
+| 100 mixed | 18 MiB | 400 B/s | 0 | 6.4 s | 1 | complete |
+| 60 mixed, random | 17 MiB | 381 B/s | 1.5 s | 3.9 s | 1 | 2 tokens missing |
+
+(Flows never back: still nothing 20 s after the restore; zenohd's flows
+and tokens come back later or not before the agents end.) The hosts are Go
+clients (zlab), which matters where the centre router is their own: h3
+reconnects (see below).
+
+The scale runs found three bugs, all fixed:
+
+- a client whose router went away for longer than the lease shut its
+  session down instead of reconnecting (zenoh-rust clients reconnect);
+- after every link was cut and restored, tzd routers held data published
+  after the reconnection up to 8 s and delivered it in a burst: each
+  router recomputed all its trees for every link state, under the session
+  lock (seen with goroutine dumps: `docker kill -s USR1` on a tzd
+  container). The trees now cost 15–30x less (adjacency built once per
+  computation) and are recomputed 100 ms after a change, once per burst,
+  as zenoh-rust does; 100 routers came back in 20.9 s before, 6.0 s now;
+- in mixed meshes the burst left up to 478k duplicates (now 3.8k).
+
+In a mixed mesh (as with zenohd alone), a flow sometimes stays broken
+after every link was cut and restored: 0 to 4 of 64 in repeated runs,
+never with tzd alone. Not tracked down yet.
+
+What the lab host takes: a 4-core VM with 16 GB ran 100 routers and 10
+hosts in 4.7 GB (tzd) or 3.3 GB (zenohd), deploying in 25 s; the routers
+idle at about 0.1% CPU each, and the traffic above keeps 2 of its 4
+cores busy. A 15x15 grid of tzd (225 routers, 10 hosts) deployed in 87 s
+but took all 16 GB (285 MiB left) and the VM stopped responding: memory
+per node grows with the mesh (every router holds the whole link-state
+graph and a tree per router), so on this host about 150 tzd or 200
+zenohd routers is the limit; beyond that use a bigger host or several
+hosts (containerlab can span them with vxlan links).

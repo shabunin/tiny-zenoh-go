@@ -1,0 +1,42 @@
+name: line3-netem-mixed
+topology:
+  nodes:
+    r1:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r1.json5:/cfg/r1.json5:ro]
+      sysctls: {net.ipv4.tcp_wmem: "4096 16384 65536"}
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r1.json5
+    r2:
+      kind: linux
+      network-mode: none
+      labels: {impl: zenohd}
+      binds: [cfg/r2.json5:/cfg/r2.json5:ro]
+      sysctls: {net.ipv4.tcp_wmem: "4096 16384 65536"}
+      image: eclipse/zenoh:1.10.2
+      cmd: -c /cfg/r2.json5
+    r3:
+      kind: linux
+      network-mode: none
+      labels: {impl: tzd}
+      binds: [cfg/r3.json5:/cfg/r3.json5:ro]
+      sysctls: {net.ipv4.tcp_wmem: "4096 16384 65536"}
+      image: tzlab:latest
+      cmd: tzd -config /cfg/r3.json5
+    c1:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+    c2:
+      kind: linux
+      network-mode: none
+      image: tzlab:latest
+      cmd: sleep infinity
+  links:
+    - endpoints: ["r1:eth1", "r2:eth1"]
+    - endpoints: ["r2:eth2", "r3:eth1"]
+    - endpoints: ["c1:eth1", "r1:eth2"]
+    - endpoints: ["c2:eth1", "r3:eth2"]
