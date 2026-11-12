@@ -592,6 +592,46 @@ go run ./examples/boardtest/sim tcp/127.0.0.1:7447 board/sim/plain   # same run 
 go run ./examples/zprobe                        # hex-dump a raw handshake
 ```
 
+### Fuzzing
+
+Everything a remote node controls has a Go fuzz target; run one with
+`go test ./<pkg> -run XXX -fuzz '^FuzzName$' -fuzztime 2m`
+(their seeds also run with the normal tests):
+
+| Package | Targets |
+|---|---|
+| `protocol` | `FuzzDecodeTransport`, `FuzzDecodeNetwork`, `FuzzDecodeScouting` (decode, re-encode, decode again) |
+| `transport` | `FuzzRxBatches` (frames, fragments, LZ4, low latency), `FuzzAcceptHandshake`, `FuzzOpenHandshake` (auth, multilink, QoS, compression; the acceptor's cookie is echoed so mutations reach the OPEN) |
+| `link` | `FuzzSerialFrame`, `FuzzSerialStream`, `FuzzWSRead` |
+| `zenoh` | `FuzzRouterMessages`: arbitrary network messages to a router (from a client, peer or router), a peer and a client (from its router), each with entities of every kind; a stuck handshake fails it |
+| `tls13` | handshake and records against a fake server, certificates (vs crypto/x509), signatures, points and field arithmetic (vs crypto/ecdh, crypto/ecdsa, math/big) |
+| `keyexpr` | canonization, intersect/include/match (vs a reference automaton and regexps), prefix stripping |
+| `internal/json5`, `zext`, `plugins/storage` (replication digests and messages), `plugins/storage/influxdb` (`_time` ranges), `internal/xxh3` | decoders and parsers |
+
+### Benchmarks
+
+```bash
+go test ./zenoh -run XXX -bench . -benchtime 2s   # pub/sub, SHM, ping-pong, queries
+go test ./transport ./protocol ./internal/lz4 -run XXX -bench .
+# against zenoh-rust: the same throughput and ping programs in Rust
+go build -o bench/bin/ ./examples/z_* ./cmd/tzd
+(cd bench/rbench && cargo build --release)
+bench/xbench.sh
+```
+
+On a Ryzen 7 8845HS laptop over loopback (noisy, ±30%): ping-pong round
+trips are on par with zenoh-rust (64 B: ~70–90 µs peer to peer, ~200 µs
+through a router, either implementation). Small-message throughput is
+not yet, zenoh-rust is ~3–4× ahead:
+
+| 8 B messages | zenoh-rust | tiny-zenoh-go |
+|---|---|---|
+| peer → peer | ~1.6–2.7 M msg/s | ~0.7 M msg/s |
+| client → router → client (same implementation at both ends) | ~1.9 M msg/s (zenohd) | ~0.45–0.5 M msg/s (tzd) |
+| 64 KiB peer → peer | ~10 k msg/s | ~4 k msg/s |
+
+Shared memory moves ~2.4 GB/s at 1 MiB.
+
 ## Roadmap
 
 - [x] **M0 — Foundations.** Wire codec and key-expression engine.
