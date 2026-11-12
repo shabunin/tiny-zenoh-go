@@ -681,20 +681,41 @@ func (n *lsNetwork) edgeWeight(i, j int) float64 {
 	return float64(w) * (1.0 + 0.01*(float64(h)/float64(math.MaxUint32)))
 }
 
-// neighbours lists the nodes sharing an edge with i: an edge exists when both
-// ends announce the link.
-func (n *lsNetwork) neighbours(i int) []int {
-	var out []int
-	for z := range n.nodes[i].links {
-		for j, nd := range n.nodes {
-			if nd != nil && j != i && zkey(nd.zid) == z {
-				if _, back := nd.links[zkey(n.nodes[i].zid)]; back {
-					out = append(out, j)
-				}
+// lsEdge is a neighbour in the graph, with the weight of the edge to it.
+type lsEdge struct {
+	to int
+	w  float64
+}
+
+// adjacency lists, per node, the nodes sharing an edge with it (an edge
+// exists when both ends announce the link), with the edges' weights. It is
+// built once per tree computation: the trees take a Dijkstra per node, and
+// looking neighbours and weights up anew at every step made a 49-router
+// mesh spend seconds per batch of link states (seen in the lab).
+func (n *lsNetwork) adjacency() [][]lsEdge {
+	idx := make(map[string]int, len(n.nodes))
+	for j, nd := range n.nodes {
+		if nd != nil {
+			idx[zkey(nd.zid)] = j
+		}
+	}
+	adj := make([][]lsEdge, len(n.nodes))
+	for i, nd := range n.nodes {
+		if nd == nil {
+			continue
+		}
+		zi := zkey(nd.zid)
+		for z := range nd.links {
+			j, ok := idx[z]
+			if !ok || j == i {
+				continue
+			}
+			if _, back := n.nodes[j].links[zi]; back {
+				adj[i] = append(adj[i], lsEdge{j, n.edgeWeight(i, j)})
 			}
 		}
 	}
-	return out
+	return adj
 }
 
 type pqItem struct {
@@ -710,8 +731,8 @@ func (p *pq) Push(x any)        { *p = append(*p, x.(pqItem)) }
 func (p *pq) Pop() any          { o := *p; x := o[len(o)-1]; *p = o[:len(o)-1]; return x }
 
 // shortestPaths returns the predecessor of every node on its shortest path
-// from root (-1 for the root and unreachable nodes).
-func (n *lsNetwork) shortestPaths(root int) []int {
+// from root (-1 for the root and unreachable nodes), over adj.
+func (n *lsNetwork) shortestPaths(root int, adj [][]lsEdge) []int {
 	dist := make([]float64, len(n.nodes))
 	pred := make([]int, len(n.nodes))
 	for i := range dist {
@@ -724,11 +745,11 @@ func (n *lsNetwork) shortestPaths(root int) []int {
 		if it.dist > dist[it.node] {
 			continue
 		}
-		for _, j := range n.neighbours(it.node) {
-			d := it.dist + n.edgeWeight(it.node, j)
-			if d < dist[j] {
-				dist[j], pred[j] = d, it.node
-				heap.Push(h, pqItem{j, d})
+		for _, e := range adj[it.node] {
+			d := it.dist + e.w
+			if d < dist[e.to] {
+				dist[e.to], pred[e.to] = d, it.node
+				heap.Push(h, pqItem{e.to, d})
 			}
 		}
 	}
@@ -740,7 +761,8 @@ func (n *lsNetwork) shortestPaths(root int) []int {
 func (n *lsNetwork) computeTrees() [][]int {
 	old := n.trees
 	n.trees = make([]lsTree, len(n.nodes))
-	reach := n.shortestPaths(0) // reachability from us
+	adj := n.adjacency()
+	reach := n.shortestPaths(0, adj) // reachability from us
 	newChildren := make([][]int, len(n.nodes))
 	for r, nd := range n.nodes {
 		t := &n.trees[r]
@@ -752,7 +774,7 @@ func (n *lsNetwork) computeTrees() [][]int {
 		if nd == nil {
 			continue
 		}
-		pred := n.shortestPaths(r)
+		pred := n.shortestPaths(r, adj)
 		t.parent = pred[0]
 		for i, p := range pred {
 			if p == 0 {

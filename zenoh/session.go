@@ -273,7 +273,10 @@ type Session struct {
 
 	closed    atomic.Bool
 	closeOnce sync.Once
-	clock     hlc
+	// redial is held by clientKeeper while it connects, so that Close
+	// waits for a connection under way instead of leaving it open.
+	redial sync.Mutex
+	clock  hlc
 
 	mu           sync.Mutex
 	faces        map[string]*face // by peer ZID (registered at handshake)
@@ -475,7 +478,10 @@ func (s *Session) clientKeeper() {
 				}
 			}
 		}
-		for backoff := time.Second; s.openClient() != nil; backoff = min(backoff*2, 4*time.Second) {
+		for backoff := time.Second; !s.redialClient(); backoff = min(backoff*2, 4*time.Second) {
+			if s.closed.Load() {
+				return
+			}
 			select {
 			case <-time.After(backoff):
 			case <-s.done:
@@ -483,6 +489,13 @@ func (s *Session) clientKeeper() {
 			}
 		}
 	}
+}
+
+// redialClient is one attempt of clientKeeper (none once closing).
+func (s *Session) redialClient() bool {
+	s.redial.Lock()
+	defer s.redial.Unlock()
+	return !s.closed.Load() && s.openClient() == nil
 }
 
 func (s *Session) openPeer() error {
@@ -630,6 +643,8 @@ func (s *Session) Close() error {
 func (s *Session) shutdown() {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
+		s.redial.Lock() // a client reconnecting: let it finish, it closes again
+		s.redial.Unlock()
 		s.mu.Lock()
 		lns, sc, groups := s.listeners, s.scout, s.mcast
 		s.listeners, s.scout, s.mcast = nil, nil, nil
