@@ -1,6 +1,8 @@
 package zenoh
 
 import (
+	"time"
+
 	"slices"
 
 	"github.com/shabunin/tiny-zenoh-go/keyexpr"
@@ -49,6 +51,8 @@ type meshState struct {
 	net    *lsNetwork
 	remote [nKinds]map[string]map[string]qInfo // key -> source router zid -> info
 	own    [nKinds]map[string]qInfo            // entities we announced as source
+
+	treesPending bool // a recomputation of the trees is scheduled
 }
 
 func newMesh(self ZID, r Region) *meshState {
@@ -375,9 +379,37 @@ func (s *Session) meshRoutersGoneLocked(m *meshState, removed []ZID, out outbox)
 	}
 }
 
-// meshTreesChangedLocked recomputes trees and sends the sourced declarations
+// treesDelay is how long after a change of the graph the trees are
+// recomputed (zenoh-rust TREES_COMPUTATION_DELAY_MS): the changes of a burst
+// of link states, such as a whole mesh reconnecting, cost one computation
+// instead of one each. Routing meanwhile follows the previous trees.
+var treesDelay = 100 * time.Millisecond
+
+// meshTreesChangedLocked schedules the recomputation of m's trees.
+func (s *Session) meshTreesChangedLocked(m *meshState, _ outbox) {
+	if m.treesPending {
+		return
+	}
+	m.treesPending = true
+	time.AfterFunc(treesDelay, func() {
+		out := outbox{}
+		s.mu.Lock()
+		m.treesPending = false
+		if s.closed.Load() {
+			s.mu.Unlock()
+			return
+		}
+		s.meshComputeTreesLocked(m, out)
+		s.mu.Unlock()
+		s.routesChanged()
+		out.send()
+		s.checkMatching()
+	})
+}
+
+// meshComputeTreesLocked recomputes trees and sends the sourced declarations
 // of each tree's root to that tree's new children.
-func (s *Session) meshTreesChangedLocked(m *meshState, out outbox) {
+func (s *Session) meshComputeTreesLocked(m *meshState, out outbox) {
 	net := m.net
 	for root, children := range net.computeTrees() {
 		if len(children) == 0 || net.nodes[root] == nil {
