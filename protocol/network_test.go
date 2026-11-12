@@ -8,6 +8,24 @@ import (
 	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
 
+// unstorePut moves a decoded PUT's timestamp out of the Put's own storage,
+// as a Put written by hand has it.
+func unstorePut(m Message) {
+	var b DataBody
+	switch m := m.(type) {
+	case *Push:
+		b = m.Body
+	case *Response:
+		if r, ok := m.Body.(*Reply); ok {
+			b = r.Body
+		}
+	}
+	if p, ok := b.(*Put); ok && p.Timestamp != nil {
+		ts := *p.Timestamp
+		p.Timestamp, p.ts = &ts, Timestamp{}
+	}
+}
+
 func netRoundTrip(t *testing.T, m Message) {
 	t.Helper()
 	w := codec.NewWriter()
@@ -20,6 +38,7 @@ func netRoundTrip(t *testing.T, m Message) {
 	if r.Remaining() != 0 {
 		t.Errorf("%T: %d trailing bytes", m, r.Remaining())
 	}
+	unstorePut(got)
 	if !reflect.DeepEqual(m, got) {
 		t.Errorf("round-trip %T:\n got  %#v\n want %#v", m, got, m)
 	}

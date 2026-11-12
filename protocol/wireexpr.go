@@ -67,11 +67,11 @@ func DecodeWireExpr(r *codec.Reader, named, mapping bool) (WireExpr, error) {
 	}
 	we.Scope = scope
 	if named {
-		s, err := r.ReadString()
+		b, err := r.ReadZBytes()
 		if err != nil {
 			return WireExpr{}, err
 		}
-		we.Suffix = s
+		we.Suffix = internKey(b)
 	}
 	return we, nil
 }

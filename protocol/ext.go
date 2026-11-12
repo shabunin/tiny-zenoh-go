@@ -33,6 +33,10 @@ type Extension struct {
 	Mandatory bool
 	U64       uint64 // valid when Enc == ExtZ64
 	Buf       []byte // valid when Enc == ExtZBuf
+	// ts, when set, is written instead of Buf: a timestamp extension made
+	// while encoding, so its encoding needs no buffer that outlives the
+	// call (which would put the encoder's extensions on the heap).
+	ts *Timestamp
 }
 
 // WriteExtensions writes a chain of extensions, setting the Z ("more") bit on
@@ -53,7 +57,12 @@ func WriteExtensions(w *codec.Writer, exts []Extension) {
 		case ExtZ64:
 			w.WriteZInt(e.U64)
 		case ExtZBuf:
-			w.WriteZBytes(e.Buf)
+			if e.ts != nil {
+				var b [32]byte // 9 + 1 + 16 at most
+				w.WriteZBytes(appendTimestamp(b[:0], e.ts))
+			} else {
+				w.WriteZBytes(e.Buf)
+			}
 		case ExtUnit:
 			// no payload
 		}

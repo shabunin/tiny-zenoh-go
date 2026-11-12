@@ -920,8 +920,7 @@ const hlcMaxDelta = uint64(1) << 31
 // reports whether the message may go on.
 func (s *Session) stampIngress(p *protocol.Put) bool {
 	if p.Timestamp == nil {
-		t := s.NewTimestamp()
-		p.Timestamp = &t
+		p.SetTimestamp(s.NewTimestamp())
 		return true
 	}
 	if s.clock.update(p.Timestamp.Time) {
@@ -930,7 +929,6 @@ func (s *Session) stampIngress(p *protocol.Put) bool {
 	if s.tsDrop {
 		return false
 	}
-	t := s.NewTimestamp()
-	p.Timestamp = &t
+	p.SetTimestamp(s.NewTimestamp())
 	return true
 }

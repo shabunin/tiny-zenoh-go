@@ -280,8 +280,15 @@ type Session struct {
 	// exprMu also guards localExprs and the faces' remoteExprs: writers
 	// hold it and mu, so readers may hold either (resolving a message's
 	// key needs only this one).
-	exprMu       sync.RWMutex
-	subs         map[uint32]*Subscriber
+	exprMu sync.RWMutex
+	subs   map[uint32]*Subscriber
+	// Route caching (routecache.go): routeGen retires the cached routes,
+	// subList is s.subs as a list (rebuilt on change, read without mu).
+	routeGen     atomic.Uint64
+	pubRoutes    routeCache[*dataRoute]
+	subRoutes    routeCache[[]*Subscriber]
+	subList      atomic.Pointer[[]*Subscriber]
+	mcastN       atomic.Int32 // len(mcast), read without mu
 	queryables   map[uint32]*Queryable
 	queries      map[uint32]*pendingQuery
 	routes       map[uint32]*routedQuery          // router mode: requests forwarded for faces
@@ -813,6 +820,7 @@ func (s *Session) accept(l transport.Link, proto string) {
 // initial declarations and opens the face for traffic. If the link joined the
 // transport of an existing face instead, f only tracks that link.
 func (s *Session) established(f *face, l transport.Link, tr *transport.Unicast, err error) error {
+	defer s.routesChanged() // the face is live (and its links up), or gone
 	if err == nil && f.joinTo != nil && tr == f.joinTo.tr {
 		f.linkDone = tr.LinkDone(l)
 		close(f.ready)

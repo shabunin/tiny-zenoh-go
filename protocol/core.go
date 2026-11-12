@@ -214,19 +214,28 @@ func (ts *Timestamp) encode(w *codec.Writer) {
 }
 
 func decodeTimestamp(r *codec.Reader) (*Timestamp, error) {
+	ts := &Timestamp{}
+	if err := readTimestamp(r, ts); err != nil {
+		return nil, err
+	}
+	return ts, nil
+}
+
+func readTimestamp(r *codec.Reader, ts *Timestamp) error {
 	t, err := r.ReadZInt()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	b, err := r.ReadZBytes()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	id, err := NewZID(b)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return &Timestamp{Time: t, ID: id}, nil
+	*ts = Timestamp{Time: t, ID: id}
+	return nil
 }
 
 // -----------------------------------------------------------------------------

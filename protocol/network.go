@@ -29,7 +29,6 @@ const flagDeclareI = codec.Flag1 // DECLARE carries an interest id
 // the encoder's stack.
 type commonExts struct {
 	arr [3]Extension // QoS, timestamp, NodeID
-	ts  [32]byte     // the timestamp's encoding (at most 9+1+16 bytes)
 }
 
 func buildCommon(cx *commonExts, q QoS, ts *Timestamp) []Extension {
@@ -38,7 +37,9 @@ func buildCommon(cx *commonExts, q QoS, ts *Timestamp) []Extension {
 		exts = append(exts, extZ64(extQoS, uint64(q.Wire())))
 	}
 	if ts != nil {
-		exts = append(exts, extZBuf(extTimestamp, appendTimestamp(cx.ts[:0], ts)))
+		e := extFromKey(extTimestamp)
+		e.ts = ts
+		exts = append(exts, e)
 	}
 	return exts
 }
@@ -130,8 +131,16 @@ func (m *Push) Encode(w *codec.Writer) {
 	m.Body.Encode(w)
 }
 
+// pushPut is a decoded PUSH of a PUT, allocated in one piece, with room
+// for a small payload.
+type pushPut struct {
+	push  Push
+	put   Put
+	small [32]byte
+}
+
 func decodePush(r *codec.Reader, hdr byte) (*Push, error) {
-	m := &Push{}
+	var m Push
 	var err error
 	if m.WireExpr, err = DecodeWireExpr(r, hdr&flagWireN != 0, hdr&flagWireM != 0); err != nil {
 		return nil, err
@@ -156,10 +165,28 @@ func decodePush(r *codec.Reader, hdr byte) (*Push, error) {
 			}
 		}
 	}
-	if m.Body, err = decodeDataBody(r); err != nil {
+	bh, err := r.ReadByte()
+	if err != nil {
 		return nil, err
 	}
-	return m, nil
+	switch codec.MsgID(bh) {
+	case IDPut:
+		pp := &pushPut{push: m}
+		if err := decodePutInto(&pp.put, r, bh, pp.small[:]); err != nil {
+			return nil, err
+		}
+		pp.push.Body = &pp.put
+		return &pp.push, nil
+	case IDDel:
+		if m.Body, err = decodeDel(r, bh); err != nil {
+			return nil, err
+		}
+		mp := new(Push)
+		*mp = m
+		return mp, nil
+	default:
+		return nil, ErrUnknownMessage
+	}
 }
 
 // -----------------------------------------------------------------------------

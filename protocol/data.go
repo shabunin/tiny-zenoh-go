@@ -63,6 +63,16 @@ type Put struct {
 	// ShmBuf, in-process only (never encoded), is the shared-memory buffer
 	// (*shm.Buf) Payload lies in: SHM links get a reference to it.
 	ShmBuf any
+
+	ts Timestamp // what Timestamp points to after decoding or SetTimestamp
+}
+
+// SetTimestamp sets the timestamp, stored in the Put itself (no allocation).
+// Copies of the Put made before share it, so it is for a Put not yet handed
+// on, such as one just decoded.
+func (m *Put) SetTimestamp(t Timestamp) {
+	m.ts = t
+	m.Timestamp = &m.ts
 }
 
 func (*Put) msgID() byte { return IDPut }
@@ -109,29 +119,39 @@ func (m *Put) Encode(w *codec.Writer) {
 
 func decodePut(r *codec.Reader, hdr byte) (*Put, error) {
 	m := &Put{}
+	if err := decodePutInto(m, r, hdr, nil); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// decodePutInto decodes a PUT into m. A payload that fits in small is
+// copied there instead of into a new buffer.
+func decodePutInto(m *Put, r *codec.Reader, hdr byte, small []byte) error {
 	var err error
 	shm := false
 	if hdr&flagPutT != 0 {
-		if m.Timestamp, err = decodeTimestamp(r); err != nil {
-			return nil, err
+		if err := readTimestamp(r, &m.ts); err != nil {
+			return err
 		}
+		m.Timestamp = &m.ts
 	}
 	if hdr&flagPutE != 0 {
 		if m.Encoding, err = decodeEncoding(r); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if codec.HasZ(hdr) {
 		var arr [4]Extension
 		exts, err := readExts(arr[:0], r, false) // copied below where kept
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for _, e := range exts {
 			switch e.key() {
 			case extSourceInfo:
 				if m.SourceInfo, err = decodeSourceInfo(codec.NewReader(e.Buf)); err != nil {
-					return nil, err
+					return err
 				}
 			case extPutAttachment:
 				m.Attachment = append([]byte(nil), e.Buf...)
@@ -139,7 +159,7 @@ func decodePut(r *codec.Reader, hdr byte) (*Put, error) {
 				shm = true
 			default:
 				if err := checkUnknown(e); err != nil {
-					return nil, err
+					return err
 				}
 				if e.Buf != nil {
 					e.Buf = append([]byte(nil), e.Buf...)
@@ -150,14 +170,19 @@ func decodePut(r *codec.Reader, hdr byte) (*Put, error) {
 	}
 	if shm {
 		m.Parts, err = decodeParts(r)
-		return m, err
+		return err
 	}
 	pl, err := r.ReadZBytes()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	m.Payload = append([]byte{}, pl...)
-	return m, nil
+	if len(pl) <= len(small) {
+		m.Payload = small[:len(pl):len(pl)]
+		copy(m.Payload, pl)
+	} else {
+		m.Payload = append([]byte{}, pl...)
+	}
+	return nil
 }
 
 // -----------------------------------------------------------------------------

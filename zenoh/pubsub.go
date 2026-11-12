@@ -2,6 +2,7 @@ package zenoh
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/shabunin/tiny-zenoh-go/keyexpr"
 	"github.com/shabunin/tiny-zenoh-go/protocol"
@@ -16,17 +17,11 @@ func (s *Session) dispatchSample(smp Sample, local bool) {
 		return // outside our namespace
 	}
 	smp.KeyExpr = user
-	s.mu.Lock()
-	var buf [8]func(Sample)
-	handlers := buf[:0]
-	for _, sub := range s.subs {
-		if sub.origin.allows(local) && keyexpr.Intersect(sub.key.String(), full) {
-			handlers = append(handlers, sub.handler)
+	var buf [8]*Subscriber
+	for _, sub := range s.localSubs(full, buf[:0]) {
+		if sub.origin.allows(local) {
+			sub.handler(smp)
 		}
-	}
-	s.mu.Unlock()
-	for _, h := range handlers {
-		h(smp)
 	}
 }
 
@@ -35,30 +30,57 @@ func (s *Session) dispatchSample(smp Sample, local bool) {
 // -----------------------------------------------------------------------------
 
 func (s *Session) buildData(kind SampleKind, o *putOptions) protocol.DataBody {
+	if kind == SampleKindPut {
+		p := &protocol.Put{}
+		s.fillPut(p, o)
+		return p
+	}
 	ts := o.timestamp
 	if ts == nil && (o.autoTS || s.tsOn) {
 		t := s.NewTimestamp()
 		ts = &t
 	}
-	if kind == SampleKindDelete {
-		return &protocol.Del{Timestamp: ts, Attachment: o.attachment, SourceInfo: o.sourceInfo}
-	}
-	p := &protocol.Put{Timestamp: ts, Encoding: o.encoding.wire(), Attachment: o.attachment,
+	return &protocol.Del{Timestamp: ts, Attachment: o.attachment, SourceInfo: o.sourceInfo}
+}
+
+// fillPut sets a PUT's fields (but the payload) from o.
+func (s *Session) fillPut(p *protocol.Put, o *putOptions) {
+	*p = protocol.Put{Timestamp: o.timestamp, Encoding: o.encoding.wire(), Attachment: o.attachment,
 		SourceInfo: o.sourceInfo}
 	if o.shmBuf != nil {
 		p.ShmBuf = o.shmBuf
 	}
-	return p
+	if p.Timestamp == nil && (o.autoTS || s.tsOn) {
+		p.SetTimestamp(s.NewTimestamp())
+	}
+}
+
+// pushPut is a PUSH of a PUT we publish, allocated in one piece.
+type pushPut struct {
+	push protocol.Push
+	put  protocol.Put
 }
 
 func (s *Session) publish(key string, we protocol.WireExpr, kind SampleKind, payload []byte, o *putOptions) error {
+	return s.publishVia(key, we, kind, payload, o, nil)
+}
+
+// publishVia publishes, with route the publisher's route cache (or nil).
+func (s *Session) publishVia(key string, we protocol.WireExpr, kind SampleKind, payload []byte, o *putOptions, route *atomic.Pointer[genRoute]) error {
 	if s.closed.Load() {
 		return ErrSessionClosed
 	}
-	body := s.buildData(kind, o)
-	if p, ok := body.(*protocol.Put); ok {
-		p.Payload = o.payloadOf(payload)
+	var msg *protocol.Push
+	var body protocol.DataBody
+	if kind == SampleKindPut {
+		pp := &pushPut{}
+		s.fillPut(&pp.put, o)
+		pp.put.Payload = o.payloadOf(payload)
+		msg, body = &pp.push, &pp.put
+	} else {
+		msg, body = &protocol.Push{}, s.buildData(kind, o)
 	}
+	*msg = protocol.Push{WireExpr: we, QoS: o.qos(), Body: body}
 	// Deliver to this session's own matching subscribers, like zenoh-rust.
 	if o.destination != LocalityRemote {
 		smp := sampleFromBody(key, body, o.qos())
@@ -69,26 +91,19 @@ func (s *Session) publish(key string, we protocol.WireExpr, kind SampleKind, pay
 		return nil
 	}
 
-	s.mu.Lock()
-	var buf [8]*face
-	dst := buf[:0]
-	for _, f := range s.faces {
-		if f.wantsDataLocked(key) {
-			dst = append(dst, f)
-		}
-	}
-	routers, _ := s.meshRouteLocked(kindSub, nil, 0, key, 0)
-	for f := range routers {
-		dst = append(dst, f)
-	}
-	s.mu.Unlock()
+	r := s.publishRoute(key, route)
 	s.mcastPublish(key, o.qos(), body, o.reliability == Reliable)
-	msg := &protocol.Push{WireExpr: we, QoS: o.qos(), Body: body}
 	var first error
-	for _, f := range dst {
+	send := func(f *face) {
 		if err := f.send(o.reliability == Reliable, msg); err != nil && first == nil {
 			first = err
 		}
+	}
+	for _, f := range r.faces {
+		send(f)
+	}
+	for _, h := range r.routers {
+		send(h.f) // our own data enters every mesh at us: tree 0, as msg has
 	}
 	if s.cfg.Mode == ModeClient {
 		if first != nil && s.closed.Load() {
@@ -159,6 +174,7 @@ func (s *Session) DeclareSubscriber(key string, handler func(Sample), opts ...Su
 	}
 	s.mu.Lock()
 	s.subs[sub.id] = sub
+	s.subsChangedLocked()
 	if !sub.remote() {
 		s.mu.Unlock()
 		s.checkMatching()
@@ -169,6 +185,7 @@ func (s *Session) DeclareSubscriber(key string, handler func(Sample), opts ...Su
 	if err != nil {
 		s.mu.Lock()
 		delete(s.subs, sub.id)
+		s.subsChangedLocked()
 		s.mu.Unlock()
 		return nil, err
 	}
@@ -204,6 +221,7 @@ func (sub *Subscriber) Undeclare() error {
 		s.mu.Unlock()
 		return nil
 	}
+	s.subsChangedLocked()
 	sub.once.Do(func() { close(sub.stop) })
 	if !sub.remote() {
 		s.mu.Unlock()
@@ -228,6 +246,7 @@ type Publisher struct {
 	opts   []PutOption
 	base   putOptions // the defaults with opts applied
 	m      *matcher
+	route  atomic.Pointer[genRoute]
 }
 
 // DeclarePublisher declares a publisher on key; opts become its defaults.
@@ -287,13 +306,13 @@ func (p *Publisher) wire() protocol.WireExpr {
 // Put publishes payload.
 func (p *Publisher) Put(payload []byte, opts ...PutOption) error {
 	o := p.options(opts)
-	return p.s.publish(p.key, p.wire(), SampleKindPut, payload, &o)
+	return p.s.publishVia(p.key, p.wire(), SampleKindPut, payload, &o, &p.route)
 }
 
 // Delete publishes a deletion.
 func (p *Publisher) Delete(opts ...PutOption) error {
 	o := p.options(opts)
-	return p.s.publish(p.key, p.wire(), SampleKindDelete, nil, &o)
+	return p.s.publishVia(p.key, p.wire(), SampleKindDelete, nil, &o, &p.route)
 }
 
 // Undeclare releases the publisher's key-expression id and its matching

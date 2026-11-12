@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shabunin/tiny-zenoh-go/keyexpr"
@@ -58,6 +59,54 @@ func (h *histogram) observe(v uint64) {
 	h.sum += v
 }
 
+// liveHist is a histogram updated without locks.
+type liveHist struct {
+	sum atomic.Uint64
+	n   [len(payloadBuckets) + 1]atomic.Uint64
+}
+
+func (h *liveHist) observe(v uint64) {
+	i := 0
+	for i < len(payloadBuckets) && v > payloadBuckets[i] {
+		i++
+	}
+	h.n[i].Add(1)
+	h.sum.Add(v)
+}
+
+func (h *liveHist) load() histogram {
+	var out histogram
+	out.sum = h.sum.Load()
+	for i := range h.n {
+		out.n[i] = h.n[i].Load()
+	}
+	return out
+}
+
+// The payload histograms of an open transport sit in fixed slots, one per
+// payloadKey: dir, space, prio, shm, and the data kinds (Put .. ReplyErr).
+const (
+	nPayloadKinds = int(transport.KindReplyErr) + 1
+	nPayloadSlots = 2 * 2 * 8 * 2 * nPayloadKinds
+)
+
+func payloadSlot(k payloadKey) int {
+	return (((int(k.dir)*2+int(k.space))*8+int(k.prio))*2+int(k.shm))*nPayloadKinds + int(k.kind)
+}
+
+func slotPayloadKey(i int) payloadKey {
+	var k payloadKey
+	k.kind = transport.MessageKind(i % nPayloadKinds)
+	i /= nPayloadKinds
+	k.shm = uint8(i % 2)
+	i /= 2
+	k.prio = uint8(i % 8)
+	i /= 8
+	k.space = uint8(i % 2)
+	k.dir = uint8(i / 2)
+	return k
+}
+
 func (h *histogram) add(o *histogram) {
 	h.sum += o.sum
 	for i := range h.n {
@@ -98,11 +147,42 @@ type statsTransport struct {
 	group  *mcastGroup // multicast
 	closed time.Time   // when it closed, zero while open (guarded by statsRegistry.mu)
 
+	// live are the payload histograms recorded while the transport is open,
+	// by payloadSlot (allocated on first use).
+	live [nPayloadSlots]atomic.Pointer[liveHist]
+
 	mu      sync.Mutex
 	retired map[string]*transport.LinkCounts // links gone, by protocol
-	payload map[payloadKey]*histogram
+	payload map[payloadKey]*histogram        // folded in from others (r.gone)
 	perKey  map[perKeyKey]*histogram
 	dropped map[dropKey]*histogram
+}
+
+// payloadLocked returns all of the payload histograms: those folded in and
+// the live ones.
+func (t *statsTransport) payloadLocked() map[payloadKey]*histogram {
+	out := make(map[payloadKey]*histogram, len(t.payload))
+	mergeHists(out, t.payload)
+	for i := range t.live {
+		if h := t.live[i].Load(); h != nil {
+			v := h.load()
+			k := slotPayloadKey(i)
+			if out[k] == nil {
+				out[k] = &histogram{}
+			}
+			out[k].add(&v)
+		}
+	}
+	return out
+}
+
+// livePayload returns the live histogram of slot i, made on first use.
+func (t *statsTransport) livePayload(i int) *liveHist {
+	if h := t.live[i].Load(); h != nil {
+		return h
+	}
+	t.live[i].CompareAndSwap(nil, &liveHist{})
+	return t.live[i].Load()
 }
 
 func newStatsTransport(l statsLabels) *statsTransport {
@@ -149,7 +229,7 @@ func (r *statsRegistry) gcLocked(now time.Time) {
 			}
 			g.retired[p].Add(c)
 		}
-		mergeHists(g.payload, t.payload)
+		mergeHists(g.payload, t.payloadLocked())
 		mergeHists(g.perKey, t.perKey)
 		mergeHists(g.dropped, t.dropped)
 		g.mu.Unlock()
@@ -238,14 +318,12 @@ func (t *statsTransport) observe(filters []string, dir int, m any, key string, s
 		k.shm = 1
 	}
 	size := uint64(msgSize(m))
+	t.livePayload(payloadSlot(k)).observe(size)
+	if len(filters) == 0 {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	h := t.payload[k]
-	if h == nil {
-		h = &histogram{}
-		t.payload[k] = h
-	}
-	h.observe(size)
 	for i, f := range filters {
 		if key == "" || !keyexpr.Intersect(f, key) {
 			continue
@@ -467,7 +545,7 @@ func (s *Session) statsSnap() (open []*transportSnap, gone *transportSnap, links
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		out := &transportSnap{labels: t.labels, retired: map[string]transport.LinkCounts{},
-			payload: copyHists(t.payload), perKey: copyHists(t.perKey), dropped: copyHists(t.dropped)}
+			payload: copyHists(t.payloadLocked()), perKey: copyHists(t.perKey), dropped: copyHists(t.dropped)}
 		for p, c := range t.retired {
 			out.retired[p] = *c
 		}

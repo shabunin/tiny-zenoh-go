@@ -127,6 +127,7 @@ func (s *Session) declareAdminConfig() error {
 	sub.handler = func(smp Sample) { s.onAdminConfig(strings.TrimPrefix(smp.KeyExpr, prefix), smp) }
 	s.mu.Lock()
 	s.subs[sub.id] = sub
+	s.subsChangedLocked()
 	return s.declareLocalLocked(kindSub, k.String(), &protocol.Declare{QoS: protocol.QoSDeclare,
 		Body: &protocol.DeclareSubscriber{ID: sub.id, WireExpr: protocol.WireExpr{Suffix: k.String()}}})
 }

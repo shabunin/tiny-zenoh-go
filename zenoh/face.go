@@ -80,6 +80,9 @@ type face struct {
 	closePending bool
 	initial      []transport.Encoder // declarations to send right after the handshake
 
+	// routes are the cached routes of the data it brings.
+	routes routeCache[*dataRoute]
+
 	// Guarded by s.mu.
 	remoteExprs map[uint16]string // key-expr ids it declared
 	subs        map[uint32]string // its subscribers (push faces)
@@ -113,6 +116,16 @@ func (f *face) send(reliable bool, msgs ...transport.Encoder) error {
 	if f.tr == nil {
 		return transport.ErrClosed
 	}
+	if f.acl != nil || f.icpt != nil || f.shm != nil {
+		// On a copy: these keep or return the list, which would otherwise
+		// put every caller's variadic list on the heap.
+		return f.sendFiltered(reliable, append([]transport.Encoder(nil), msgs...))
+	}
+	return f.sendNow(reliable, msgs)
+}
+
+// sendFiltered applies access control, interceptors and shared memory.
+func (f *face) sendFiltered(reliable bool, msgs []transport.Encoder) error {
 	if f.acl != nil || f.icpt != nil {
 		if msgs = f.interceptEgress(msgs, reliable); len(msgs) == 0 {
 			return nil
@@ -123,6 +136,10 @@ func (f *face) send(reliable bool, msgs ...transport.Encoder) error {
 		msgs, sent = f.toShm(msgs)
 		defer sent()
 	}
+	return f.sendNow(reliable, msgs)
+}
+
+func (f *face) sendNow(reliable bool, msgs []transport.Encoder) error {
 	err := f.tr.Send(reliable, msgs...)
 	ce := congestionOf(err)
 	if ce != nil {
@@ -307,6 +324,7 @@ func (f *face) teardown() {
 	}
 	f.tokens = map[uint32]string{}
 	s.mu.Unlock()
+	s.routesChanged()
 
 	out.send()
 	if f.routed {
@@ -422,6 +440,7 @@ func (f *face) dispatch(m protocol.Message, reliable bool) error {
 			s.routerForward(f, key, m, reliable)
 		}
 	case *protocol.OAM:
+		defer s.routesChanged() // link states, gateways
 		if f.mesh {
 			s.meshOAM(f, m)
 			s.checkMatching()
@@ -458,6 +477,7 @@ func (f *face) dispatch(m protocol.Message, reliable bool) error {
 			s.queryFinal(m.RequestID, f)
 		}
 	case *protocol.Declare:
+		defer s.routesChanged()
 		if f.mesh {
 			switch m.Body.(type) {
 			case *protocol.DeclareKeyExpr, *protocol.UndeclareKeyExpr:
@@ -470,6 +490,7 @@ func (f *face) dispatch(m protocol.Message, reliable bool) error {
 		f.handleDeclare(m)
 		s.checkMatching()
 	case *protocol.Interest:
+		defer s.routesChanged()
 		switch {
 		case f.mesh: // routers don't send each other interests
 		case f.router != nil:

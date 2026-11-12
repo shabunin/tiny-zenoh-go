@@ -502,32 +502,20 @@ func (s *Session) routerFaceGoneLocked(f *face, out outbox) {
 // routerForward sends a PUSH received from src to every other face whose
 // subscribers match.
 func (s *Session) routerForward(src *face, key string, m *protocol.Push, reliable bool) {
-	s.mu.Lock()
-	routers, ok := s.meshRouteLocked(kindSub, src, m.NodeID, key, 0)
-	if !ok {
-		s.mu.Unlock()
+	r := s.forwardRoute(src, m.NodeID, key)
+	if r.drop {
 		return
 	}
-	tree, _ := s.meshSourceLocked(src, m.NodeID)
-	origin := s.originOf(src, tree)
-	var buf [8]*face
-	dst := buf[:0]
-	for _, f := range s.faces {
-		if f.live && f.wantsDataLocked(key) && s.forwardsLocked(src, f, origin) {
-			dst = append(dst, f)
-		}
+	// m is ours (just decoded, and only its body went to our subscribers),
+	// and sending encodes it at once: it is forwarded as it is.
+	m.WireExpr = protocol.WireExpr{Suffix: key}
+	m.NodeID = 0
+	for _, f := range r.faces {
+		_ = f.send(reliable, m)
 	}
-	s.mu.Unlock()
-	fwd := *m
-	fwd.WireExpr = protocol.WireExpr{Suffix: key}
-	fwd.NodeID = 0
-	for _, f := range dst {
-		_ = f.send(reliable, &fwd)
-	}
-	for f, node := range routers {
-		meshFwd := fwd
-		meshFwd.NodeID = node
-		_ = f.send(reliable, &meshFwd)
+	for _, h := range r.routers {
+		m.NodeID = h.node
+		_ = h.f.send(reliable, m)
 	}
 }
 

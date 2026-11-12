@@ -225,6 +225,7 @@ func (m *matcher) notify() {
 // checkMatching re-evaluates every matcher with listeners; it is called after
 // anything that may change a matching status.
 func (s *Session) checkMatching() {
+	s.routesChanged() // (called after the changes routes depend on, too)
 	s.mu.Lock()
 	var ms []*matcher
 	for _, m := range s.matchers {

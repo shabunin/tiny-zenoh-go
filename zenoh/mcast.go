@@ -81,6 +81,7 @@ func (s *Session) openMulticast(ep string) error {
 	s.mu.Lock()
 	g.tr = tr
 	s.mcast = append(s.mcast, g)
+	s.mcastN.Store(int32(len(s.mcast)))
 	s.mu.Unlock()
 	s.statsGroupUp(g)
 	return nil
@@ -127,6 +128,9 @@ func (s *Session) mcastResolve(g *mcastGroup, addr string, we protocol.WireExpr)
 
 // mcastPublish sends a publication to every group.
 func (s *Session) mcastPublish(key string, qos protocol.QoS, body protocol.DataBody, reliable bool) {
+	if s.mcastN.Load() == 0 {
+		return
+	}
 	s.mu.Lock()
 	groups := s.mcast
 	s.mu.Unlock()
