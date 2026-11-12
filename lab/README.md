@@ -24,6 +24,7 @@ Topologies for the other scenarios:
 ```bash
 ./gen.py ring --impl tzd,tzd,zenohd,zenohd --storage r1,r3 --name part-mixed
 ./gen.py gateway --impl tzd,zenohd,tzd --gossip --name gw-mixed
+./gen.py line --impl tzd,zenohd,tzd --wmem 65536 --name line-mixed
 ```
 
 `gen.py` makes a ring (or a line) of routers r1..rN, each dialing the next
@@ -87,3 +88,43 @@ takes over until the lost one is back). Before that change there was no
 failover at all; the lab also found a liveliness bug (a client saw its
 own new token deleted through tzd) and a peer that does not listen
 waiting a second before dialing a gossiped peer.
+
+**netem**: a line c1 – r1 – r2 – r3 – c2; c1 publishes 1000 samples/s
+(64 B, reliable, congestion control Drop unless said) for 10 s while the
+r1–r2 link is degraded with `tc netem` on both ends, one condition at a
+time. The routers' TCP send buffers are capped at 64 KB (`--wmem`): with
+the kernel's default (autotuned up to 4 MB) a slow link just queues
+seconds of data in the socket and no congestion control ever acts.
+
+Missing samples (and the longest silence) per condition:
+
+| r1–r2 link | tzd ×3 | zenohd ×3 | tzd, zenohd, tzd |
+|---|---|---|---|
+| clean | 0 (4 ms) | 0 (7 ms) | 0 (4 ms) |
+| delay 25 ms ± 5 ms | 0, p99 37 ms | 0, p99 43 ms | 0, p99 42 ms |
+| loss 1% | 0 (0.2 s) | 0 (0.2 s) | 0 (0.2 s) |
+| loss 5% | 0 (0.6 s) | 0 (0.3 s) | 310 (1.4 s) |
+| WAN: 25 ms ± 5 ms, loss 2% | 0, p99 98 ms | 0, p99 99 ms | 0, p99 111 ms |
+| loss 20% | 2973, reset | 578 | 3932, reset |
+| dark for 1 s | 374 | 101, reset | 291 |
+| dark for 1.5 s | 2470, reset | 2665, reset | 2604, reset |
+| 1 Mbit/s, 256 B samples (2× too many), Drop | 5678, p99 1.4 s | 5239, p99 1.5 s | 5682, p99 1.3 s |
+| same, Block | 0, p99 15 s | 0, p99 13 s | 0, p99 15 s |
+
+TCP retransmits hide light loss and short delay entirely (no sample lost,
+latency up by a retransmission timeout). What is lost is lost on purpose:
+under heavy loss, a blackout or a bandwidth cap the link stalls, r1's queue
+fills and Drop drops (Block delivers everything, late). A blackout longer
+than about 1.4 s outlives the 2 s lease: TCP's retransmission backoff (0.2,
+0.4, 0.8 s, then 1.6 s) leaves the link silent past it, the transport is
+reset and its queue lost; loss 20% does the same now and then. The three
+behave alike; the numbers vary from run to run where TCP stalls.
+
+The lab also showed that a publisher closing its session right after a
+burst lost what was still in the socket buffers (the router's next
+keep-alive met the closed socket and reset the connection): Close now
+half-closes TCP/TLS/unix links after its CLOSE and waits, up to the lease,
+for the other side to read it all (`zenoh.Config.CloseLinger`). A Go
+publisher closing at once on the capped link with Block: 5228 of 10001
+delivered before, 8973 now (the rest was still queued when the 10 s lease
+ran out).

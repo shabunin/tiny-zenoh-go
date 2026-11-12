@@ -10,7 +10,8 @@
 //	zlab put -e ... -k lab/store/a -v A1
 //	zlab get -e ... -k 'lab/store/**'
 //
-// -mode peer (with -l to listen) makes it a peer instead of a client.
+// -mode peer (with -l to listen) makes it a peer instead of a client; pub
+// -block publishes with congestion control Block instead of Drop.
 package main
 
 import (
@@ -48,6 +49,8 @@ func main() {
 	size := fs.Int("size", 16, "pub: payload size (at least 16)")
 	dur := fs.Duration("d", 30*time.Second, "how long to run")
 	besteffort := fs.Bool("best-effort", false, "pub: best-effort reliability")
+	block := fs.Bool("block", false, "pub: congestion control Block (default Drop)")
+	linger := fs.Duration("linger", 0, "pub: wait this long before closing the session")
 	var listen list
 	fs.Var(&listen, "l", "locator to listen on (peer mode; repeatable)")
 	zid := fs.String("id", "", "ZID in hex (default random)")
@@ -82,7 +85,8 @@ func main() {
 	defer s.Close()
 	switch cmd {
 	case "pub":
-		pub(s, *key, *rate, max(*size, 16), *dur, *besteffort)
+		pub(s, *key, *rate, max(*size, 16), *dur, *besteffort, *block)
+		time.Sleep(*linger)
 	case "sub":
 		sub(s, *key, *dur)
 	case "alive":
@@ -104,10 +108,13 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
-func pub(s *zenoh.Session, key string, rate, size int, dur time.Duration, besteffort bool) {
+func pub(s *zenoh.Session, key string, rate, size int, dur time.Duration, besteffort, block bool) {
 	var opts []zenoh.PutOption
 	if besteffort {
 		opts = append(opts, zenoh.WithReliability(zenoh.BestEffort))
+	}
+	if block {
+		opts = append(opts, zenoh.WithCongestionControl(zenoh.CongestionBlock))
 	}
 	p, err := s.DeclarePublisher(key, opts...)
 	if err != nil {
@@ -116,6 +123,7 @@ func pub(s *zenoh.Session, key string, rate, size int, dur time.Duration, bestef
 	buf := make([]byte, size)
 	start := time.Now()
 	var seq, errs uint64
+	var maxPut time.Duration
 	period := time.Second / time.Duration(rate)
 	for next := start; time.Since(start) < dur; next = next.Add(period) {
 		if d := time.Until(next); d > 0 {
@@ -123,12 +131,15 @@ func pub(s *zenoh.Session, key string, rate, size int, dur time.Duration, bestef
 		}
 		binary.BigEndian.PutUint64(buf[0:], seq)
 		binary.BigEndian.PutUint64(buf[8:], uint64(time.Now().UnixNano()))
+		t := time.Now()
 		if p.Put(buf) != nil {
 			errs++
 		}
+		maxPut = max(maxPut, time.Since(t))
 		seq++
 	}
-	out(map[string]any{"role": "pub", "sent": seq, "errors": errs, "secs": time.Since(start).Seconds()})
+	out(map[string]any{"role": "pub", "sent": seq, "errors": errs, "secs": time.Since(start).Seconds(),
+		"max_put_ms": maxPut.Milliseconds()})
 }
 
 // gap is a run of samples that never came.

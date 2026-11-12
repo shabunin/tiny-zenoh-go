@@ -12,6 +12,9 @@
 #   run.sh gateway TOPO     gateway shape: traffic across the two gateways
 #                           of a peer subregion while the forwarding one is
 #                           cut off and comes back
+#   run.sh netem TOPO       line of 3: c1 -> c2 traffic while the r1-r2 link
+#                           is degraded with netem (delay, jitter, loss, a
+#                           blackout shorter than the lease, a bandwidth cap)
 #
 # Results (the agents' JSON, an event log, a summary) go to
 # results/TOPO-SCENARIO.
@@ -251,6 +254,104 @@ gateway() {
 	} | tee "$OUT/summary.txt"
 }
 
+# netem_set "r1:eth1 r2:eth1" ARGS...: netem with ARGS on both ends (none:
+# remove it).
+netem_set() {
+	local end
+	for end in $1; do
+		if [ "$2" = none ]; then
+			nsexec "${end%%:*}" tc qdisc del dev "${end##*:}" root 2>/dev/null || true
+		else
+			nsexec "${end%%:*}" tc qdisc replace dev "${end##*:}" root netem "${@:2}"
+		fi
+	done
+}
+
+# hwm NODE: the router's peak resident memory (kB).
+hwm() {
+	docker exec "$(ns "$1")" sh -c 'grep VmHWM /proc/1/status' | awk '{print $2}'
+}
+
+# r1_ports: r1's local ports of TCP connections to r2 (one per transport).
+r1_ports() {
+	nsexec r1 ss -tnH state established dst 10.0.1.1 | awk '{split($3,a,":"); print a[2]}' | sort -u | tr '\n' ' '
+}
+
+# netem_case NAME PAYLOAD BLOCK NETEM...: one flow of 10 s at 1000/s (on a
+# key of its own) with the r1-r2 link degraded; NETEM "blackout SECS" cuts
+# the link (100% loss) for SECS, 3 s into the flow. The publisher waits 14 s
+# before closing its session, so that a backlog still on its way is measured
+# as latency, not cut short by the close (which waits for it at most the
+# lease, see zenoh.Config.CloseLinger).
+netem_case() {
+	local name=$1 size=$2 block=$3
+	shift 3
+	local d="$OUT/$name" ports="" bo=""
+	mkdir -p "$d"
+	if [ "$1" = blackout ]; then
+		bo=$2
+		netem_set "$LINK_r1_r2" none
+	else
+		netem_set "$LINK_r1_r2" "$@"
+	fi
+	agent c2 sub -k "lab/netem/$name" -d 28s > "$d/sub.json" &
+	sleep 2
+	event "$name: netem '$*', payload $size, block=$block"
+	local popt=""
+	[ "$block" = 1 ] && popt=-block
+	# shellcheck disable=SC2086
+	agent c1 pub -k "lab/netem/$name" -rate 1000 -size "$size" $popt -d 10s -linger 14s > "$d/pub.json" &
+	local i
+	if [ -n "$bo" ]; then
+		(
+			sleep 3
+			netem_set "$LINK_r1_r2" loss 100% && event "$name: link dark"
+			sleep "$bo"
+			netem_set "$LINK_r1_r2" none && event "$name: link back"
+		) &
+	fi
+	for i in $(seq 1 24); do
+		ports="$ports $(r1_ports)"
+		sleep 1
+	done
+	wait
+	netem_set "$LINK_r1_r2" none
+	echo "$ports" | tr ' ' '\n' | grep -v '^$' | sort -u | wc -l > "$d/transports"
+	echo "$(hwm r1) $(hwm r2)" > "$d/hwm"
+}
+
+netem() {
+	[ "$SHAPE" = line ] && [ "$ROUTERS" = "r1 r2 r3" ] || { echo "netem: needs a line of 3"; exit 1; }
+	OUT=results/$TOPO-netem
+	rm -rf "$OUT" && mkdir -p "$OUT"
+	T0=$(date +%s.%N)
+	netem_case base 64 0 none
+	netem_case delay 64 0 delay 25ms 5ms
+	netem_case loss1 64 0 loss 1%
+	netem_case loss5 64 0 loss 5%
+	netem_case wan 64 0 delay 25ms 5ms loss 2%
+	netem_case loss20 64 0 loss 20%
+	netem_case dark1s 64 0 blackout 1
+	netem_case dark1.5s 64 0 blackout 1.5
+	# A 1 Mbit/s link with 50 packets of buffer (~0.6 s), offered twice that.
+	netem_case cap-drop 256 0 rate 1mbit limit 50
+	netem_case cap-block 256 1 rate 1mbit limit 50
+	python3 - "$OUT" <<'PY' | tee "$OUT/summary.txt"
+import json, os, sys
+d = sys.argv[1]
+print(f"{'case':10} {'sent':>6} {'recv':>6} {'missing':>7} {'dup':>4} {'reord':>5} {'silence':>8} "
+      f"{'p50':>8} {'p99':>8} {'max':>8} {'put max':>8} {'transp':>6} {'r1/r2 peak MB':>14}")
+for c in ["base", "delay", "loss1", "loss5", "wan", "loss20", "dark1s", "dark1.5s", "cap-drop", "cap-block"]:
+    p, s = (json.load(open(f"{d}/{c}/{x}.json")) for x in ("pub", "sub"))
+    tr = open(f"{d}/{c}/transports").read().strip()
+    h = [int(x) / 1024 for x in open(f"{d}/{c}/hwm").read().split()]
+    l = s["latency_ms"]
+    print(f"{c:10} {p['sent']:6} {s['received']:6} {p['sent'] - s['received']:7} {s['duplicates']:4} "
+          f"{s['reordered']:5} {s['max_silence_ms']:6}ms {l['p50']:6.1f}ms {l['p99']:6.1f}ms "
+          f"{l['max']:6.0f}ms {p['max_put_ms']:6}ms {tr:>6} {h[0]:6.1f}/{h[1]:.1f}")
+PY
+}
+
 case "${1:-}" in
 image)
 	docker build -q -t tzlab:latest image
@@ -265,12 +366,12 @@ down)
 	load "$2"
 	(cd "topos/$TOPO" && sudo containerlab destroy -t topo.clab.yml --cleanup >/dev/null)
 	;;
-failover | partition | gateway)
+failover | partition | gateway | netem)
 	load "$2"
 	"$1"
 	;;
 *)
-	sed -n '2,19p' "$0"
+	sed -n '2,22p' "$0"
 	exit 2
 	;;
 esac

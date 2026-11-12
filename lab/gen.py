@@ -32,6 +32,8 @@ ap.add_argument("--lease", type=int, default=2000, help="transport lease (ms)")
 ap.add_argument("--storage", default="", help="comma-separated routers with a replicated "
                 "memory storage on lab/store/**")
 ap.add_argument("--gossip", action="store_true", help="gossip scouting on the routers")
+ap.add_argument("--wmem", type=int, default=0, help="routers' TCP send buffer limit in bytes "
+                "(net.ipv4.tcp_wmem max; default: the kernel's, autotuned up to 4 MB)")
 ap.add_argument("--tzlab-image", default="tzlab:latest")
 ap.add_argument("--zenohd-image", default="eclipse/zenoh:1.10.2")
 ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "topos"))
@@ -101,6 +103,8 @@ for r, impl in zip(routers, impls):
     y += [f"    {r}:", "      kind: linux", "      network-mode: none",
           f"      labels: {{impl: {impl}}}",
           f"      binds: [cfg/{r}.json5:/cfg/{r}.json5:ro]"]
+    if a.wmem:
+        y += [f'      sysctls: {{net.ipv4.tcp_wmem: "4096 16384 {a.wmem}"}}']
     if impl == "tzd":
         y += [f"      image: {a.tzlab_image}", f"      cmd: tzd -config /cfg/{r}.json5"]
     else:
