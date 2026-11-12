@@ -212,3 +212,32 @@ func TestRouterAggregateInterest(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 }
+
+// TestPutThenClose: what a client puts right before closing reaches the
+// router: the CLOSE must not overtake data still in the transmission queue.
+func TestPutThenClose(t *testing.T) {
+	r := openRouter(t)
+	got := make(chan string, 16)
+	if _, err := r.DeclareSubscriber("ptc/**", func(smp Sample) { got <- string(smp.Payload) }); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 5 {
+		s, err := Open(Config{Mode: ModeClient, Connect: r.Locators()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "v" + string(rune('0'+i))
+		if err := s.Put("ptc/a", []byte(want)); err != nil {
+			t.Fatal(err)
+		}
+		_ = s.Close()
+		select {
+		case v := <-got:
+			if v != want {
+				t.Fatalf("got %q, want %q", v, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("put %d lost: the CLOSE overtook it", i)
+		}
+	}
+}

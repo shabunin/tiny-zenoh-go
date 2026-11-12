@@ -233,7 +233,11 @@ func (t *Unicast) sendClose(l *tlink, c *protocol.Close, d time.Duration) {
 		return
 	}
 	deadline := time.Now().Add(d)
-	_, _ = l.txq.pushTransport(c, d)
+	// What is queued goes first: CLOSE takes the Control queue, which the
+	// writers serve before the others, and the peer drops what follows it
+	// (zenoh-rust likewise drains its pipeline before closing).
+	l.txq.flush(d)
+	_, _ = l.txq.pushTransport(c, time.Until(deadline))
 	l.txq.flush(time.Until(deadline))
 }
 
