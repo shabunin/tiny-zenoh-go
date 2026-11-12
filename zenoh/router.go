@@ -510,7 +510,8 @@ func (s *Session) routerForward(src *face, key string, m *protocol.Push, reliabl
 	}
 	tree, _ := s.meshSourceLocked(src, m.NodeID)
 	origin := s.originOf(src, tree)
-	var dst []*face
+	var buf [8]*face
+	dst := buf[:0]
 	for _, f := range s.faces {
 		if f.live && f.wantsDataLocked(key) && s.forwardsLocked(src, f, origin) {
 			dst = append(dst, f)

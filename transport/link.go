@@ -69,11 +69,13 @@ var ErrBatchLength = errors.New("transport: incoming batch larger than buffer")
 // ReadBatch reads one stream-framed batch (2-byte little-endian length prefix,
 // then that many bytes) into buf and returns the filled sub-slice.
 func ReadBatch(r io.Reader, buf []byte) ([]byte, error) {
-	var l [2]byte
-	if _, err := io.ReadFull(r, l[:]); err != nil {
+	if len(buf) < 2 {
+		return nil, ErrBatchLength
+	}
+	if _, err := io.ReadFull(r, buf[:2]); err != nil { // the length, read into buf: no allocation
 		return nil, err
 	}
-	n := int(l[0]) | int(l[1])<<8
+	n := int(buf[0]) | int(buf[1])<<8
 	if n > len(buf) {
 		return nil, ErrBatchLength
 	}

@@ -63,7 +63,13 @@ func WriteExtensions(w *codec.Writer, exts []Extension) {
 // ReadExtensions reads a chain of extensions until one has the Z bit clear.
 // It should be called only when the enclosing message's Z flag is set.
 func ReadExtensions(r *codec.Reader) ([]Extension, error) {
-	var out []Extension
+	return readExts(nil, r, true)
+}
+
+// readExts appends an extension chain to out; ZBuf contents are copied out
+// of r's buffer when copyBufs is set, and alias it otherwise (for callers
+// that only parse them).
+func readExts(out []Extension, r *codec.Reader, copyBufs bool) ([]Extension, error) {
 	for {
 		hdr, err := r.ReadByte()
 		if err != nil {
@@ -87,8 +93,11 @@ func ReadExtensions(r *codec.Reader) ([]Extension, error) {
 			if err != nil {
 				return nil, err
 			}
-			// copy out of the aliased buffer so the extension can outlive it
-			e.Buf = append([]byte(nil), b...)
+			if copyBufs {
+				// copy out of the aliased buffer so the extension can outlive it
+				b = append([]byte(nil), b...)
+			}
+			e.Buf = b
 		default:
 			return nil, ErrReservedExtEnc
 		}

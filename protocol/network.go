@@ -25,15 +25,38 @@ const flagDeclareI = codec.Flag1 // DECLARE carries an interest id
 
 // buildCommon returns the QoS / Timestamp extensions in zenoh-rust's write
 // order. NodeID is appended by callers where the order requires it.
-func buildCommon(q QoS, ts *Timestamp) []Extension {
-	var exts []Extension
+// commonExts holds a message's common extensions while it is encoded, on
+// the encoder's stack.
+type commonExts struct {
+	arr [3]Extension // QoS, timestamp, NodeID
+	ts  [32]byte     // the timestamp's encoding (at most 9+1+16 bytes)
+}
+
+func buildCommon(cx *commonExts, q QoS, ts *Timestamp) []Extension {
+	exts := cx.arr[:0]
 	if q != 0 && q != DefaultQoS {
 		exts = append(exts, extZ64(extQoS, uint64(q.Wire())))
 	}
 	if ts != nil {
-		exts = append(exts, extZBuf(extTimestamp, encodeTo(ts.encode)))
+		exts = append(exts, extZBuf(extTimestamp, appendTimestamp(cx.ts[:0], ts)))
 	}
 	return exts
+}
+
+// appendTimestamp appends ts as encode writes it.
+func appendTimestamp(b []byte, ts *Timestamp) []byte {
+	b = appendVLE(b, ts.Time)
+	id := ts.ID.Bytes()
+	b = appendVLE(b, uint64(len(id)))
+	return append(b, id...)
+}
+
+func appendVLE(b []byte, v uint64) []byte {
+	for i := 0; i < 8 && v >= 0x80; i++ {
+		b = append(b, byte(v)|0x80)
+		v >>= 7
+	}
+	return append(b, byte(v))
 }
 
 func nodeExt(exts []Extension, node uint16) []Extension {
@@ -99,7 +122,8 @@ func (*Push) msgID() byte { return IDPush }
 
 // Encode writes the PUSH message.
 func (m *Push) Encode(w *codec.Writer) {
-	exts := nodeExt(buildCommon(m.QoS, m.Timestamp), m.NodeID)
+	var cx commonExts
+	exts := nodeExt(buildCommon(&cx, m.QoS, m.Timestamp), m.NodeID)
 	_ = w.WriteByte(codec.Header(IDPush, m.WireExpr.Flags()|zflag(exts)))
 	m.WireExpr.Encode(w)
 	WriteExtensions(w, exts)
@@ -112,18 +136,23 @@ func decodePush(r *codec.Reader, hdr byte) (*Push, error) {
 	if m.WireExpr, err = DecodeWireExpr(r, hdr&flagWireN != 0, hdr&flagWireM != 0); err != nil {
 		return nil, err
 	}
-	exts, err := readExtsIf(r, hdr)
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range exts {
-		ok, err := takeCommon(e, &m.QoS, &m.Timestamp, &m.NodeID)
+	if codec.HasZ(hdr) {
+		// The common extensions are parsed and the others dropped: none
+		// is kept, so they can alias the input.
+		var arr [4]Extension
+		exts, err := readExts(arr[:0], r, false)
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
-			if err := checkUnknown(e); err != nil {
+		for _, e := range exts {
+			ok, err := takeCommon(e, &m.QoS, &m.Timestamp, &m.NodeID)
+			if err != nil {
 				return nil, err
+			}
+			if !ok {
+				if err := checkUnknown(e); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -164,7 +193,8 @@ func (*Request) msgID() byte { return IDRequest }
 
 // Encode writes the REQUEST message.
 func (m *Request) Encode(w *codec.Writer) {
-	exts := buildCommon(m.QoS, m.Timestamp)
+	var cx commonExts
+	exts := buildCommon(&cx, m.QoS, m.Timestamp)
 	if m.Target != TargetBestMatching {
 		exts = append(exts, extZ64(extTarget, uint64(m.Target)))
 	}
@@ -250,7 +280,8 @@ func (*Response) msgID() byte { return IDResponse }
 
 // Encode writes the RESPONSE message.
 func (m *Response) Encode(w *codec.Writer) {
-	exts := buildCommon(m.QoS, m.Timestamp)
+	var cx commonExts
+	exts := buildCommon(&cx, m.QoS, m.Timestamp)
 	if m.Responder != nil {
 		exts = append(exts, extZBuf(extResponderID, encodeTo(m.Responder.encode)))
 	}
@@ -307,7 +338,8 @@ func (*ResponseFinal) msgID() byte { return IDResponseFinal }
 
 // Encode writes the RESPONSE_FINAL message.
 func (m *ResponseFinal) Encode(w *codec.Writer) {
-	exts := buildCommon(m.QoS, m.Timestamp)
+	var cx commonExts
+	exts := buildCommon(&cx, m.QoS, m.Timestamp)
 	_ = w.WriteByte(codec.Header(IDResponseFinal, zflag(exts)))
 	w.WriteZInt(uint64(m.RequestID))
 	WriteExtensions(w, exts)
@@ -374,7 +406,8 @@ func (*Declare) msgID() byte { return IDDeclare }
 
 // Encode writes the DECLARE message.
 func (m *Declare) Encode(w *codec.Writer) {
-	exts := nodeExt(buildCommon(m.QoS, m.Timestamp), m.NodeID)
+	var cx commonExts
+	exts := nodeExt(buildCommon(&cx, m.QoS, m.Timestamp), m.NodeID)
 	var flags byte
 	if m.HasInterestID {
 		flags |= flagDeclareI
@@ -741,7 +774,8 @@ func (*Interest) msgID() byte { return IDInterest }
 
 // Encode writes the INTEREST message.
 func (m *Interest) Encode(w *codec.Writer) {
-	exts := nodeExt(buildCommon(m.QoS, m.Timestamp), m.NodeID)
+	var cx commonExts
+	exts := nodeExt(buildCommon(&cx, m.QoS, m.Timestamp), m.NodeID)
 	_ = w.WriteByte(codec.Header(IDInterest, byte(m.Mode&0x03)<<5|zflag(exts)))
 	w.WriteZInt(uint64(m.ID))
 	if m.Mode != InterestFinal {
@@ -820,7 +854,8 @@ func (*OAM) msgID() byte { return IDOAMNetwork }
 
 // Encode writes the network OAM message.
 func (m *OAM) Encode(w *codec.Writer) {
-	exts := buildCommon(m.QoS, m.Timestamp)
+	var cx commonExts
+	exts := buildCommon(&cx, m.QoS, m.Timestamp)
 	_ = w.WriteByte(codec.Header(IDOAMNetwork, byte(m.Enc&0x03)<<5|zflag(exts)))
 	w.WriteZInt(uint64(m.ID))
 	WriteExtensions(w, exts)

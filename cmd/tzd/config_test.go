@@ -67,7 +67,7 @@ func TestConfigTree(t *testing.T) {
 	tree, err = configTree("", "", []string{
 		`transport:{unicast:{lowlatency:true,max_links:3,qos:{enabled:false},compression:{enabled:true}},` +
 			`link:{tx:{lease:5000,batch_size:8192,queue:{size:{control:1,background:16},` +
-			`congestion_control:{drop:{wait_before_drop:2000,max_wait_before_drop_fragments:40000},block:{wait_before_close:3000000}}}},tls:{root_ca_certificate:"ca.pem",verify_name_on_connect:false}},` +
+			`congestion_control:{drop:{wait_before_drop:2000,max_wait_before_drop_fragments:40000},block:{wait_before_close:3000000}},batching:{enabled:true,time_limit:2}}},tls:{root_ca_certificate:"ca.pem",verify_name_on_connect:false}},` +
 			`shared_memory:{enabled:true},auth:{usrpwd:{user:"u",password:"p"}}}`,
 		`region_name:"r1"`, `queries_default_timeout:2500`, `namespace:"ns"`,
 		`stats:{filters:[{key:"a/**"},{key:"b/*"}]}`,
@@ -87,7 +87,8 @@ func TestConfigTree(t *testing.T) {
 		t.Fatalf("transport etc.: %+v", cfg)
 	}
 	if q := cfg.TxQueue; q.Size[0] != 1 || q.Size[7] != 16 || q.Size[5] != 0 || q.WaitBeforeDrop != 2*time.Millisecond ||
-		q.MaxWaitBeforeDropFragments != 40*time.Millisecond || q.WaitBeforeClose != 3*time.Second {
+		q.MaxWaitBeforeDropFragments != 40*time.Millisecond || q.WaitBeforeClose != 3*time.Second ||
+		q.BatchingTimeLimit != 2*time.Millisecond {
 		t.Fatalf("tx queue: %+v", q)
 	}
 	if err := applyTxQueue(map[string]int{"data": 17}, &cfg.TxQueue); err == nil {

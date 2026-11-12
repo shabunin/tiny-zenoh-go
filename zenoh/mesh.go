@@ -426,11 +426,21 @@ func (s *Session) meshSourceLocked(f *face, node uint16) (int, bool) {
 // traffic from elsewhere enters every other mesh at us, through the region
 // gateway rule. ok is false if src's NodeId is unknown.
 func (s *Session) meshRouteLocked(k declKind, src *face, node uint16, key string, target QueryTarget) (map[*face]uint16, bool) {
-	out := map[*face]uint16{}
 	tree, ok := s.meshSourceLocked(src, node)
 	if !ok {
-		return out, false
+		return nil, false
 	}
+	remote := false
+	for _, m := range s.meshes {
+		if len(m.remote[k]) > 0 {
+			remote = true
+			break
+		}
+	}
+	if !remote {
+		return nil, true // no other router has any: nothing to compute
+	}
+	out := map[*face]uint16{}
 	own := s.meshOf(src)
 	origin := s.originOf(src, tree)
 	// A router in several of our meshes (another gateway) is reached through
@@ -476,7 +486,7 @@ func (s *Session) meshOrderLocked(first *meshState) []*meshState {
 // sourced entity of kind k, except those in seen; it adds the ones it covers
 // to seen.
 func (s *Session) meshTargetsLocked(m *meshState, k declKind, src int, key string, target QueryTarget, skip *face, seen map[string]bool) map[*face]bool {
-	out := map[*face]bool{}
+	var out map[*face]bool
 	net := m.net
 	if src >= len(net.trees) {
 		return out
@@ -505,6 +515,9 @@ func (s *Session) meshTargetsLocked(m *meshState, k declKind, src int, key strin
 			}
 			seen[r] = true
 			if f := net.faceOf(dirs[i]); f != nil && f != skip {
+				if out == nil {
+					out = map[*face]bool{}
+				}
 				out[f] = true
 			}
 		}

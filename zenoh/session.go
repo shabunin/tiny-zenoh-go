@@ -277,6 +277,10 @@ type Session struct {
 	nextInterest uint32
 	nextExpr     uint16
 	localExprs   map[uint16]string // key-expr ids we declared
+	// exprMu also guards localExprs and the faces' remoteExprs: writers
+	// hold it and mu, so readers may hold either (resolving a message's
+	// key needs only this one).
+	exprMu       sync.RWMutex
 	subs         map[uint32]*Subscriber
 	queryables   map[uint32]*Queryable
 	queries      map[uint32]*pendingQuery

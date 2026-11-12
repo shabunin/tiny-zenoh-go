@@ -124,8 +124,8 @@ func (f *face) send(reliable bool, msgs ...transport.Encoder) error {
 		defer sent()
 	}
 	err := f.tr.Send(reliable, msgs...)
-	var ce *transport.CongestionError
-	if errors.As(err, &ce) {
+	ce := congestionOf(err)
+	if ce != nil {
 		// Dropped on congestion, as zenoh does: not an error for the sender.
 		err = nil
 	}
@@ -211,6 +211,19 @@ func (s *Session) snapshotLocked(f *face) []transport.Encoder {
 // onClose forgets the face: its pending query finals and liveliness interests
 // are resolved, its tokens are reported gone. In client mode losing the face
 // ends the session.
+// congestionOf returns err's *transport.CongestionError, if any (a helper so
+// the common nil error costs no allocation).
+func congestionOf(err error) *transport.CongestionError {
+	if err == nil {
+		return nil
+	}
+	var ce *transport.CongestionError
+	if errors.As(err, &ce) {
+		return ce
+	}
+	return nil
+}
+
 // onClose is the transport's close callback. It may come while
 // Session.established is still setting the face up (the link died right
 // after the handshake), even from inside it: the teardown then waits for
@@ -332,8 +345,8 @@ func (f *face) resolve(we protocol.WireExpr) (string, bool) {
 	if we.Scope == 0 {
 		return we.Suffix, true
 	}
-	f.s.mu.Lock()
-	defer f.s.mu.Unlock()
+	f.s.exprMu.RLock()
+	defer f.s.exprMu.RUnlock()
 	var prefix string
 	var ok bool
 	if we.Mapping {
@@ -477,12 +490,16 @@ func (f *face) handleDeclare(m *protocol.Declare) {
 		we.Mapping = true
 		if key, ok := f.resolve(we); ok {
 			s.mu.Lock()
+			s.exprMu.Lock()
 			f.remoteExprs[d.ID] = key
+			s.exprMu.Unlock()
 			s.mu.Unlock()
 		}
 	case *protocol.UndeclareKeyExpr:
 		s.mu.Lock()
+		s.exprMu.Lock()
 		delete(f.remoteExprs, d.ID)
+		s.exprMu.Unlock()
 		s.mu.Unlock()
 	case *protocol.DeclareSubscriber:
 		if key, ok := f.resolve(d.WireExpr); ok {

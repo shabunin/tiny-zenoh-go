@@ -122,7 +122,8 @@ func decodePut(r *codec.Reader, hdr byte) (*Put, error) {
 		}
 	}
 	if codec.HasZ(hdr) {
-		exts, err := ReadExtensions(r)
+		var arr [4]Extension
+		exts, err := readExts(arr[:0], r, false) // copied below where kept
 		if err != nil {
 			return nil, err
 		}
@@ -133,12 +134,15 @@ func decodePut(r *codec.Reader, hdr byte) (*Put, error) {
 					return nil, err
 				}
 			case extPutAttachment:
-				m.Attachment = e.Buf
+				m.Attachment = append([]byte(nil), e.Buf...)
 			case extPutShm:
 				shm = true
 			default:
 				if err := checkUnknown(e); err != nil {
 					return nil, err
+				}
+				if e.Buf != nil {
+					e.Buf = append([]byte(nil), e.Buf...)
 				}
 				m.Unknown = append(m.Unknown, e)
 			}

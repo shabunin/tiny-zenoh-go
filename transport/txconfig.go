@@ -40,6 +40,13 @@ type TxQueue struct {
 	// WaitBeforeClose is how long a blocking message waits for room before
 	// the transport is closed (default 5s).
 	WaitBeforeClose time.Duration
+	// BatchingTimeLimit is how long the writer may leave a batch that is
+	// still being filled while messages keep coming (zenoh's
+	// transport/link/tx/queue/batching time_limit; default 1ms, negative:
+	// no batching beyond what queues while the link is busy). The writer
+	// takes it as soon as no message was added since it last looked;
+	// express messages close their batch.
+	BatchingTimeLimit time.Duration
 }
 
 func (c *TxQueue) setDefaults() {
@@ -64,6 +71,9 @@ func (c *TxQueue) setDefaults() {
 	}
 	if c.WaitBeforeClose == 0 {
 		c.WaitBeforeClose = 5 * time.Second
+	}
+	if c.BatchingTimeLimit == 0 {
+		c.BatchingTimeLimit = time.Millisecond
 	}
 }
 

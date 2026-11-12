@@ -173,7 +173,10 @@ func FuzzRouterMessages(f *testing.F) {
 		go func() {
 			var u *transport.Unicast
 			var err error
-			cfg := transport.Config{ZID: zid, WhatAmI: whatami}
+			// Short waits keep a slow iteration short (closing waits a
+			// quarter of the lease for queued data).
+			cfg := transport.Config{ZID: zid, WhatAmI: whatami, Lease: time.Second,
+				TxQueue: transport.TxQueue{WaitBeforeClose: 500 * time.Millisecond}}
 			if who%5 == 4 {
 				u, err = transport.Accept(c1, cfg, transport.Callbacks{})
 			} else {

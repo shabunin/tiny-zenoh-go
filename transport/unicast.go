@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -435,10 +436,13 @@ func (t *Unicast) addLink(l *tlink) error {
 	return nil
 }
 
+// linkList returns the current links. The slice is shared, not copied: it
+// must not be modified (t.links is only ever replaced or appended to past
+// what earlier callers see).
 func (t *Unicast) linkList() []*tlink {
 	t.lmu.Lock()
 	defer t.lmu.Unlock()
-	return append([]*tlink(nil), t.links...)
+	return t.links
 }
 
 func (t *Unicast) firstLink() *tlink {
@@ -1248,6 +1252,9 @@ func (t *Unicast) sendFragmentsLocked(l *tlink, prio protocol.Priority, reliable
 // rxLoop receives batches from r (the link, or one of its per-priority
 // streams) into buf.
 func (t *Unicast) rxLoop(l *tlink, r io.Reader, buf []byte) {
+	if rxBuffered && l.prefix > 0 && !l.lowLatency {
+		r = bufio.NewReaderSize(r, len(buf)+l.prefix)
+	}
 	var zbuf []byte
 	for {
 		batch, err := l.readBatch(r, buf)

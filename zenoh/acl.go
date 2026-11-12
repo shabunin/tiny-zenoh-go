@@ -508,8 +508,8 @@ func (f *face) resolveOwn(we protocol.WireExpr) (string, bool) {
 	if we.Scope == 0 {
 		return we.Suffix, true
 	}
-	f.s.mu.Lock()
-	defer f.s.mu.Unlock()
+	f.s.exprMu.RLock()
+	defer f.s.exprMu.RUnlock()
 	var prefix string
 	var ok bool
 	if we.Mapping {

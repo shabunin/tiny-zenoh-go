@@ -17,7 +17,8 @@ func (s *Session) dispatchSample(smp Sample, local bool) {
 	}
 	smp.KeyExpr = user
 	s.mu.Lock()
-	var handlers []func(Sample)
+	var buf [8]func(Sample)
+	handlers := buf[:0]
 	for _, sub := range s.subs {
 		if sub.origin.allows(local) && keyexpr.Intersect(sub.key.String(), full) {
 			handlers = append(handlers, sub.handler)
@@ -69,7 +70,8 @@ func (s *Session) publish(key string, we protocol.WireExpr, kind SampleKind, pay
 	}
 
 	s.mu.Lock()
-	var dst []*face
+	var buf [8]*face
+	dst := buf[:0]
 	for _, f := range s.faces {
 		if f.wantsDataLocked(key) {
 			dst = append(dst, f)
@@ -224,6 +226,7 @@ type Publisher struct {
 	key    string // full key (namespace included)
 	exprID uint16
 	opts   []PutOption
+	base   putOptions // the defaults with opts applied
 	m      *matcher
 }
 
@@ -236,7 +239,9 @@ func (s *Session) DeclarePublisher(key string, opts ...PutOption) (*Publisher, e
 	s.mu.Lock()
 	s.nextExpr++
 	id := s.nextExpr
+	s.exprMu.Lock()
 	s.localExprs[id] = k.String()
+	s.exprMu.Unlock()
 	faces := s.faceListLocked()
 	s.mu.Unlock()
 	err = s.broadcast(faces, &protocol.Declare{QoS: protocol.QoSDeclare,
@@ -252,17 +257,23 @@ func (s *Session) DeclarePublisher(key string, opts ...PutOption) (*Publisher, e
 	if err != nil {
 		return nil, err
 	}
-	return &Publisher{s: s, key: k.String(), exprID: id, opts: opts, m: m}, nil
+	return &Publisher{s: s, key: k.String(), exprID: id, opts: opts,
+		base: withPutOptions(defaultPutOptions(), opts), m: m}, nil
 }
 
 // KeyExpr returns the publisher's key expression.
 func (p *Publisher) KeyExpr() string { return p.s.userKey(p.key) }
 
 func (p *Publisher) options(opts []PutOption) putOptions {
-	o := defaultPutOptions()
-	for _, opt := range p.opts {
-		opt.applyPut(&o)
+	if len(opts) == 0 {
+		return p.base
 	}
+	return withPutOptions(p.base, opts)
+}
+
+// withPutOptions applies opts to o (apart, so that a put without options
+// doesn't pay for o escaping into the option interfaces).
+func withPutOptions(o putOptions, opts []PutOption) putOptions {
 	for _, opt := range opts {
 		opt.applyPut(&o)
 	}
@@ -293,7 +304,9 @@ func (p *Publisher) Undeclare() error {
 	}
 	s := p.s
 	s.mu.Lock()
+	s.exprMu.Lock()
 	delete(s.localExprs, p.exprID)
+	s.exprMu.Unlock()
 	faces := s.faceListLocked()
 	s.mu.Unlock()
 	return s.broadcast(faces, &protocol.Declare{QoS: protocol.QoSDeclare,

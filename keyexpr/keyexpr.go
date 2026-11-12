@@ -158,14 +158,127 @@ func compile(s string) []patChunk {
 
 // Match reports whether the concrete key is in the language of key expression e.
 func Match(e, key string) bool {
+	if plain(e) && plain(key) {
+		return globKey(e, key)
+	}
 	return matchChunks(compile(e), strings.Split(key, "/"))
 }
 
 // Intersect reports whether key expressions a and b share a concrete key.
-func Intersect(a, b string) bool { return intersectChunks(compile(a), compile(b)) }
+func Intersect(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if plain(a) && plain(b) {
+		// The common case, a concrete key against a pattern, without
+		// compiling either.
+		if concrete(b) {
+			return globKey(a, b)
+		}
+		if concrete(a) {
+			return globKey(b, a)
+		}
+	}
+	return intersectChunks(compile(a), compile(b))
+}
 
 // Include reports whether every key matching b also matches a.
-func Include(a, b string) bool { return includesChunks(compile(a), compile(b)) }
+func Include(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if plain(a) && plain(b) && concrete(b) {
+		return globKey(a, b)
+	}
+	return includesChunks(compile(a), compile(b))
+}
+
+// -----------------------------------------------------------------------------
+// Concrete keys against patterns, without allocating
+// -----------------------------------------------------------------------------
+
+// plain reports that s has no verbatim chunk (no '@' at all, to keep the
+// test cheap): "*", "**" and "$*" then match any chunk.
+func plain(s string) bool { return strings.IndexByte(s, '@') < 0 }
+
+// concrete reports that s has no wildcard.
+func concrete(s string) bool { return strings.IndexByte(s, '*') < 0 }
+
+// chunkAt returns the chunk of s starting at i and where the next one
+// starts (len(s)+1 past the last).
+func chunkAt(s string, i int) (string, int) {
+	if j := strings.IndexByte(s[i:], '/'); j >= 0 {
+		return s[i : i+j], i + j + 1
+	}
+	return s[i:], len(s) + 1
+}
+
+// globKey matches the concrete key against pattern pat (both plain): the
+// classic wildcard match with "**" as the star over chunks, which only
+// ever needs to backtrack to the last "**" (O(len(pat)·len(key))).
+func globKey(pat, key string) bool {
+	p, k := 0, 0
+	starP, starK := -1, -1
+	for k <= len(key) {
+		if p <= len(pat) {
+			pc, pn := chunkAt(pat, p)
+			if pc == "**" {
+				starP, starK, p = pn, k, pn
+				continue
+			}
+			kc, kn := chunkAt(key, k)
+			if globChunk(pc, kc) {
+				p, k = pn, kn
+				continue
+			}
+		}
+		if starP < 0 {
+			return false
+		}
+		_, starK = chunkAt(key, starK) // the "**" takes one more chunk
+		p, k = starP, starK
+	}
+	for p <= len(pat) { // what is left of the pattern must match nothing
+		pc, pn := chunkAt(pat, p)
+		if pc != "**" {
+			return false
+		}
+		p = pn
+	}
+	return true
+}
+
+// globChunk matches a concrete chunk against a pattern chunk: "*", or text
+// with "$*" matching any run of characters.
+func globChunk(pc, kc string) bool {
+	if pc == "*" {
+		return true
+	}
+	if strings.IndexByte(pc, '$') < 0 {
+		return pc == kc
+	}
+	i, j := 0, 0
+	starI, starJ := -1, -1
+	for j < len(kc) {
+		if i+1 < len(pc) && pc[i] == '$' && pc[i+1] == '*' {
+			starI, starJ, i = i+2, j, i+2
+			continue
+		}
+		if i < len(pc) && pc[i] == kc[j] {
+			i, j = i+1, j+1
+			continue
+		}
+		if starI < 0 {
+			return false
+		}
+		starJ++
+		i, j = starI, starJ
+	}
+	for i+1 < len(pc) && pc[i] == '$' && pc[i+1] == '*' {
+		i += 2
+	}
+	return i == len(pc)
+}
 
 // -----------------------------------------------------------------------------
 // Key-expression-level relations (handle the '/' structure and "**").

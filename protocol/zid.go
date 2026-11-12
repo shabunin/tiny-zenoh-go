@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"errors"
+	"sync"
 
 	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
@@ -32,9 +33,37 @@ func NewZID(b []byte) (ZID, error) {
 	if n == 0 {
 		return ZID{}, ErrZIDLength
 	}
-	cp := make([]byte, n)
-	copy(cp, b[:n])
-	return ZID{cp}, nil
+	return ZID{intern(b[:n])}, nil
+}
+
+// ZIDs repeat (a network has a handful of nodes, and every timestamp and
+// source carries one): the bytes of those seen are shared rather than
+// copied each time they are decoded. The table is bounded.
+var zidTable struct {
+	sync.RWMutex
+	m map[string][]byte
+}
+
+const zidTableMax = 4096
+
+func intern(b []byte) []byte {
+	zidTable.RLock()
+	v, ok := zidTable.m[string(b)]
+	zidTable.RUnlock()
+	if ok {
+		return v
+	}
+	cp := make([]byte, len(b)) // cap == len: an append to it never writes in place
+	copy(cp, b)
+	zidTable.Lock()
+	if zidTable.m == nil {
+		zidTable.m = map[string][]byte{}
+	}
+	if len(zidTable.m) < zidTableMax {
+		zidTable.m[string(cp)] = cp
+	}
+	zidTable.Unlock()
+	return cp
 }
 
 // ParseZID parses the hex form produced by String.

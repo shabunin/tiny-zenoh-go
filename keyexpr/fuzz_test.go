@@ -445,3 +445,29 @@ func sortedKeys(m map[int]bool) []int {
 	}
 	return out
 }
+
+// FuzzConcreteFastPath: the allocation-free match of a concrete key against
+// a pattern agrees with the general relations.
+func FuzzConcreteFastPath(f *testing.F) {
+	for _, c := range [][2]string{
+		{"**", "a/b"}, {"a/**", "a"}, {"a/*/c", "a/b/c"}, {"**/b/**/c", "a/b/x/b/c"},
+		{"a$*b/**", "axyb/c"}, {"$*a$*", "bab"}, {"a/**/b", "a/b/b/b"}, {"*/**/*", "x"},
+	} {
+		f.Add(c[0], c[1])
+	}
+	f.Fuzz(func(t *testing.T, pat, key string) {
+		if Validate(pat) != nil || Validate(key) != nil || !plain(pat) || !plain(key) || !concrete(key) {
+			return
+		}
+		want := matchChunks(compile(pat), strings.Split(key, "/"))
+		if got := globKey(pat, key); got != want {
+			t.Fatalf("globKey(%q, %q) = %v, want %v", pat, key, got, want)
+		}
+		if got := intersectChunks(compile(pat), compile(key)); got != want {
+			t.Fatalf("intersectChunks(%q, %q) = %v, want %v", pat, key, got, want)
+		}
+		if Intersect(pat, key) != want || Intersect(key, pat) != want || Include(pat, key) != want || Match(pat, key) != want {
+			t.Fatalf("public relations disagree on %q, %q", pat, key)
+		}
+	})
+}

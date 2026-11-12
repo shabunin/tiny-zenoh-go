@@ -142,6 +142,10 @@ func applyTransport(v json.RawMessage, cfg *zenoh.Config) error {
 							WaitBeforeClose *int64 `json:"wait_before_close"`
 						} `json:"block"`
 					} `json:"congestion_control"`
+					Batching struct {
+						Enabled   *bool  `json:"enabled"`
+						TimeLimit *int64 `json:"time_limit"` // ms
+					} `json:"batching"`
 				} `json:"queue"`
 			} `json:"tx"`
 			TLS *struct {
@@ -199,6 +203,14 @@ func applyTransport(v json.RawMessage, cfg *zenoh.Config) error {
 		us(cc.Drop.WaitBeforeDrop, &cfg.TxQueue.WaitBeforeDrop)
 		us(cc.Drop.MaxWaitBeforeDropFragments, &cfg.TxQueue.MaxWaitBeforeDropFragments)
 		us(cc.Block.WaitBeforeClose, &cfg.TxQueue.WaitBeforeClose)
+		if b := q.Batching; b.Enabled != nil && !*b.Enabled {
+			cfg.TxQueue.BatchingTimeLimit = -1
+		} else if b.TimeLimit != nil {
+			cfg.TxQueue.BatchingTimeLimit = time.Duration(*b.TimeLimit) * time.Millisecond
+			if *b.TimeLimit <= 0 {
+				cfg.TxQueue.BatchingTimeLimit = -1
+			}
+		}
 	}
 	if t := tr.Link.TLS; t != nil {
 		if cfg.TLS == nil {

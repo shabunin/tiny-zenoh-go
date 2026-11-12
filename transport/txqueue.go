@@ -5,6 +5,7 @@ package transport
 import (
 	"errors"
 	"io"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -102,13 +103,16 @@ type txQueue struct {
 	// batches), unless release is set because room or a flush is needed.
 	holds   int
 	release bool
+	// pushes counts the messages added to batches (see batchLimit).
+	pushes     uint64
+	batchLimit time.Duration
 
 	congested [numPrio]atomic.Bool
 	first     [numPrio]chan struct{} // BlockFirst token per priority
 }
 
 func newTxQueue(l *tlink, qos bool, cfg *TxQueue) *txQueue {
-	q := &txQueue{l: l, qos: qos, size: cfg.Size, space: make(chan struct{})}
+	q := &txQueue{l: l, qos: qos, size: cfg.Size, space: make(chan struct{}), batchLimit: cfg.BatchingTimeLimit}
 	if !qos {
 		q.size[0] = cfg.Size[protocol.PriorityData]
 	}
@@ -147,6 +151,7 @@ func (q *txQueue) index(prio protocol.Priority) int {
 func (q *txQueue) run(lo, hi int, w io.Writer) {
 	var zc lz4.Compressor
 	var zbuf []byte
+	waited := false
 	for {
 		q.mu.Lock()
 		i := -1
@@ -167,6 +172,15 @@ func (q *txQueue) run(lo, hi int, w io.Writer) {
 			return
 		}
 		b := q.q[i][0]
+		if !waited && q.batchLimit > 0 && len(q.q[i]) == 1 && !b.sealed && !q.release {
+			// Messages may still be coming for this batch: let it fill
+			// (then choose again, holds may have changed meanwhile).
+			waited = true
+			q.letFillLocked(i, b)
+			q.mu.Unlock()
+			continue
+		}
+		waited = false
 		q.q[i][0] = nil
 		q.q[i] = q.q[i][1:]
 		q.mu.Unlock()
@@ -182,6 +196,30 @@ func (q *txQueue) run(lo, hi int, w io.Writer) {
 		if err != nil {
 			q.stop(err)
 			q.l.t.dropLink(q.l, err)
+			return
+		}
+	}
+}
+
+// letFillLocked waits while messages keep being added to b, the only batch
+// of queue i, as zenoh-rust's pipeline does: it stops as soon as one look
+// finds nothing new, or b is closed or followed by another batch, or room
+// or a flush is needed, or the batching time limit passed. mu is released
+// meanwhile.
+func (q *txQueue) letFillLocked(i int, b *txBuf) {
+	var deadline time.Time
+	for {
+		seen := q.pushes
+		q.mu.Unlock()
+		runtime.Gosched()
+		q.mu.Lock()
+		if q.err != nil || q.pushes == seen || q.release || b.sealed || len(q.q[i]) != 1 || q.q[i][0] != b {
+			return
+		}
+		now := time.Now()
+		if deadline.IsZero() {
+			deadline = now.Add(q.batchLimit)
+		} else if now.After(deadline) {
 			return
 		}
 	}
@@ -442,6 +480,7 @@ func (t *Unicast) pushMessage(l *tlink, prio protocol.Priority, reliable bool, c
 		return false, nil
 	}
 	cfg := &t.cfg.TxQueue
+	express := protocol.QoSOf(m).Express()
 	if cc == ccBlockFirst {
 		t0 := time.NewTimer(cfg.WaitBeforeDrop)
 		select {
@@ -457,7 +496,7 @@ func (t *Unicast) pushMessage(l *tlink, prio protocol.Priority, reliable bool, c
 			defer func() { <-q.first[i] }()
 			c := &t.txc[prio]
 			c.mu.Lock()
-			ok, err := t.pushEncoded(l, q, i, prio, reliable, false, false, enc.Bytes())
+			ok, err := t.pushEncoded(l, q, i, prio, reliable, false, false, express, enc.Bytes())
 			c.mu.Unlock()
 			if ok && count {
 				l.stats.nmsgs[ni].Add(1)
@@ -476,7 +515,7 @@ func (t *Unicast) pushMessage(l *tlink, prio protocol.Priority, reliable bool, c
 	}
 	c.enc.Reset()
 	m.Encode(&c.enc)
-	ok, err := t.pushEncoded(l, q, i, prio, reliable, cc == ccDrop, true, c.enc.Bytes())
+	ok, err := t.pushEncoded(l, q, i, prio, reliable, cc == ccDrop, true, express, c.enc.Bytes())
 	if errors.Is(err, ErrBlocked) {
 		go t.shutdown(err)
 		return false, ErrClosed
@@ -492,7 +531,7 @@ func (t *Unicast) pushMessage(l *tlink, prio protocol.Priority, reliable bool, c
 // pushEncoded queues the serialized network message msg on queue i of l, in
 // a FRAME or in FRAGMENTs. The caller holds t.txc[prio].mu.
 // With hold, a FRAME is left for the caller to kick the writers.
-func (t *Unicast) pushEncoded(l *tlink, q *txQueue, i int, prio protocol.Priority, reliable, droppable, hold bool, msg []byte) (bool, error) {
+func (t *Unicast) pushEncoded(l *tlink, q *txQueue, i int, prio protocol.Priority, reliable, droppable, hold, express bool, msg []byte) (bool, error) {
 	cfg := &t.cfg.TxQueue
 	w := fragWait{wait: cfg.WaitBeforeClose}
 	if droppable {
@@ -540,6 +579,10 @@ func (t *Unicast) pushEncoded(l *tlink, q *txQueue, i int, prio protocol.Priorit
 			f.Encode(&b.w)
 			b.fch, b.fsn = ch, f.SN
 			l.stats.addTransport(Tx)
+		}
+		q.pushes++
+		if express {
+			b.sealed = true // goes now, nothing joins it
 		}
 		if hold {
 			q.mu.Unlock()
