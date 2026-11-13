@@ -142,3 +142,45 @@ func TestChildLinkFlap(t *testing.T) {
 		t.Fatalf("after the flap: new children %v, want [%d]", nc[0], k)
 	}
 }
+
+// TestNodeSlotsSticky: routers that leave and come back, in any order, get
+// their slots (our NodeIds for them) back; zenoh-rust neighbours do not
+// forget a router's old NodeId and may map data back by it.
+func TestNodeSlotsSticky(t *testing.T) {
+	self, _ := protocol.ParseZID("1000")
+	n := newNetworkAs(self, protocol.Router)
+	zid := func(i int) ZID {
+		z, _ := protocol.ParseZID(fmt.Sprintf("%04x", 0x1000+i))
+		return z
+	}
+	slot := map[int]int{}
+	for i := 1; i <= 6; i++ {
+		slot[i] = n.addNode(&lsNode{zid: zid(i), links: map[string]uint16{}})
+	}
+	for round := 0; round < 5; round++ {
+		for i := 1; i <= 6; i++ {
+			n.dropNode(n.idx(zid(i)))
+		}
+		for _, i := range []int{6, 2, 5, 1, 4, 3}[round%2*3:] { // some come back, in another order
+			if got := n.addNode(&lsNode{zid: zid(i), links: map[string]uint16{}}); got != slot[i] {
+				t.Fatalf("round %d: router %d back in slot %d, had %d", round, i, got, slot[i])
+			}
+		}
+		for i := 1; i <= 6; i++ {
+			if n.idx(zid(i)) < 0 {
+				if got := n.addNode(&lsNode{zid: zid(i), links: map[string]uint16{}}); got != slot[i] {
+					t.Fatalf("round %d: router %d back in slot %d, had %d", round, i, got, slot[i])
+				}
+			}
+		}
+	}
+	// A newcomer takes a free slot (the graph does not grow while there is
+	// one); the router that had it gets another when it comes back.
+	n.dropNode(n.idx(zid(3)))
+	if got := n.addNode(&lsNode{zid: zid(7), links: map[string]uint16{}}); got != slot[3] {
+		t.Fatalf("newcomer in slot %d, want the free %d", got, slot[3])
+	}
+	if got := n.addNode(&lsNode{zid: zid(3), links: map[string]uint16{}}); got == slot[3] || got != len(n.nodes)-1 {
+		t.Fatalf("router 3 back in slot %d (taken by the newcomer, %d slots)", got, len(n.nodes))
+	}
+}

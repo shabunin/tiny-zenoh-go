@@ -145,6 +145,7 @@ once for 5–6 s.
 | 49 tzd (7x7) | 21 MiB | 241 B/s | 1.5 s | 4.9 s | 0 | complete |
 | 49 zenohd | 12 MiB | 484 B/s | 1.2 s | 3.8 s | 2 | 1 token missing |
 | 49 mixed | 17 MiB | 401 B/s | 1.2 s | 4.8 s | 5 | 1 token missing |
+| 49 mixed, rejoin fixes | 13 MiB | 404 B/s | 1.1 s | 4.2 s | 0 | complete |
 | 100 tzd (10x10) | 23 MiB | 257 B/s | 1.3 s | 6.0 s | 0 | complete |
 | 100 zenohd | 12 MiB | 512 B/s | 0 | 4.2 s | 3 | 1 token missing |
 | 100 mixed | 18 MiB | 400 B/s | 0 | 6.4 s | 1 | complete |
@@ -186,9 +187,61 @@ The scale runs found five bugs, all fixed:
   (as zenoh-rust's StableGraph does); two runs in a row now leave the
   routers at 16 MiB.
 
-In a mixed mesh (as with zenohd alone), a flow sometimes stays broken
-after every link was cut and restored: 0 to 4 of 64 in repeated runs,
-never with tzd alone. Not tracked down yet.
+In a mixed mesh (as with zenohd alone), a flow sometimes stayed broken
+after every link was cut and restored: 0 to 5 of 64 in repeated runs,
+never with tzd alone. **recut** (below) found why: whole subtrees of the
+mesh had lost one router's subscribers and tokens for good. zenoh-rust
+sends a router the declarations it lacks only when that router becomes a
+new child of a tree; it tells children apart by graph slot and recomputes
+the trees at most every 100 ms. A router whose link went down and came
+back within one computation keeps its slot, is not new, and never gets
+back what it dropped with the link. That happens all the time after a
+mass cut: both zenohd and tzd redial at once, and zenohd also adds a new
+outbound link to a transport it has not expired yet (the lease ran out
+at the other end), which closes soon after and takes the new link along.
+Seen with `--trace` (tzd's `ZENOH_MESH_TRACE`) and zenohd's debug log:
+r23 (tzd) got r16 (zenohd) back 5 ms after losing it, and r16 never sent
+it its subscribers again. tzd now
+
+- refuses a new transport from a neighbour router for 500 ms after the
+  link to it went down; the dialer retries a second later, once the
+  trees went without the link;
+- tells its own trees' children apart by link as well as ZID, so a
+  child that flapped between two computations gets everything again;
+- gives a router that comes back the graph slot (our NodeId for it) it
+  had: zenoh-rust neighbours never forget a router's old NodeId and map
+  it back by the first one that names it (Network::add_node), so a
+  renumbered router could have its data routed along another router's
+  tree.
+
+recut on 7x7 grids, 4 to 10 rounds each:
+
+| mesh | rounds with entries lost, before | after |
+|---|---|---|
+| 49 tzd | 0 of 4 | |
+| 49 zenohd | 4 of 4 | |
+| 49 mixed | 8 of 8 | 2 of 20 |
+
+and scale on 49 mixed: 0 flows never back (5 before), liveliness
+complete. Both losses left came from a zenohd parent (r22 to r23, r2/r8
+to r9), which only zenoh-rust can fix. On 10x10 grids zenoh-rust's side
+dominates: pure zenohd loses entries in 5 of 5 rounds, mixed in 6 of 9,
+pure tzd in none of 19; zenohd also logs declarations it does not pass on
+("Error propagating sub ...: cannot get index of ...") and link states it
+cannot map. Left open: on 10x10, some flows stay broken although every
+router has every entry and the next hops (route/successor) form a path,
+mostly through zenohd columns (and 2 rounds in 19 with tzd alone); one
+run of scale on 100 mixed also had a data loop on one router's tree after
+the mass restore (1.7 M duplicates; two reruns: 27 k, 28 k).
+
+**recut**: `ROUNDS=n` (default 4) times, every router link is cut for 5 s
+and restored while every host publishes to every other and holds a
+token; 20 s later h1 dumps every router's subscriber and token tables
+(`@/*/router/{subscriber,token}/lab/**`). The summary lists the flows
+still broken and, per router, the hosts' routers missing from its
+tables; `SUCC=1` also dumps the next hops on the hosts' routers' trees
+and walks each broken flow's path. gen.py gives grid/random routers fixed
+ZIDs (r22 is e00016) so the dumps read.
 
 What the lab host takes: a 4-core VM with 16 GB runs 225 tzd routers and
 10 hosts in about 3 GB, deploying in 90 s; idle, the routers take 0.1% CPU

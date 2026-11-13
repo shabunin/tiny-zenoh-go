@@ -23,7 +23,8 @@
 #                           other with tokens, every router link cut and
 #                           restored ROUNDS times (default 4); after each,
 #                           the flows that stay broken and every router's
-#                           subscriber and token tables (admin space)
+#                           subscriber and token tables (admin space);
+#                           SUCC=1 also walks each broken flow's path
 #
 # Results (the agents' JSON, an event log, a summary) go to
 # results/TOPO-SCENARIO.
@@ -546,6 +547,9 @@ print(f"liveliness: every host sees every token 20 s after the restore: {complet
 PY
 }
 
+# zid_of rN: the fixed ZID gen.py gives grid/random routers.
+zid_of() { printf 'e%05x' "${1#r}"; }
+
 recut() {
 	[ -n "${CENTRE:-}" ] && [ -n "$HOSTS" ] || { echo "recut: needs a grid/random topology with --hosts"; exit 1; }
 	OUT=results/$TOPO-recut
@@ -575,6 +579,13 @@ recut() {
 		sleep 20
 		for k in subscriber token; do
 			agent h1 get -k "@/*/router/$k/lab/**" -d 5s > "$OUT/admin-$i-$k.json" || true
+		done
+		# With SUCC=1, every router's next hop on the trees of the hosts'
+		# routers (N*N replies per host: heavy beyond 50 routers).
+		[ -n "${SUCC:-}" ] && for h in $hs; do
+			v=$(echo "$h" | tr '[:lower:]' '[:upper:]')_AT
+			agent h1 get -k "@/*/router/route/successor/src/$(zid_of "${!v}")/dst/*" -d 5s \
+				> "$OUT/succ-$i-$h.json" || true
 		done
 		event "round $i: dumped"
 	done
@@ -606,6 +617,27 @@ for i in range(1, rounds + 1):
     print(f"round {i}: {len(broken)} flows broken 12 s after the restore")
     for b in broken:
         print("  ", b)
+    # Walk each broken flow's path on the publisher's router's tree.
+    for b in broken:
+        m = re.match(r"(h\d+)\((r\d+)\)->(h\d+)\((r\d+)\)", b)
+        p, rp, s_, rs = m.groups()
+        try:
+            succ = json.load(open(f"{d}/succ-{i}-{p}.json"))
+        except Exception:
+            continue
+        nxt = {}
+        for k, v in succ.items():
+            parts = k.split("/")  # @ zid router route successor src S dst D (0..8)
+            if name(parts[6]) == rp and name(parts[8]) == rs:
+                nxt[name(parts[1])] = name(json.loads(v))
+        cur, path = rp, [rp]
+        while cur != rs and cur in nxt and len(path) < 300:
+            cur = nxt[cur]
+            path.append(cur)
+            if path.count(cur) > 1:
+                break
+        print(f"   path {p}->{s_} on tree {rp}: {' '.join(path)}"
+              + ("" if cur == rs else f"  <- stops ({len(nxt)} routers answered)"))
     # Every router should list, for lab/scale/** every host's router, and for
     # lab/alive/<h> h's router (its own clients count as itself).
     for kind in ("subscriber", "token"):

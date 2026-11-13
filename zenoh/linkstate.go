@@ -234,8 +234,13 @@ type lsNetwork struct {
 	// routers looked nodes up by scanning them all, several times per link
 	// of every link state received, and fell behind while forming.
 	byZID map[string]int
-	links map[*face]*lsLink
-	trees []lsTree
+	// lastSlot is the slot each router had when it was last removed, and
+	// slotOwner the router that last had each slot: a router that comes
+	// back gets its slot again (see addNode).
+	lastSlot  map[string]int
+	slotOwner []string
+	links     map[*face]*lsLink
+	trees     []lsTree
 
 	// gossip: link states carry locators (zenoh-rust propagate_locators with
 	// multihop gossip): ours are selfLocs, set before each operation.
@@ -259,7 +264,8 @@ func newNetwork(self ZID) *lsNetwork { return newNetworkAs(self, protocol.Router
 
 // newNetworkAs makes a link-state graph rooted at a node of role w.
 func newNetworkAs(self ZID, w WhatAmI) *lsNetwork {
-	n := &lsNetwork{links: map[*face]*lsLink{}, byZID: map[string]int{zkey(self): 0}}
+	n := &lsNetwork{links: map[*face]*lsLink{}, byZID: map[string]int{zkey(self): 0},
+		lastSlot: map[string]int{}}
 	n.nodes = []*lsNode{{zid: self, whatami: w, hasWAI: true, sn: 1, links: map[string]uint16{}}}
 	n.trees = []lsTree{{parent: -1, directions: []int{-1}}}
 	return n
@@ -283,24 +289,53 @@ func (n *lsNetwork) idxKey(k string) int {
 	return -1
 }
 
-// addNode puts nd in the first free slot (as zenoh-rust's StableGraph
-// does): otherwise every router that drops out of the mesh and comes back
-// takes a new one, and the trees, N x N, grew with each mass reconnect
-// (38 MB on a 225-router lab after three).
+// addNode puts nd in a free slot (as zenoh-rust's StableGraph does):
+// otherwise every router that drops out of the mesh and comes back takes a
+// new one, and the trees, N x N, grew with each mass reconnect (38 MB on a
+// 225-router lab after three). A router that comes back gets the slot it
+// had if that is free, else one nobody had, else the first free one: our
+// slots are the NodeIds our neighbours know the routers by, and zenoh-rust
+// does not forget the old NodeId of a router that moved (Link::mappings),
+// mapping it back by the first NodeId that names it (Network::add_node). A
+// router renumbered after every link of a mixed lab was cut and restored
+// left zenohd routing its data along another router's tree: flows that
+// never came back although every router had every subscriber.
 func (n *lsNetwork) addNode(nd *lsNode) int {
-	i := len(n.nodes)
-	for j := 1; j < len(n.nodes); j++ {
-		if n.nodes[j] == nil {
-			i = j
-			break
+	z := zkey(nd.zid)
+	i := -1
+	if j, ok := n.lastSlot[z]; ok && j < len(n.nodes) && n.nodes[j] == nil {
+		i = j
+	}
+	if i < 0 {
+		for j := 1; j < len(n.nodes); j++ {
+			if n.nodes[j] == nil && (j >= len(n.slotOwner) || n.slotOwner[j] == "") {
+				i = j
+				break
+			}
 		}
 	}
-	if i == len(n.nodes) {
+	if i < 0 {
+		for j := 1; j < len(n.nodes); j++ {
+			if n.nodes[j] == nil {
+				i = j
+				break
+			}
+		}
+	}
+	if i < 0 {
+		i = len(n.nodes)
 		n.nodes = append(n.nodes, nd)
 	} else {
 		n.nodes[i] = nd
 	}
-	n.byZID[zkey(nd.zid)] = i
+	for len(n.slotOwner) <= i {
+		n.slotOwner = append(n.slotOwner, "")
+	}
+	if o := n.slotOwner[i]; o != "" && o != z {
+		delete(n.lastSlot, o) // its slot is taken: it gets another one
+	}
+	n.slotOwner[i] = z
+	n.byZID[z] = i
 	return i
 }
 
@@ -308,6 +343,7 @@ func (n *lsNetwork) addNode(nd *lsNode) int {
 func (n *lsNetwork) dropNode(i int) {
 	if nd := n.nodes[i]; nd != nil {
 		delete(n.byZID, zkey(nd.zid))
+		n.lastSlot[zkey(nd.zid)] = i
 		n.nodes[i] = nil
 	}
 }
