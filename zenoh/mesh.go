@@ -1,9 +1,11 @@
 package zenoh
 
 import (
-	"time"
-
+	"fmt"
+	"os"
 	"slices"
+	"strings"
+	"time"
 
 	"github.com/shabunin/tiny-zenoh-go/keyexpr"
 	"github.com/shabunin/tiny-zenoh-go/protocol"
@@ -27,6 +29,26 @@ import (
 // router hat per region). In a south mesh it flags itself as a gateway. Into
 // each mesh it announces, as their source, the entities it knows from outside
 // that mesh: its session, its clients and peers, and the other meshes.
+
+// meshTrace, set by the environment variable ZENOH_MESH_TRACE, logs the
+// mesh's handling of sourced declarations, links and trees to stderr: a
+// debugging aid for large meshes (the lab).
+var meshTrace = os.Getenv("ZENOH_MESH_TRACE") != ""
+
+func mtrace(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, time.Now().Format("15:04:05.000000 ")+format+"\n", a...)
+}
+
+func (n *lsNetwork) names(is []int) string {
+	var b strings.Builder
+	for _, i := range is {
+		if i >= 0 && i < len(n.nodes) && n.nodes[i] != nil {
+			b.WriteString(n.nodes[i].zid.String())
+			b.WriteByte(' ')
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
 
 // qInfo is a queryable's routing info.
 type qInfo struct {
@@ -231,6 +253,14 @@ func (s *Session) meshDeclare(f *face, m *protocol.Declare) {
 	}
 	src := mesh.net.localPSID(f, uint64(m.NodeID))
 	if src <= 0 { // unknown, or claims to be us
+		if meshTrace {
+			z, mapped := ZID{}, false
+			if l := mesh.net.links[f]; l != nil {
+				z, mapped = l.mappings[uint64(m.NodeID)]
+			}
+			mtrace("decl DROPPED from %s node %d (mapped %v %s, local %d) kind %d key %s remove %v",
+				f.zid, m.NodeID, mapped, z, src, k, key, remove)
+		}
 		s.mu.Unlock()
 		return
 	}
@@ -252,6 +282,20 @@ func (s *Session) meshDeclare(f *face, m *protocol.Declare) {
 			mesh.remote[k][key] = set
 		}
 		set[router] = info
+	}
+	if meshTrace {
+		var kids []int
+		if src < len(mesh.net.trees) {
+			kids = mesh.net.trees[src].children
+		}
+		mtrace("decl from %s src %s kind %d key %s remove %v existed %v -> children [%s] (tree root %q pending %v)",
+			f.zid, mesh.net.nodes[src].zid, k, key, remove, existed, mesh.net.names(kids),
+			func() string {
+				if src < len(mesh.net.trees) {
+					return fmt.Sprintf("%x", mesh.net.trees[src].root)
+				}
+				return ""
+			}(), mesh.treesPending)
 	}
 	s.sendToChildrenLocked(mesh, src, k, key, info, remove, f, out)
 	newcomer := k == kindToken && !remove && !existed && !s.tokenKnownElsewhereLocked(key, router)
@@ -293,6 +337,9 @@ func (s *Session) meshLinkUp(f *face) {
 		return
 	}
 	sends := m.net.addLink(f)
+	if meshTrace {
+		mtrace("link up %s", f.zid)
+	}
 	s.queueLinkStates(sends, out)
 	s.meshTreesChangedLocked(m, out)
 	s.mu.Unlock()
@@ -306,6 +353,9 @@ func (s *Session) meshLinkDown(f *face, out outbox) {
 		return
 	}
 	removed, sends := m.net.removeLink(f)
+	if meshTrace {
+		mtrace("link down %s, removed %v", f.zid, removed)
+	}
 	s.queueLinkStates(sends, out)
 	s.meshRoutersGoneLocked(m, removed, out)
 	s.meshTreesChangedLocked(m, out)
@@ -329,6 +379,9 @@ func (s *Session) meshOAM(f *face, m *protocol.OAM) {
 		return
 	}
 	removed, sends := mesh.net.linkStates(list, f)
+	if meshTrace && (len(removed) > 0 || len(mesh.net.changed) > 0) {
+		mtrace("link states from %s: changed [%s] removed %v", f.zid, mesh.net.names(mesh.net.changed), removed)
+	}
 	s.queueLinkStates(sends, out)
 	s.meshRoutersGoneLocked(mesh, removed, out)
 	// Stale lists (the same states come over every link) change nothing.
@@ -377,6 +430,9 @@ func (s *Session) meshRoutersGoneLocked(m *meshState, removed []ZID, out outbox)
 			}
 		}
 	}
+	if meshTrace {
+		mtrace("gone: routers %v, %d entities lost a source", removed, len(changes))
+	}
 	for _, c := range changes {
 		s.routerUpdateLocked(c.k, c.key, nil, out)
 	}
@@ -418,7 +474,14 @@ func (s *Session) meshComputeTreesLocked(m *meshState, out outbox) {
 		if len(children) == 0 || net.nodes[root] == nil {
 			continue
 		}
+		if meshTrace {
+			mtrace("trees: root %s new children [%s] (all [%s])", net.nodes[root].zid,
+				net.names(children), net.names(net.trees[root].children))
+		}
 		send := func(k declKind, key string, info qInfo) {
+			if meshTrace {
+				mtrace("  resend root %s kind %d key %s", net.nodes[root].zid, k, key)
+			}
 			for _, c := range children {
 				if f := net.faceOf(c); f != nil {
 					out.add(f, sourcedDecl(k, key, root, info, false))

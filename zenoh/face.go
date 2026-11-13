@@ -3,6 +3,7 @@ package zenoh
 import (
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/shabunin/tiny-zenoh-go/keyexpr"
 	"github.com/shabunin/tiny-zenoh-go/protocol"
@@ -310,6 +311,9 @@ func (f *face) teardown() {
 	}
 	if f.mesh {
 		s.meshLinkDown(f, out)
+		if wasLive {
+			s.meshGone[string(f.zid.Bytes())] = time.Now()
+		}
 	}
 	if s.gossip != nil {
 		s.gossipLinkDownLocked(f, out)

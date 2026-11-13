@@ -215,11 +215,17 @@ type lsTree struct {
 	parent     int   // -1: none
 	children   []int // nodes whose path to the root goes through us
 	directions []int // per destination: our next hop toward it on this tree, -1 if none
-	// root and kids are the zkeys of the root and children when computed:
-	// node slots are reused, so indices alone do not say whether a child
-	// is new to a tree.
+	// root is the zkey of the root and kids the links to the children when
+	// computed: node slots are reused, so indices alone do not say whether
+	// a child is new to a tree, and a child whose link went down and came
+	// back (a new face) between two computations has lost what it had.
 	root string
-	kids []string
+	kids []lsKid
+}
+
+type lsKid struct {
+	zid string
+	f   *face
 }
 
 type lsNetwork struct {
@@ -865,7 +871,7 @@ func (n *lsNetwork) computeTrees() [][]int {
 			case p == 0:
 				hop[d] = d
 				t.children = append(t.children, d)
-				t.kids = append(t.kids, zkey(n.nodes[d].zid))
+				t.kids = append(t.kids, lsKid{zkey(n.nodes[d].zid), n.faceOf(d)})
 			default:
 				hop[d] = hop[p]
 			}

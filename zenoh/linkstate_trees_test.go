@@ -114,3 +114,31 @@ func TestNodeSlotsReused(t *testing.T) {
 		t.Fatalf("%d node slots for 2 nodes", len(n.nodes))
 	}
 }
+
+// TestChildLinkFlap: a neighbour whose link went down and came back between
+// two computations of the trees (a new face, same router) has lost the
+// declarations it had from us: it is a new child again.
+func TestChildLinkFlap(t *testing.T) {
+	self, _ := protocol.ParseZID("1000")
+	other, _ := protocol.ParseZID("1001")
+	n := newNetworkAs(self, protocol.Router)
+	connect := func() *face {
+		f := &face{zid: other}
+		n.links[f] = &lsLink{f: f, mappings: map[uint64]ZID{}}
+		n.nodes[0].links[zkey(other)] = 0
+		return f
+	}
+	f1 := connect()
+	k := n.addNode(&lsNode{zid: other, whatami: protocol.Router, links: map[string]uint16{zkey(self): 0}})
+	if nc := n.computeTrees(); len(nc[0]) != 1 || nc[0][0] != k {
+		t.Fatalf("first link: new children %v", nc[0])
+	}
+	if nc := n.computeTrees(); len(nc[0]) != 0 {
+		t.Fatalf("nothing changed: new children %v", nc[0])
+	}
+	delete(n.links, f1) // down and up again before the next computation
+	connect()
+	if nc := n.computeTrees(); len(nc[0]) != 1 || nc[0][0] != k {
+		t.Fatalf("after the flap: new children %v, want [%d]", nc[0], k)
+	}
+}

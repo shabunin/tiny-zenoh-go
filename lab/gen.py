@@ -48,6 +48,9 @@ ap.add_argument("--storage", default="", help="comma-separated routers with a re
 ap.add_argument("--gossip", action="store_true", help="gossip scouting on the routers")
 ap.add_argument("--wmem", type=int, default=0, help="routers' TCP send buffer limit in bytes "
                 "(net.ipv4.tcp_wmem max; default: the kernel's, autotuned up to 4 MB)")
+ap.add_argument("--trace", action="store_true", help="tzd routers log their mesh handling "
+                "(ZENOH_MESH_TRACE) to docker logs")
+ap.add_argument("--rust-log", default="", help="RUST_LOG for the zenohd routers")
 ap.add_argument("--tzlab-image", default="tzlab:latest")
 ap.add_argument("--zenohd-image", default="eclipse/zenoh:1.10.2")
 ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "topos"))
@@ -67,6 +70,9 @@ if a.shape in ("grid", "random"):
 n = len(impls)
 routers = [f"r{i+1}" for i in range(n)]
 ids = {}
+if a.shape in ("grid", "random"):
+    # Fixed ZIDs that name the router (r22: e00016), for the admin space dumps.
+    ids = {r: f"e{i+1:05x}" for i, r in enumerate(routers)}
 hosts = {}  # host -> {"id":..., "listen": bool}
 edges = []  # (dialer, listener)
 
@@ -180,8 +186,12 @@ for r, impl in zip(routers, impls):
         y += [f'      sysctls: {{net.ipv4.tcp_wmem: "4096 16384 {a.wmem}"}}']
     if impl == "tzd":
         y += [f"      image: {a.tzlab_image}", f"      cmd: tzd -config /cfg/{r}.json5"]
+        if a.trace:
+            y += ["      env:", "        ZENOH_MESH_TRACE: \"1\""]
     else:
         y += [f"      image: {a.zenohd_image}", f"      cmd: -c /cfg/{r}.json5"]
+        if a.rust_log:
+            y += ["      env:", f"        RUST_LOG: \"{a.rust_log}\""]
 for h in hosts:
     y += [f"    {h}:", "      kind: linux", "      network-mode: none",
           f"      image: {a.tzlab_image}", "      cmd: sleep infinity"]

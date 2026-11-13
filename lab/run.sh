@@ -19,6 +19,11 @@
 #   run.sh scale TOPO       grid/random with --hosts: idle control traffic,
 #                           every host to every other with tokens, the
 #                           centre router cut off, then every router link
+#   run.sh recut TOPO       grid/random with --hosts: every host to every
+#                           other with tokens, every router link cut and
+#                           restored ROUNDS times (default 4); after each,
+#                           the flows that stay broken and every router's
+#                           subscriber and token tables (admin space)
 #
 # Results (the agents' JSON, an event log, a summary) go to
 # results/TOPO-SCENARIO.
@@ -541,6 +546,94 @@ print(f"liveliness: every host sees every token 20 s after the restore: {complet
 PY
 }
 
+recut() {
+	[ -n "${CENTRE:-}" ] && [ -n "$HOSTS" ] || { echo "recut: needs a grid/random topology with --hosts"; exit 1; }
+	OUT=results/$TOPO-recut
+	rm -rf "$OUT" && mkdir -p "$OUT"
+	local hs="" h rr i k rounds=${ROUNDS:-4} d
+	for h in $HOSTS; do [ "${h#h}" != "$h" ] && hs="$hs $h"; done
+	rr=$(router_link_vars)
+	d=$((30 + rounds * 32 + 10))
+	T0=$(date +%s.%N)
+	event "$(echo "$ROUTERS" | wc -w) routers ($IMPLS), hosts$hs; $rounds rounds; settling"
+	sleep 10
+	T0=$(date +%s.%N)
+	for h in $hs; do
+		agent "$h" alive -k "lab/alive/$h" -watch 'lab/alive/**' -d $((d + 4))s > "$OUT/alive-$h.jsonl" &
+		agent "$h" sub -k 'lab/scale/**' -per-key -d $((d + 2))s > "$OUT/sub-$h.json" &
+	done
+	sleep 3
+	event "pubs start"
+	for h in $hs; do
+		agent "$h" pub -k "lab/scale/$h" -rate 100 -d ${d}s > "$OUT/pub-$h.json" &
+	done
+	sleep 20
+	for i in $(seq "$rounds"); do
+		event "round $i: cut every router link" && links_par "$rr" down
+		sleep 5
+		event "round $i: restore" && links_par "$rr" up
+		sleep 20
+		for k in subscriber token; do
+			agent h1 get -k "@/*/router/$k/lab/**" -d 5s > "$OUT/admin-$i-$k.json" || true
+		done
+		event "round $i: dumped"
+	done
+	wait
+	event "done"
+	python3 - "$OUT" "$hs" "$TD" "$rounds" <<'PY' | tee "$OUT/summary.txt"
+import json, re, sys
+d, hs, td, rounds = sys.argv[1], sys.argv[2].split(), sys.argv[3], int(sys.argv[4])
+ev = {}
+for line in open(f"{d}/events.log"):
+    m = re.match(r"t=([\d.]+)s (.*)", line)
+    if m:
+        ev[m.group(2)] = float(m.group(1))
+env = open(f"{td}/lab.env").read()
+at = {h: re.search(rf"^{h.upper()}_AT=(\S+)", env, re.M).group(1) for h in hs}
+impls = re.search(r"^IMPLS='([^']*)'", env, re.M).group(1).split()
+impl = {f"r{i+1}": x for i, x in enumerate(impls)}
+name = lambda z: f"r{int(z, 16) - 0xe00000}" if re.fullmatch(r"e[0-9a-f]{5}", z) else z
+subs = {h: json.load(open(f"{d}/sub-{h}.json"))["keys"] for h in hs}
+for i in range(1, rounds + 1):
+    lo, hi = ev[f"round {i}: restore"] + 12, ev[f"round {i}: dumped"] - 5
+    broken = []
+    for s in hs:
+        for p in hs:
+            ps = subs[s].get(f"lab/scale/{p}", {}).get("per_second", [])
+            w = ps[int(lo):int(hi)]
+            if sum(w) < 50 * len(w):
+                broken.append(f"{p}({at[p]})->{s}({at[s]}) {sum(w)}/{100*len(w)}")
+    print(f"round {i}: {len(broken)} flows broken 12 s after the restore")
+    for b in broken:
+        print("  ", b)
+    # Every router should list, for lab/scale/** every host's router, and for
+    # lab/alive/<h> h's router (its own clients count as itself).
+    for kind in ("subscriber", "token"):
+        try:
+            dump = json.load(open(f"{d}/admin-{i}-{kind}.json"))
+        except Exception as e:
+            print(f"   {kind} dump: {e}")
+            continue
+        seen = {}  # router -> key -> sources
+        for k, v in dump.items():
+            r, key = name(k.split("/")[1]), k.split("/", 4)[4]
+            v = json.loads(v)
+            src = {name(z) for z in v["routers"]} | ({r} if v["clients"] else set())
+            seen.setdefault(r, {})[key] = src
+        miss = []
+        for r in sorted(seen, key=lambda x: int(x[1:]) if x[1:].isdigit() else 0):
+            if kind == "subscriber":
+                m = {at[h] for h in hs} - seen[r].get("lab/scale/**", set())
+            else:
+                m = {at[h] for h in hs if at[h] not in seen[r].get(f"lab/alive/{h}", set())}
+            if m:
+                miss.append(f"{r}[{impl.get(r)}] lacks {sorted(m, key=lambda x: int(x[1:]))}")
+        print(f"   {kind}: {len(seen)} routers answered; {len(miss)} with entries missing")
+        for x in miss:
+            print("     ", x)
+PY
+}
+
 # guard_start runs a watchdog for the lab: if the host's available memory
 # drops below GUARD_MIB (default 2000), it kills the lab's containers before
 # the host starts thrashing (a 225-router mesh once froze the 16 GB lab VM).
@@ -585,7 +678,7 @@ down)
 	(cd "$TD" && sudo containerlab destroy -t topo.clab.yml --cleanup >/dev/null)
 	guard_stop
 	;;
-failover | partition | gateway | netem | scale)
+failover | partition | gateway | netem | scale | recut)
 	load "$2"
 	"$1"
 	;;

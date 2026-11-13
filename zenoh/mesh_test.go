@@ -1,10 +1,13 @@
 package zenoh
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
 // Router mesh tests: Go routers linked with each other and with zenohd.
@@ -144,4 +147,40 @@ func TestGoRouterBridgesZenohd(t *testing.T) {
 	checkMesh(t, clientAt(t, zds[0]), clientAt(t, zds[1]))
 	checkMesh(t, clientAt(t, zds[1]), clientAt(t, zds[0]))
 	checkMesh(t, clientAt(t, zds[0]), clientOf(t, r))
+}
+
+// TestMeshRejoinHold: right after the link to a neighbour router went down,
+// a new transport from that router is refused for meshRejoinHold (zenoh-rust
+// would not see it as a new child of its trees and never send it the
+// declarations lost with the link); clients and peers are not held.
+func TestMeshRejoinHold(t *testing.T) {
+	r := openRouterTo(t)
+	z, _ := protocol.ParseZID("e00042")
+	r.mu.Lock()
+	r.meshGone[string(z.Bytes())] = time.Now()
+	r.mu.Unlock()
+	if err := r.admit(newFace(r), z, protocol.Router); !errors.Is(err, errRejoinHold) {
+		t.Fatalf("router just gone: %v, want errRejoinHold", err)
+	}
+	c, _ := protocol.ParseZID("e00043")
+	r.mu.Lock()
+	r.meshGone[string(c.Bytes())] = time.Now()
+	r.mu.Unlock()
+	// Admitted faces have no transport: unregister them for Close.
+	forget := func(z ZID) {
+		r.mu.Lock()
+		delete(r.faces, string(z.Bytes()))
+		r.mu.Unlock()
+	}
+	if err := r.admit(newFace(r), c, protocol.Client); err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	forget(c)
+	r.mu.Lock()
+	r.meshGone[string(z.Bytes())] = time.Now().Add(-meshRejoinHold)
+	r.mu.Unlock()
+	if err := r.admit(newFace(r), z, protocol.Router); err != nil {
+		t.Fatalf("after the hold: %v", err)
+	}
+	forget(z)
 }

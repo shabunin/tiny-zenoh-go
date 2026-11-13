@@ -278,9 +278,12 @@ type Session struct {
 	redial sync.Mutex
 	clock  hlc
 
-	mu           sync.Mutex
-	faces        map[string]*face // by peer ZID (registered at handshake)
-	connecting   map[string]bool  // ZIDs being dialed after scouting
+	mu         sync.Mutex
+	faces      map[string]*face // by peer ZID (registered at handshake)
+	connecting map[string]bool  // ZIDs being dialed after scouting
+	// meshGone: when the link to each neighbour router (by ZID) last went
+	// down; a new link to it waits meshRejoinHold (see admit).
+	meshGone     map[string]time.Time
 	listeners    []link.Listener
 	scout        *scouter
 	nextEntity   uint32
@@ -339,6 +342,7 @@ func Open(cfg Config) (*Session, error) {
 		done:        make(chan struct{}),
 		faces:       map[string]*face{},
 		connecting:  map[string]bool{},
+		meshGone:    map[string]time.Time{},
 		localExprs:  map[uint16]string{},
 		subs:        map[uint32]*Subscriber{},
 		queryables:  map[uint32]*Queryable{},
@@ -831,6 +835,20 @@ func (s *Session) shmExt() func() transport.HandshakeExt {
 	return func() transport.HandshakeExt { return s.shm.NewLink() }
 }
 
+// meshRejoinHold is how long after the link to a neighbour router went down
+// a new link to it is refused. zenoh-rust recomputes its trees at most every
+// 100 ms and sends a router the declarations it lacks only when it becomes
+// a new child of a tree, telling children apart by graph slot: a router
+// that comes back within one computation (zenohd and tzd both redial at
+// once) keeps its slot and is not new, so it never gets back what it lost
+// with the link. Seen in the lab when every link of a mixed mesh was cut
+// and restored: whole subtrees missed a router's subscribers and tokens
+// for good. Refused, the dialer retries a second later (zenohd's connector
+// period), after the trees went without the link.
+const meshRejoinHold = 500 * time.Millisecond
+
+var errRejoinHold = errors.New("zenoh: router link went down just now, rejoin later")
+
 // admit registers f under the peer's ZID unless a face to that peer exists.
 // It also snapshots the declarations f must be told about; any declaration
 // made afterwards finds f in s.faces and is sent by its declarer.
@@ -849,6 +867,14 @@ func (s *Session) admit(f *face, z protocol.ZID, w protocol.WhatAmI) error {
 	}
 	if _, dup := s.faces[string(z.Bytes())]; dup {
 		return transport.ErrDuplicate
+	}
+	if w == protocol.Router && s.cfg.Mode == ModeRouter {
+		if t, ok := s.meshGone[string(z.Bytes())]; ok {
+			if time.Since(t) < meshRejoinHold {
+				return errRejoinHold
+			}
+			delete(s.meshGone, string(z.Bytes()))
+		}
 	}
 	// The face's region, hence its role, is known once OPEN is done
 	// (established); until then declarations skip it (it is not live).
