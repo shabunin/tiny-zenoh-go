@@ -31,6 +31,12 @@ func rustSamples(t *testing.T, p *rustPeer, n int) []string {
 // noMoreRust checks that a Rust subscriber gets nothing more for a while.
 func noMoreRust(t *testing.T, p *rustPeer, d time.Duration) {
 	t.Helper()
+	for _, e := range p.early {
+		if e.Key != "" {
+			t.Fatalf("unexpected sample %q", e.Payload)
+		}
+	}
+	p.early = nil
 	deadline := time.After(d)
 	for {
 		select {

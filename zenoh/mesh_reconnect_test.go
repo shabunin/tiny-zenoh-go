@@ -3,6 +3,7 @@ package zenoh
 import (
 	"encoding/binary"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -93,20 +94,11 @@ func TestMeshMassReconnect(t *testing.T) {
 	lease := time.Second
 	routers := make([]*Session, rows*cols)
 	locs := make([]string, rows*cols)
-	lns := make([]net.Listener, rows*cols)
-	for i := range routers {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		locs[i] = ln.Addr().String()
-		lns[i] = ln
-	}
-	for _, ln := range lns {
-		_ = ln.Close()
-	}
 	var proxies []*cutProxy
-	for i := range routers {
+	// Routers connect only to higher-numbered neighbours, so opening them
+	// from the last one lets each listen on port 0 (no port picked in
+	// advance that someone else could take) and dial addresses that exist.
+	for i := len(routers) - 1; i >= 0; i-- {
 		var connect []string
 		r, c := i/cols, i%cols
 		for _, j := range []int{i + 1, i + cols} {
@@ -117,11 +109,12 @@ func TestMeshMassReconnect(t *testing.T) {
 			proxies = append(proxies, p)
 			connect = append(connect, p.locator())
 		}
-		s, err := Open(Config{Mode: ModeRouter, Listen: []string{"tcp/" + locs[i]}, Connect: connect,
+		s, err := Open(Config{Mode: ModeRouter, Listen: []string{"tcp/127.0.0.1:0"}, Connect: connect,
 			Lease: lease, Scouting: ScoutingConfig{Disable: true}})
 		if err != nil {
 			t.Fatal(err)
 		}
+		locs[i] = strings.TrimPrefix(s.Locators()[0], "tcp/")
 		routers[i] = s
 		t.Cleanup(func() { _ = s.Close() })
 	}

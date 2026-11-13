@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/shabunin/tiny-zenoh-go/link"
 )
 
 // Interop over links the zenohd image and the Python binding lack
@@ -72,13 +74,24 @@ func (p *rsProc) want(f string) map[string]any {
 }
 
 func rustLinkLocators(t *testing.T) map[string]func() string {
+	if os.Getenv("ZENOH_RS") == "" {
+		t.Skip("ZENOH_RS not set (zenoh-rust test peer from zenoh/testdata/zrs)")
+	}
 	return map[string]func() string{
 		"unixpipe": func() string { return "unixpipe/" + filepath.Join(t.TempDir(), "zp") },
 		"vsock": func() string {
 			if _, err := os.Stat("/dev/vsock"); err != nil {
 				t.Skip("no /dev/vsock")
 			}
-			return fmt.Sprintf("vsock/VMADDR_CID_LOCAL:%d", 20000+rand.IntN(30000))
+			loc := fmt.Sprintf("vsock/VMADDR_CID_LOCAL:%d", 20000+rand.IntN(30000))
+			// /dev/vsock alone doesn't mean local vsock works: that needs
+			// the vsock_loopback module (CI runners lack it).
+			ln, err := link.Listen(loc)
+			if err != nil {
+				t.Skipf("vsock loopback unavailable (modprobe vsock_loopback): %v", err)
+			}
+			_ = ln.Close()
+			return loc
 		},
 	}
 }

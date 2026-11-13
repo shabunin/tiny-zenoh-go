@@ -57,6 +57,7 @@ type rustPeer struct {
 	t      *testing.T
 	cmd    *exec.Cmd
 	events chan peerEvent
+	early  []peerEvent // events that came before "ready", for next()
 }
 
 // startPeer runs zpeer.py and, if waitReady, blocks until it has declared
@@ -95,8 +96,14 @@ func startRust(t *testing.T, target string, waitReady bool, args ...string) *rus
 	}()
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	if waitReady {
-		if ev := p.next(); !ev.Ready {
-			t.Fatalf("peer not ready: %+v", ev)
+		// A subscriber with history can deliver before the script prints
+		// "ready" (seen on slow CI runners); keep those events.
+		for {
+			ev := p.recv()
+			if ev.Ready {
+				break
+			}
+			p.early = append(p.early, ev)
 		}
 		settle()
 	}
@@ -104,6 +111,17 @@ func startRust(t *testing.T, target string, waitReady bool, args ...string) *rus
 }
 
 func (p *rustPeer) next() peerEvent {
+	p.t.Helper()
+	if len(p.early) > 0 {
+		ev := p.early[0]
+		p.early = p.early[1:]
+		return ev
+	}
+	return p.recv()
+}
+
+// recv reads the next event from the script.
+func (p *rustPeer) recv() peerEvent {
 	p.t.Helper()
 	select {
 	case ev, ok := <-p.events:
