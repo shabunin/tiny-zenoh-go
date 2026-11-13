@@ -1,13 +1,52 @@
 tiny-zenoh-go
 Copyright 2026 The tiny-zenoh-go Authors
 
-This product is a Go implementation of the Eclipse Zenoh protocol. It was
-written largely by an AI model (Anthropic's Claude) from the Zenoh protocol
-specification and from the source code of Eclipse Zenoh (zenoh-rust,
-https://github.com/eclipse-zenoh/zenoh), whose algorithms, wire formats,
-configuration formats and behaviour it reproduces. Eclipse Zenoh is
-Copyright (c) 2017, 2024 ZettaScale Technology and the Eclipse Zenoh
-contributors, and is made available under the terms of the Eclipse Public
-License 2.0 or the Apache License 2.0 (EPL-2.0 OR Apache-2.0).
+Licensed under the Eclipse Public License 2.0 (LICENSE-EPL-2.0) or the
+Apache License, Version 2.0 (LICENSE), at your option.
+SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 
-Test vectors in zext and keyexpr are taken from zenoh-rust's tests.
+
+Authorship
+----------
+
+This code was written by an AI model, Anthropic's Claude Opus 5.5 (using
+Claude Code), under the direction of the project's maintainer, from the
+Zenoh protocol specification and the source code of Eclipse Zenoh.
+
+
+Credits: Eclipse Zenoh
+----------------------
+
+tiny-zenoh-go is an independent Go implementation of the Zenoh protocol.
+It reproduces the algorithms, wire formats, configuration formats and
+behaviour of Eclipse Zenoh, and owes its design to that project:
+
+  * Project home: https://projects.eclipse.org/projects/iot.zenoh
+  * Website:      https://zenoh.io
+  * zenoh-rust:   https://github.com/eclipse-zenoh/zenoh
+  * zenoh-pico:   https://github.com/eclipse-zenoh/zenoh-pico
+  * Protocol specification: https://spec.zenoh.io
+
+Eclipse Zenoh is Copyright (c) 2017, 2024 ZettaScale Technology and the
+Eclipse Zenoh contributors, and is made available under the terms of the
+Eclipse Public License 2.0 or the Apache License 2.0
+(SPDX-License-Identifier: EPL-2.0 OR Apache-2.0). Test vectors in the zext
+and keyexpr packages are taken from zenoh-rust's tests.
+
+Eclipse zenoh is a trademark of the Eclipse Foundation. Eclipse, and the
+Eclipse Logo are registered trademarks of the Eclipse Foundation.
+tiny-zenoh-go is not affiliated with or endorsed by the Eclipse Foundation,
+ZettaScale Technology or the Eclipse Zenoh project.
+
+
+Third-party content
+-------------------
+
+  * github.com/quic-go/quic-go (MIT License), used by link/quic only.
+  * golang.org/x/sys, golang.org/x/net, golang.org/x/crypto
+    (BSD-3-Clause), via quic-go and for Linux system calls.
+
+LZ4, XXH3 and SipHash are implemented here from their published
+specifications (LZ4 and xxHash by Yann Collet; SipHash by Jean-Philippe
+Aumasson and Daniel J. Bernstein); no code from their reference
+implementations is included.

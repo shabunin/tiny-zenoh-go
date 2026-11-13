@@ -10,6 +10,15 @@ A pure-Go implementation of Eclipse Zenoh (wire protocol `0x09`, Zenoh 1.0
 specification), interoperating with zenoh-rust / zenohd 1.10.2 and
 zenoh-pico. The library and the `tzd` router also build with TinyGo.
 
+Written by Anthropic's Claude Opus 5.5 model (with Claude Code), under the
+direction of the project's maintainer, from the Zenoh specification and the
+sources of [Eclipse Zenoh](https://zenoh.io) (zenoh-rust, zenoh-pico), whose
+design, wire formats and behaviour it reproduces; thanks to the Zenoh
+project. Not affiliated with or endorsed by the Eclipse Foundation,
+ZettaScale Technology or the Eclipse Zenoh project.
+
+Licensed `EPL-2.0 OR Apache-2.0`, the same terms as Eclipse Zenoh.
+
 ### Sessions and API
 
 - Client, peer and router modes; multicast and gossip scouting, autoconnect,

@@ -35,8 +35,8 @@ go install github.com/shabunin/tiny-zenoh-go/cmd/tzd@v0.1.0   # the router
 
 ## Project status
 
-**v0.1.0, early.** The code is young (written in November 2026, largely by
-Anthropic's Claude; see NOTICE), has no production users yet and has not
+**v0.1.0, early.** The code is young (written in November 2026 by
+Anthropic's Claude Opus 5.5 model; see NOTICE), has no production users yet and has not
 been audited. The API may change before 1.0. What backs it:
 
 - **Tests:** unit tests, interop tests against zenohd, the Python binding,
@@ -1041,10 +1041,29 @@ tiny-zenoh-go/
 - Key expressions: <https://spec.zenoh.io/spec/1.0.0/concepts/key-expressions.html>
 - Session establishment: <https://spec.zenoh.io/spec/1.0.0/session/open-accept.html>
 
+## Credits
+
+- **[Eclipse Zenoh](https://zenoh.io)**: this is an independent Go
+  implementation of its protocol, and owes it the design: algorithms, wire,
+  configuration and behaviour come from the
+  [Zenoh specification](https://spec.zenoh.io) and the sources of
+  [zenoh-rust](https://github.com/eclipse-zenoh/zenoh) and
+  [zenoh-pico](https://github.com/eclipse-zenoh/zenoh-pico) (Copyright
+  ZettaScale Technology and the Eclipse Zenoh contributors, EPL-2.0 OR
+  Apache-2.0). Thanks to the Zenoh team for an open protocol, a readable
+  reference implementation and test suites to check against. Eclipse zenoh
+  is a trademark of the Eclipse Foundation; this project is not affiliated
+  with or endorsed by the Eclipse Foundation, ZettaScale Technology or the
+  Eclipse Zenoh project.
+- **Written by Anthropic's Claude Opus 5.5** (using Claude Code), under the
+  direction of the project's maintainer.
+- [quic-go](https://github.com/quic-go/quic-go) for the QUIC link; TinyGo
+  for making Go run on the boards.
+
 ## License
 
-Apache License 2.0 (see [LICENSE](LICENSE)). This is a Go implementation
-of [Eclipse Zenoh](https://zenoh.io), written largely by an AI model from
-the Zenoh specification and the zenoh-rust sources (EPL-2.0 OR Apache-2.0,
-ZettaScale Technology and the Eclipse Zenoh contributors), whose behaviour it
-reproduces; see [NOTICE](NOTICE).
+Dual-licensed, like Eclipse Zenoh, under the
+[Eclipse Public License 2.0](LICENSE-EPL-2.0) or the
+[Apache License 2.0](LICENSE), at your option
+(`SPDX-License-Identifier: EPL-2.0 OR Apache-2.0`). See [NOTICE](NOTICE)
+for attribution and third-party licenses.
