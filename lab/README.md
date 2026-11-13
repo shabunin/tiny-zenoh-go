@@ -254,8 +254,32 @@ the end every router's graph was the grid, so what is left there is
 not this.
 
 One run of scale on 100 mixed also had a data loop on one router's tree
-after the mass restore (1.7 M duplicates; two reruns: 27 k, 28 k), likely
-the same graph disagreement.
+after the mass restore (1.7 M duplicates; two reruns: 27 k, 28 k). With
+the fix above, three reruns had no such loop but still 17 k, 56 k and 71 k
+duplicates. Following one router's data (h5 at r19) through every tzd
+router's per-neighbour counters: copies came back into the mesh from zenohd
+routers (r18, and r70 into r69), tagged with trees on which the tzd router
+receiving them does not have the sender as its parent, then went on to
+every subscriber again; r55 (tzd) and its zenohd neighbours r54 and r56
+bounced data between them at about 5,000 messages/s each way. Every graph
+was the grid and no tree looped. zenohd maps a neighbour's NodeIds to its
+own through a table it refreshes, when it adds a router back, only for the
+first NodeId that ever named it, so data can go on the wrong tree for as
+long as the link lives; pure zenohd
+10x10 had 85 k duplicates against tzd's 3.5 k. tzd now drops mesh data
+that comes from a neighbour that is not its parent on the data's tree, or
+that comes back to its root (meshOffTreeLocked). scale on 100, three runs
+each:
+
+| mesh | duplicates | flows never back | all flows back after the restore |
+|---|---|---|---|
+| mixed, before | 17 k, 56 k, 71 k | 5, 1, 4 | 4.7, 4.6, 4.6 s |
+| mixed, with the check | 2.1 k, 4.8 k, 0.2 k | 3, 5, 2 | 4.6, 4.6, 4.6 s |
+| tzd, with the check (one run) | 11 | 0 | 4.6 s |
+
+The flows never back in mixed meshes are zenohd's (new children told
+apart by slot, and a redial joined to a stale transport; both above). Runs 2 and 3 start from the mesh the run before left,
+broken flows included.
 
 **recut**: `ROUNDS=n` (default 4) times, every router link is cut for 5 s
 and restored while every host publishes to every other and holds a

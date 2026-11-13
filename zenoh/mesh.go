@@ -518,6 +518,39 @@ func (s *Session) meshSourceLocked(f *face, node uint16) (int, bool) {
 	return src, src >= 0
 }
 
+// meshOffTreeLocked reports whether data that neighbour router f brought,
+// tagged with tree (our node index of its root), came the wrong way: on a
+// tree, data reaches a router from its parent only, and never comes back to
+// the root. zenohd tags data with the wrong tree after it renumbered routers
+// (its Link::local_mappings keep a stale index for a neighbour's NodeId:
+// Network::add_node refreshes only the first NodeId that named a router);
+// seen in a mixed lab mesh, such copies reached every subscriber again on
+// another tree, or bounced between a tzd router and two zenohd ones for
+// good. They are dropped here, at the first tzd router. While our trees are
+// being recomputed (slot reused, no parent yet) the data goes through.
+func (s *Session) meshOffTreeLocked(f *face, tree int) bool {
+	if !f.mesh {
+		return false
+	}
+	m := s.meshOf(f)
+	if m == nil {
+		return false
+	}
+	if tree == 0 {
+		return true // our own tree: our data came back
+	}
+	net := m.net
+	if tree >= len(net.trees) || net.nodes[tree] == nil || net.trees[tree].root != zkey(net.nodes[tree].zid) {
+		return false
+	}
+	p := net.trees[tree].parent
+	if p < 0 {
+		return false
+	}
+	pf := net.faceOf(p)
+	return pf != nil && pf != f
+}
+
 // meshRouteLocked lists, over all our meshes, the neighbour routers to send
 // traffic of kind k on key to, with the NodeId (tree) to tag it with:
 // traffic from src's own mesh continues on tree (the entry router's), and

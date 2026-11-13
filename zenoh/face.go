@@ -460,6 +460,9 @@ func (f *face) dispatch(m protocol.Message, reliable bool) error {
 		if !ok {
 			return nil // unknown mapping: drop, as zenoh-rust does
 		}
+		if f.mesh && s.forwardRoute(f, m.NodeID, key).offTree {
+			return nil // a copy that came the wrong way (meshOffTreeLocked)
+		}
 		if p, isPut := m.Body.(*protocol.Put); isPut && s.tsOn && !s.stampIngress(p) {
 			return nil // timestamp from the future
 		}

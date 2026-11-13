@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -254,5 +255,71 @@ func TestOutboxOrder(t *testing.T) {
 	defer mu.Unlock()
 	if !slices.Equal(got, []uint16{0x7701, 0x7702, 0x7703, 0x7704}) {
 		t.Fatalf("got %x, want them in the order queued", got)
+	}
+}
+
+// fakeRouter connects a scripted neighbour router z to r over a pipe.
+func fakeRouter(t *testing.T, r *Session, z ZID) *transport.Unicast {
+	t.Helper()
+	c1, c2 := net.Pipe()
+	go r.accept(c2, "tcp")
+	u, err := transport.Open(c1, transport.Config{ZID: z, WhatAmI: protocol.Router, Lease: 2 * time.Second},
+		transport.Callbacks{OnMessage: func(protocol.Message, bool) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = u.Close() })
+	return u
+}
+
+// TestMeshOffTreeData checks that data a neighbour router brings on a tree
+// it is not our parent on (zenohd mis-tags data after renumbering routers)
+// is neither delivered nor passed on, and that data on the tree does go.
+func TestMeshOffTreeData(t *testing.T) {
+	r := openRouterTo(t)
+	n1, _ := protocol.ParseZID("e00051")
+	n2, _ := protocol.ParseZID("e00052")
+	var got atomic.Int32
+	c := clientAt(t, loc(r))
+	if _, err := c.DeclareSubscriber("t/**", func(Sample) { got.Add(1) }); err != nil {
+		t.Fatal(err)
+	}
+	u1, u2 := fakeRouter(t, r, n1), fakeRouter(t, r, n2)
+	// Each neighbour: itself (psid 0) linked to r (psid 1); n2 also names
+	// n1 (psid 2), linked to r. The graph: n1 - r - n2.
+	states := func(self ZID, other *ZID) *protocol.OAM {
+		list := []linkState{{psid: 0, sn: 1, zid: self, whatami: protocol.Router, hasWAI: true, links: []uint64{1}},
+			{psid: 1, sn: 0, zid: r.zid, whatami: protocol.Router, hasWAI: true}}
+		if other != nil {
+			list = append(list, linkState{psid: 2, sn: 1, zid: *other, whatami: protocol.Router, hasWAI: true, links: []uint64{1}})
+		}
+		return &protocol.OAM{ID: oamLinkState, Enc: protocol.ExtZBuf, Buf: encodeLinkStates(list), QoS: protocol.QoSDeclare}
+	}
+	if err := u1.Send(true, states(n1, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := u2.Send(true, states(n2, &n1)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(4 * treesDelay) // the trees
+	push := func(u *transport.Unicast, node uint16) {
+		t.Helper()
+		if err := u.Send(true, &protocol.Push{WireExpr: protocol.WireExpr{Suffix: "t/x"}, NodeID: node,
+			QoS: protocol.DefaultQoS, Body: &protocol.Put{Payload: []byte("x")}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	push(u2, 2) // from n2 on n1's tree: r's parent there is n1
+	push(u2, 1) // from n2 on r's own tree: ours, come back
+	time.Sleep(200 * time.Millisecond)
+	if n := got.Load(); n != 0 {
+		t.Fatalf("%d off-tree samples delivered", n)
+	}
+	push(u1, 0) // n1's own data, on its tree
+	push(u2, 0)
+	for deadline := time.Now().Add(2 * time.Second); got.Load() < 2; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of 2 on-tree samples delivered", got.Load())
+		}
 	}
 }

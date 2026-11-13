@@ -36,7 +36,8 @@ type meshHop struct {
 
 // dataRoute is where data on one key from one source goes.
 type dataRoute struct {
-	drop    bool      // unknown mesh NodeId: forward nothing
+	drop    bool      // unknown mesh NodeId, or off its tree: forward nothing
+	offTree bool      // off its tree (meshOffTreeLocked): not even ours to deliver
 	faces   []*face   // our faces whose subscribers want it
 	routers []meshHop // neighbour routers on the way to other subscribers
 }
@@ -146,10 +147,16 @@ func (s *Session) forwardRoute(src *face, node uint16, key string) *dataRoute {
 	gen = s.routeGen.Load()
 	r := &dataRoute{}
 	routers, ok := s.meshRouteLocked(kindSub, src, node, key, 0)
-	if !ok {
+	tree, _ := s.meshSourceLocked(src, node)
+	switch {
+	case !ok:
 		r.drop = true
-	} else {
-		tree, _ := s.meshSourceLocked(src, node)
+	case s.meshOffTreeLocked(src, tree):
+		r.drop, r.offTree = true, true
+		if meshTrace {
+			mtrace("data from %s on tree %d (node %d) key %s: off the tree, dropped", src.zid, tree, node, key)
+		}
+	default:
 		origin := s.originOf(src, tree)
 		for _, f := range s.faces {
 			if f.live && f.wantsDataLocked(key) && s.forwardsLocked(src, f, origin) {
