@@ -1,5 +1,8 @@
 # tiny-zenoh-go
 
+[![CI](https://github.com/shabunin/tiny-zenoh-go/actions/workflows/ci.yml/badge.svg)](https://github.com/shabunin/tiny-zenoh-go/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/shabunin/tiny-zenoh-go.svg)](https://pkg.go.dev/github.com/shabunin/tiny-zenoh-go)
+
 A pure-Go implementation of the [Zenoh](https://zenoh.io) protocol — no cgo, no
 Rust, no C bindings. The whole stack, including the public `zenoh` API, also
 compiles under [TinyGo](https://tinygo.org). The core has no dependencies
@@ -24,6 +27,40 @@ pure-Go [quic-go](https://github.com/quic-go/quic-go).
 
 Targets the **Zenoh 1.0.0 wire specification** (<https://spec.zenoh.io/spec/1.0.0/>),
 protocol version `0x09`; verified against **zenohd 1.10.2**.
+
+```bash
+go get github.com/shabunin/tiny-zenoh-go@v0.1.0
+go install github.com/shabunin/tiny-zenoh-go/cmd/tzd@v0.1.0   # the router
+```
+
+## Project status
+
+**v0.1.0, early.** The code is young (written in November 2026, largely by
+Anthropic's Claude; see NOTICE), has no production users yet and has not
+been audited. The API may change before 1.0. What backs it:
+
+- **Tests:** unit tests, interop tests against zenohd, the Python binding,
+  zenoh-pico, Rust peers and zenoh-rust's storage backends, 32 fuzz targets,
+  all under the race detector; about 85% statement coverage with the interop
+  suites (79% without). CI runs the unit tests and the zenohd, Python,
+  replication, InfluxDB and S3 interop tests on every push; the zenoh-pico,
+  Rust-helper and multicast tests run locally (see
+  [Running the tests](#running-the-tests)).
+- **Network lab:** containerlab scenarios in [`lab/`](lab/) (failover,
+  partitions, gateways, netem loss and delay, grids of up to 225 routers
+  cut and restored at once), with tzd-only, zenohd-only and mixed meshes.
+
+Use with care:
+
+| Area | State |
+|---|---|
+| Client / peer sessions with zenohd or Rust peers | Most tested path |
+| tzd router meshes | Tested up to 225 routers in the lab; no long-running (soak) tests yet |
+| Mixed tzd + zenohd meshes | Work, but large meshes inherit zenohd 1.10.2 recovery issues: after every link of a 100-router grid is cut and restored, a few flows can stay broken on the zenohd side |
+| Throughput | Latency on par with zenoh-rust; small-message throughput behind it (tzd ≈ 1.2 M msg/s vs zenohd ≈ 2.0 M on the same host) |
+| TinyGo / microcontrollers | Works on ESP32 and ESP32-S3 boards; memory is tight (a few sessions per boot on an ESP32-S3 with Wi-Fi) |
+| `tls13` (TinyGo TLS) | Own TLS 1.3 client, not audited; ECDSA signing (client certificates) is not constant-time. Key exchange and ciphers come from the Go standard library |
+| Not implemented | zenoh's "reliable UDP" (`udp/…?rel=1`), the RocksDB backend, dynamic plugin loading, YAML config, IPv6 multicast scouting, zero-copy SHM receive, a TLS server on TinyGo |
 
 ## Quick example
 

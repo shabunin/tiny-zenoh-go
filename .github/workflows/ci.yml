@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out=$(gofmt -l $(git ls-files '*.go'))
+          if [ -n "$out" ]; then echo "not gofmt'ed:"; echo "$out"; exit 1; fi
+      - run: go vet ./...
+      - name: cross-build tzd
+        run: |
+          for t in linux/amd64 linux/arm64 linux/arm darwin/arm64 windows/amd64; do
+            echo "== $t"; GOOS=${t%/*} GOARCH=${t#*/} go build -o /dev/null ./cmd/tzd
+          done
+
+  # Unit tests plus interop against zenoh-rust: zenohd routers, the Python
+  # binding, zenohd's replicated storages, InfluxDB 1.x/2.x and an S3 server.
+  # Tests needing locally built binaries (zenoh-pico, Rust helpers) and
+  # multicast skip themselves here; see "Running the tests" in README.md.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        router: [zenohd, tzd]
+    env:
+      ZENOH_IMAGE: eclipse/zenoh:1.10.2
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: python zenoh
+        run: |
+          python -m venv "$RUNNER_TEMP/zpy"
+          "$RUNNER_TEMP/zpy/bin/pip" install -q 'eclipse-zenoh==1.10.2'
+          echo "ZENOH_PY=$RUNNER_TEMP/zpy/bin/python" >> "$GITHUB_ENV"
+      - name: start routers and storage servers
+        run: |
+          R='replication:{interval:1,sub_intervals:5,hot:6,warm:30,propagation_delay:250}'
+          docker run -d --name zenohd -p 127.0.0.1:7447:7447 $ZENOH_IMAGE
+          docker run -d --name zenohd2 --net=host $ZENOH_IMAGE -l tcp/127.0.0.1:7448 --no-multicast-scouting
+          docker run -d --name zenohd-repl --net=host $ZENOH_IMAGE -l tcp/127.0.0.1:17470 --no-multicast-scouting \
+            --cfg "plugins/storage_manager/storages/demo:{key_expr:\"repl/**\",volume:\"memory\",$R}" \
+            --cfg "plugins/storage_manager/storages/strip:{key_expr:\"replp/**\",strip_prefix:\"replp\",volume:\"memory\",$R}"
+          # throwaway credentials, local to the runner
+          docker run -d --name zinflux1 -p 127.0.0.1:18086:8086 -e INFLUXDB_HTTP_AUTH_ENABLED=true \
+            -e INFLUXDB_ADMIN_USER=zadmin -e INFLUXDB_ADMIN_PASSWORD=throwaway-pw influxdb:1.8
+          docker run -d --name zinflux2 -p 127.0.0.1:18087:8086 -e DOCKER_INFLUXDB_INIT_MODE=setup \
+            -e DOCKER_INFLUXDB_INIT_USERNAME=zadmin -e DOCKER_INFLUXDB_INIT_PASSWORD=throwaway-pw \
+            -e DOCKER_INFLUXDB_INIT_ORG=zorg -e DOCKER_INFLUXDB_INIT_BUCKET=zinit \
+            -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=throwaway-token influxdb:2.7
+          mkdir -p "$RUNNER_TEMP/s3cfg"
+          echo '{"identities":[{"name":"ztest","credentials":[{"accessKey":"zthrowawayak","secretKey":"zthrowaway-secret"}],"actions":["Admin","Read","List","Tagging","Write"]}]}' > "$RUNNER_TEMP/s3cfg/s3.json"
+          docker run -d --name zs3 -p 127.0.0.1:18333:8333 -v "$RUNNER_TEMP/s3cfg:/etc/zs3:ro" \
+            chrislusf/seaweedfs:4.53 server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/zs3/s3.json
+      - name: wait for servers
+        run: |
+          wait_for() { for i in $(seq 1 60); do if eval "$2" >/dev/null 2>&1; then echo "$1 up"; return 0; fi; sleep 2; done; echo "$1 not up"; docker logs "$1" | tail -30; return 1; }
+          wait_for zenohd "bash -c '</dev/tcp/127.0.0.1/7447'"
+          wait_for zenohd2 "bash -c '</dev/tcp/127.0.0.1/7448'"
+          wait_for zenohd-repl "bash -c '</dev/tcp/127.0.0.1/17470'"
+          wait_for zinflux1 "curl -sf http://127.0.0.1:18086/ping"
+          wait_for zinflux2 "curl -sf http://127.0.0.1:18087/health"
+          wait_for zs3 "curl -s -o /dev/null http://127.0.0.1:18333/"
+      - name: go test -race
+        env:
+          ZENOH_MESH: tcp/127.0.0.1:7447,tcp/127.0.0.1:7448
+          ZENOH_REPL: tcp/127.0.0.1:17470
+          INFLUXDB1_URL: http://127.0.0.1:18086
+          INFLUXDB2_URL: http://127.0.0.1:18087
+          S3_URL: http://127.0.0.1:18333
+        run: |
+          if [ "${{ matrix.router }}" = zenohd ]; then
+            export ZENOH_ROUTER=tcp/127.0.0.1:7447
+            go test -race -count=1 -timeout 30m ./...
+          else
+            export ZENOH_ROUTER=go
+            go test -race -count=1 -timeout 30m ./zenoh/
+          fi
+      - name: router logs
+        if: failure()
+        run: for c in zenohd zenohd2 zenohd-repl; do echo "== $c"; docker logs $c 2>&1 | tail -50; done
+
+  tinygo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            examples/boardtest/cardputer/go.sum
+      - name: install TinyGo
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/tinygo.deb" https://github.com/tinygo-org/tinygo/releases/download/v0.44.0/tinygo_0.44.0_amd64.deb
+          sudo dpkg -i "$RUNNER_TEMP/tinygo.deb"
+          tinygo version
+      - name: host builds
+        run: |
+          for p in ./examples/tinycheck ./examples/tinyput ./examples/tinypeer ./cmd/tzd; do
+            echo "== $p"; tinygo build -o /dev/null $p
+          done
+      - name: board builds
+        run: |
+          tinygo build -o stickc.elf -target=m5stick-c ./examples/boardtest/stickc
+          (cd examples/boardtest/cardputer && tinygo build -o ../../../cardputer.elf -target=m5stamp-s3a .)
+          ls -l *.elf

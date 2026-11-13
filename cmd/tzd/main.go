@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -80,7 +81,12 @@ func main() {
 	flag.Var(&cfgOverrides, "cfg", "config change KEY:VALUE, VALUE in JSON5, KEY a /-separated path or empty for the whole config (repeatable)")
 	noTimestamp := flag.Bool("no-timestamp", false, "don't timestamp routed data that has no timestamp")
 	adminPerms := flag.String("adminspace-permissions", "", "admin space permissions: r, rw or none (rw: plugins/... config writes at @/<zid>/router/config/**)")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("tzd", zenoh.Version, runtime.Version(), runtime.GOOS+"/"+runtime.GOARCH)
+		return
+	}
 
 	cfg := zenoh.Config{
 		Mode:     zenoh.ModeRouter,
