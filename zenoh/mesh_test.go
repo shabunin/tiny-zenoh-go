@@ -2,12 +2,16 @@ package zenoh
 
 import (
 	"errors"
+	"net"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/shabunin/tiny-zenoh-go/protocol"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // Router mesh tests: Go routers linked with each other and with zenohd.
@@ -183,4 +187,72 @@ func TestMeshRejoinHold(t *testing.T) {
 		t.Fatalf("after the hold: %v", err)
 	}
 	forget(z)
+}
+
+// TestOutboxOrder checks that messages queued under the session lock reach a
+// face in the order they were queued, whichever outbox is sent first: link
+// states sent out of order lost links at the receivers for good (a link
+// state naming a NodeId before the one mapping it), and the graphs that
+// disagreed looped data.
+func TestOutboxOrder(t *testing.T) {
+	r := openRouterTo(t)
+	z, _ := protocol.ParseZID("e00044")
+	c1, c2 := net.Pipe()
+	go r.accept(c2, "tcp")
+	var mu sync.Mutex
+	var got []uint16
+	done := make(chan struct{})
+	u, err := transport.Open(c1, transport.Config{ZID: z, WhatAmI: protocol.Router, Lease: 2 * time.Second},
+		transport.Callbacks{OnMessage: func(m protocol.Message, _ bool) error {
+			if o, ok := m.(*protocol.OAM); ok && o.ID >= 0x7700 {
+				mu.Lock()
+				got = append(got, o.ID)
+				if len(got) == 4 {
+					close(done)
+				}
+				mu.Unlock()
+			}
+			return nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = u.Close() })
+	var f *face
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		r.mu.Lock()
+		f = r.faces[string(z.Bytes())]
+		live := f != nil && f.live
+		r.mu.Unlock()
+		if live {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no face for the neighbour")
+		}
+	}
+	oam := func(id uint16) *protocol.OAM {
+		return &protocol.OAM{ID: id, Enc: protocol.ExtUnit, QoS: protocol.QoSDeclare}
+	}
+	a, b := outbox{}, outbox{}
+	r.mu.Lock()
+	a.add(f, oam(0x7701))
+	a.add(f, oam(0x7702))
+	b.add(f, oam(0x7703))
+	r.mu.Unlock()
+	r.mu.Lock()
+	b.add(f, oam(0x7704))
+	r.mu.Unlock()
+	b.send() // the later outbox first
+	a.send()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("got %x, want 4 messages", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(got, []uint16{0x7701, 0x7702, 0x7703, 0x7704}) {
+		t.Fatalf("got %x, want them in the order queued", got)
+	}
 }

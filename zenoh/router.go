@@ -283,14 +283,25 @@ func undeclMsg(k declKind, id uint32, key string) *protocol.Declare {
 	return d
 }
 
-// outbox collects messages per face while Session.mu is held.
-type outbox map[*face][]transport.Encoder
+// outbox queues messages to faces while Session.mu is held, and sends them
+// once it is released. The messages go into each face's own queue at once
+// (face.enqueue), so they leave in the order the changes they tell of were
+// made, whichever goroutine sends first: link states and declarations built
+// under the lock by two goroutines used to go out in the order the
+// goroutines got to send. A link state then could come before the one that
+// maps a router's NodeId, and the neighbour dropped that link from the
+// state, kept it as the newest and passed it on (seen in the lab: routers
+// whose graphs disagreed computed trees that looped data for good).
+type outbox map[*face]struct{}
 
-func (o outbox) add(f *face, m transport.Encoder) { o[f] = append(o[f], m) }
+func (o outbox) add(f *face, m transport.Encoder) {
+	f.enqueue(m)
+	o[f] = struct{}{}
+}
 
 func (o outbox) send() {
-	for f, msgs := range o {
-		_ = f.send(true, msgs...)
+	for f := range o {
+		f.flush()
 	}
 }
 
@@ -495,10 +506,11 @@ func (s *Session) answerInterest(f *face, m *protocol.Interest, in *remoteIntere
 			}
 		}
 	}
-	s.mu.Unlock()
 	msgs = append(msgs, &protocol.Declare{HasInterestID: true, InterestID: m.ID,
 		QoS: protocol.QoSDeclare, Body: &protocol.DeclareFinal{}})
-	_ = f.send(true, msgs...)
+	f.enqueue(msgs...) // in order with the updates queued after (outbox)
+	s.mu.Unlock()
+	f.flush()
 }
 
 // routerFaceGoneLocked propagates the removal of everything face f declared;

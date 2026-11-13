@@ -24,7 +24,10 @@
 #                           restored ROUNDS times (default 4); after each,
 #                           the flows that stay broken and every router's
 #                           subscriber and token tables (admin space);
-#                           SUCC=1 also walks each broken flow's path
+#                           SUCC=1 also walks each broken flow's path;
+#                           STOP=1 stops at the first broken round and
+#                           leaves it running (recut-summary TOPO: the
+#                           summary of the last run again)
 #
 # Results (the agents' JSON, an event log, a summary) go to
 # results/TOPO-SCENARIO.
@@ -479,7 +482,20 @@ for tag in ("idle", "busy"):
     print(f"routers {tag}: RSS {sum(rss):.0f} MiB in all, {sum(rss)/len(rss):.1f} MiB each "
           f"(max {max(rss):.1f}), CPU {sum(c for *_, c in rs):.0f}% in all (max {max(c for *_, c in rs):.1f}%)")
 pubs = {h: json.load(open(f"{d}/pub-{h}.json")) for h in hs}
-subs = {h: json.load(open(f"{d}/sub-{h}.json"))["keys"] for h in hs}
+def load_sub(h):
+    try:
+        return json.load(open(f"{d}/sub-{h}.json"))["keys"]
+    except Exception:  # cut short: rebuild the per-second counts from the ticks
+        keys = {}
+        for l in open(f"{d}/tick-{h}.jsonl"):
+            if l.startswith("{"):
+                t = json.loads(l)
+                for k, n in t["n"].items():
+                    ps = keys.setdefault(k, {"per_second": []})["per_second"]
+                    ps.extend([0] * (t["t"] - len(ps)))
+                    ps[t["t"] - 1] = n
+        return keys
+subs = {h: load_sub(h) for h in hs}
 # Second k of a subscriber is [k, k+1) after T0 (the events' clock).
 p0, cut, back, mass, mback = (t("pubs start"), t("cut the centre"), t("restore " + centre),
                                t("cut every"), t("restore every"))
@@ -548,6 +564,25 @@ PY
 }
 
 # zid_of rN: the fixed ZID gen.py gives grid/random routers.
+# broken_now OUT HOSTS: prints the flows (pub->sub) that delivered under
+# half their rate over the last 5 s, from the subscribers' ticks; fails if
+# there is none.
+broken_now() {
+	python3 - "$1" "$2" <<'PY'
+import json, sys
+d, hs = sys.argv[1], sys.argv[2].split()
+bad = []
+for s in hs:
+    lines = [json.loads(l) for l in open(f"{d}/tick-{s}.jsonl") if l.startswith("{")][-5:]
+    for p in hs:
+        n = sum(l["n"].get(f"lab/scale/{p}", 0) for l in lines)
+        if n < 50 * len(lines):
+            bad.append(f"{p}->{s} {n}/{100 * len(lines)}")
+print("\n".join(bad))
+sys.exit(0 if bad else 1)
+PY
+}
+
 zid_of() { printf 'e%05x' "${1#r}"; }
 
 recut() {
@@ -558,13 +593,16 @@ recut() {
 	for h in $HOSTS; do [ "${h#h}" != "$h" ] && hs="$hs $h"; done
 	rr=$(router_link_vars)
 	d=$((30 + rounds * 32 + 10))
+	# STOP=1: stop cutting at the first round that leaves a flow broken and
+	# leave the lab (and the traffic, 15 min more) as it is, to look at.
+	[ -n "${STOP:-}" ] && d=$((d + 900))
 	T0=$(date +%s.%N)
 	event "$(echo "$ROUTERS" | wc -w) routers ($IMPLS), hosts$hs; $rounds rounds; settling"
 	sleep 10
 	T0=$(date +%s.%N)
 	for h in $hs; do
 		agent "$h" alive -k "lab/alive/$h" -watch 'lab/alive/**' -d $((d + 4))s > "$OUT/alive-$h.jsonl" &
-		agent "$h" sub -k 'lab/scale/**' -per-key -d $((d + 2))s > "$OUT/sub-$h.json" &
+		agent "$h" sub -k 'lab/scale/**' -per-key -tick -d $((d + 2))s > "$OUT/sub-$h.json" 2> "$OUT/tick-$h.jsonl" &
 	done
 	sleep 3
 	event "pubs start"
@@ -588,10 +626,24 @@ recut() {
 				> "$OUT/succ-$i-$h.json" || true
 		done
 		event "round $i: dumped"
+		if [ -n "${STOP:-}" ] && broken_now "$OUT" "$hs"; then
+			event "round $i: flows broken, stopping (traffic goes on)"
+			return
+		fi
 	done
+	# Nothing broke: end the long traffic now (zlab reports on SIGTERM).
+	if [ -n "${STOP:-}" ]; then
+		for h in $hs; do docker exec "$(ns "$h")" pkill -TERM zlab || true; done
+	fi
 	wait
 	event "done"
-	python3 - "$OUT" "$hs" "$TD" "$rounds" <<'PY' | tee "$OUT/summary.txt"
+	recut_summary "$OUT" "$hs" "$rounds"
+}
+
+# recut_summary OUT HOSTS ROUNDS: the summary of a recut run (run.sh
+# recut-summary TOPO prints it again for the last run).
+recut_summary() {
+	python3 - "$1" "$2" "$TD" "$3" <<'PY' | tee "$1/summary.txt"
 import json, re, sys
 d, hs, td, rounds = sys.argv[1], sys.argv[2].split(), sys.argv[3], int(sys.argv[4])
 ev = {}
@@ -604,7 +656,20 @@ at = {h: re.search(rf"^{h.upper()}_AT=(\S+)", env, re.M).group(1) for h in hs}
 impls = re.search(r"^IMPLS='([^']*)'", env, re.M).group(1).split()
 impl = {f"r{i+1}": x for i, x in enumerate(impls)}
 name = lambda z: f"r{int(z, 16) - 0xe00000}" if re.fullmatch(r"e[0-9a-f]{5}", z) else z
-subs = {h: json.load(open(f"{d}/sub-{h}.json"))["keys"] for h in hs}
+def load_sub(h):
+    try:
+        return json.load(open(f"{d}/sub-{h}.json"))["keys"]
+    except Exception:  # cut short: rebuild the per-second counts from the ticks
+        keys = {}
+        for l in open(f"{d}/tick-{h}.jsonl"):
+            if l.startswith("{"):
+                t = json.loads(l)
+                for k, n in t["n"].items():
+                    ps = keys.setdefault(k, {"per_second": []})["per_second"]
+                    ps.extend([0] * (t["t"] - len(ps)))
+                    ps[t["t"] - 1] = n
+        return keys
+subs = {h: load_sub(h) for h in hs}
 for i in range(1, rounds + 1):
     lo, hi = ev[f"round {i}: restore"] + 12, ev[f"round {i}: dumped"] - 5
     broken = []
@@ -714,8 +779,14 @@ failover | partition | gateway | netem | scale | recut)
 	load "$2"
 	"$1"
 	;;
+recut-summary)
+	load "$2"
+	o=results/$TOPO-recut
+	recut_summary "$o" "$(sed -n 's/.*hosts\([^;]*\);.*/\1/p' "$o/events.log" | head -1)" \
+		"$(grep -c ': dumped' "$o/events.log")"
+	;;
 *)
-	sed -n '2,28p' "$0"
+	sed -n '2,31p' "$0"
 	exit 2
 	;;
 esac

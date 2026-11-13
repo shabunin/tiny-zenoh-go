@@ -81,6 +81,12 @@ type face struct {
 	closePending bool
 	initial      []transport.Encoder // declarations to send right after the handshake
 
+	// outQ holds control messages queued under s.mu (enqueue) until flush
+	// sends them; flushMu keeps the flushes, hence the messages, in order.
+	outMu   sync.Mutex
+	outQ    []transport.Encoder
+	flushMu sync.Mutex
+
 	// routes are the cached routes of the data it brings.
 	routes routeCache[*dataRoute]
 
@@ -123,6 +129,27 @@ func (f *face) send(reliable bool, msgs ...transport.Encoder) error {
 		return f.sendFiltered(reliable, append([]transport.Encoder(nil), msgs...))
 	}
 	return f.sendNow(reliable, msgs)
+}
+
+// enqueue queues control messages (declarations, link states) for the next
+// flush. Called with s.mu held, it orders them as the changes they report.
+func (f *face) enqueue(msgs ...transport.Encoder) {
+	f.outMu.Lock()
+	f.outQ = append(f.outQ, msgs...)
+	f.outMu.Unlock()
+}
+
+// flush sends what is queued, after whatever an earlier flush took.
+func (f *face) flush() {
+	f.flushMu.Lock()
+	defer f.flushMu.Unlock()
+	f.outMu.Lock()
+	msgs := f.outQ
+	f.outQ = nil
+	f.outMu.Unlock()
+	if len(msgs) > 0 {
+		_ = f.send(true, msgs...)
+	}
 }
 
 // sendFiltered applies access control, interceptors and shared memory.
@@ -660,7 +687,8 @@ func (f *face) handleInterest(m *protocol.Interest) {
 			}
 		}
 	}
-	s.mu.Unlock()
 	decl(&protocol.DeclareFinal{})
-	_ = f.send(true, msgs...)
+	f.enqueue(msgs...) // in order with the updates queued after (outbox)
+	s.mu.Unlock()
+	f.flush()
 }

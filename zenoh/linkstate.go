@@ -505,6 +505,9 @@ func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
 		for k, psid := range st.ls.links {
 			z, ok := link.mappings[psid]
 			if !ok {
+				if meshTrace {
+					mtrace("link state from %s: %s lists unmapped node %d", src.zid, st.zid, psid)
+				}
 				continue
 			}
 			var w uint16

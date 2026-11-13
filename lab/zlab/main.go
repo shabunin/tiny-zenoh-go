@@ -20,9 +20,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/shabunin/tiny-zenoh-go/protocol"
@@ -30,6 +32,27 @@ import (
 )
 
 type list []string
+
+// stopped is closed on SIGTERM: pub, sub and alive end early and report
+// (run.sh recut with STOP=1 ends its long traffic so when nothing broke).
+var stopped = make(chan struct{})
+
+func init() {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM)
+	go func() { <-ch; close(stopped) }()
+}
+
+// run waits for dur or SIGTERM and returns how long it ran, in whole
+// seconds (at most dur), for the per-second reports.
+func run(start time.Time, dur time.Duration) time.Duration {
+	select {
+	case <-time.After(time.Until(start.Add(dur))):
+		return dur
+	case <-stopped:
+		return min(dur, time.Since(start).Truncate(time.Second))
+	}
+}
 
 func (l *list) String() string     { return strings.Join(*l, ",") }
 func (l *list) Set(v string) error { *l = append(*l, v); return nil }
@@ -57,6 +80,7 @@ func main() {
 	watch := fs.String("watch", "", "alive: liveliness tokens to watch")
 	value := fs.String("v", "", "put: value")
 	perKey := fs.Bool("per-key", false, "sub: account per key (several publishers)")
+	tick := fs.Bool("tick", false, "sub: also write, every second, the samples per key of the last second to stderr")
 	_ = fs.Parse(os.Args[2:])
 
 	cfg := zenoh.Config{Connect: connect, Listen: listen, Scouting: zenoh.ScoutingConfig{Disable: true}}
@@ -89,7 +113,7 @@ func main() {
 		pub(s, *key, *rate, max(*size, 16), *dur, *besteffort, *block)
 		time.Sleep(*linger)
 	case "sub":
-		sub(s, *key, *dur, *perKey)
+		sub(s, *key, *dur, *perKey, *tick)
 	case "alive":
 		alive(s, *key, *watch, *dur)
 	case "put":
@@ -128,7 +152,12 @@ func pub(s *zenoh.Session, key string, rate, size int, dur time.Duration, bestef
 	period := time.Second / time.Duration(rate)
 	for next := start; time.Since(start) < dur; next = next.Add(period) {
 		if d := time.Until(next); d > 0 {
-			time.Sleep(d)
+			select {
+			case <-time.After(d):
+			case <-stopped:
+				dur = 0
+				continue
+			}
 		}
 		binary.BigEndian.PutUint64(buf[0:], seq)
 		binary.BigEndian.PutUint64(buf[8:], uint64(time.Now().UnixNano()))
@@ -236,7 +265,7 @@ func (f *flowStats) report(start time.Time, dur time.Duration) map[string]any {
 
 // sub reports what arrived on key: as one flow, or with -per-key (for a
 // wildcard key with several publishers) per key, under "keys".
-func sub(s *zenoh.Session, key string, dur time.Duration, perKey bool) {
+func sub(s *zenoh.Session, key string, dur time.Duration, perKey, tick bool) {
 	var mu sync.Mutex
 	flows := map[string]*flowStats{}
 	start := time.Now()
@@ -263,7 +292,22 @@ func sub(s *zenoh.Session, key string, dur time.Duration, perKey bool) {
 	if err != nil {
 		fatal(err)
 	}
-	time.Sleep(dur)
+	if tick {
+		go func() {
+			for sec := 1; ; sec++ {
+				time.Sleep(time.Until(start.Add(time.Duration(sec) * time.Second)))
+				n := map[string]int{}
+				mu.Lock()
+				for k, f := range flows {
+					n[k] = f.perSec[sec-1]
+				}
+				mu.Unlock()
+				b, _ := json.Marshal(map[string]any{"t": sec, "n": n})
+				fmt.Fprintln(os.Stderr, string(b))
+			}
+		}()
+	}
+	dur = run(start, dur)
 	mu.Lock()
 	defer mu.Unlock()
 	if !perKey {
@@ -315,7 +359,7 @@ func alive(s *zenoh.Session, key, watch string, dur time.Duration) {
 			fatal(err)
 		}
 	}
-	time.Sleep(dur)
+	run(start, dur)
 	mu.Lock()
 	defer mu.Unlock()
 	keys := make([]string, 0, len(alive))

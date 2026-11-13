@@ -228,11 +228,34 @@ to r9), which only zenoh-rust can fix. On 10x10 grids zenoh-rust's side
 dominates: pure zenohd loses entries in 5 of 5 rounds, mixed in 6 of 9,
 pure tzd in none of 19; zenohd also logs declarations it does not pass on
 ("Error propagating sub ...: cannot get index of ...") and link states it
-cannot map. Left open: on 10x10, some flows stay broken although every
-router has every entry and the next hops (route/successor) form a path,
-mostly through zenohd columns (and 2 rounds in 19 with tzd alone); one
-run of scale on 100 mixed also had a data loop on one router's tree after
-the mass restore (1.7 M duplicates; two reruns: 27 k, 28 k).
+cannot map.
+
+On 10x10 grids with tzd alone, a flow sometimes stayed broken with every
+router's tables complete: h6 (r32) to h2 (r100), each time. `STOP=1`
+left the mesh broken to look at, and on r32's tree r44 sent the data to
+r54 and r54 back to r44, for good: the routers' link-state graphs
+disagreed (20 lacked the link r36-r46, 3 lacked r99-r100, the rest had
+both), so their trees did. tzd built link states under the session lock
+and sent them after releasing it, so two goroutines could send theirs to
+a neighbour in the wrong order. A state naming a router by a NodeId
+whose mapping (the message with its ZID) was still on its way lost that
+link at the receiver, which nonetheless kept it as the newest state and
+passed it on; the right copy came after with the same sequence number,
+as old news. Every control message to a face now goes through its own
+queue, filled under the lock and sent in order (outbox, face.enqueue).
+The mesh trace showed 107 link states naming unmapped NodeIds in the
+first two rounds before the fix, and none in 12 rounds after; with the fix
+there were no broken flows and no missing entries in 12 of 12 rounds
+(it broke by round 3 in each run before), and every router's graph was
+the grid. On 10x10 mixed after the fix, zenohd logged "Received LinkState
+... with unknown node mapping" only about zenohd senders (25 times in 8
+rounds); flows still broke in 4 of 8 rounds (entries lost twice), and at
+the end every router's graph was the grid, so what is left there is
+not this.
+
+One run of scale on 100 mixed also had a data loop on one router's tree
+after the mass restore (1.7 M duplicates; two reruns: 27 k, 28 k), likely
+the same graph disagreement.
 
 **recut**: `ROUNDS=n` (default 4) times, every router link is cut for 5 s
 and restored while every host publishes to every other and holds a
@@ -240,8 +263,12 @@ token; 20 s later h1 dumps every router's subscriber and token tables
 (`@/*/router/{subscriber,token}/lab/**`). The summary lists the flows
 still broken and, per router, the hosts' routers missing from its
 tables; `SUCC=1` also dumps the next hops on the hosts' routers' trees
-and walks each broken flow's path. gen.py gives grid/random routers fixed
-ZIDs (r22 is e00016) so the dumps read.
+and walks each broken flow's path. `STOP=1` stops cutting after the first
+round that leaves a flow broken (from the subscribers' per-second ticks)
+and keeps the traffic going 15 min more, to look at the mesh as it is;
+`run.sh recut-summary TOPO` prints the summary of the last run again.
+gen.py gives grid/random routers fixed ZIDs (r22 is e00016) so the dumps
+read.
 
 What the lab host takes: a 4-core VM with 16 GB runs 225 tzd routers and
 10 hosts in about 3 GB, deploying in 90 s; idle, the routers take 0.1% CPU
