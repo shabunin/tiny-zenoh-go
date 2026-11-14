@@ -219,7 +219,7 @@ func (l Liveliness) Get(key string, opts ...GetOption) (<-chan Reply, error) {
 	for _, opt := range opts {
 		opt.applyGet(&o)
 	}
-	f := newFifo[Reply]()
+	f := newFifo[Reply](s.done)
 	id := l.interestID()
 	g := &livGet{key: k.String(), cb: f.push, done: f.close, faces: map[*face]bool{}}
 	if o.cancel != nil {

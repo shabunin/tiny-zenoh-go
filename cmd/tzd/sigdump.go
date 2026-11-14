@@ -15,7 +15,11 @@ import (
 // that seems stuck is doing (kill -USR1 <pid>). SIGUSR2 prints the Go
 // runtime's memory figures to stderr and writes a heap profile to
 // $TMPDIR/tzd-heap-<pid>.pprof (go tool pprof reads it).
-func init() {
+//
+// Started from main (not init), so test binaries don't get the handler.
+func init() { debugSignals = startDebugSignals }
+
+func startDebugSignals() {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGUSR1, syscall.SIGUSR2)
 	go func() {

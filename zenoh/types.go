@@ -390,20 +390,37 @@ func tsAfter(a, b *Timestamp) bool {
 // -----------------------------------------------------------------------------
 // Unbounded FIFO feeding a channel, so the receive path never blocks on a slow
 // consumer.
+//
+// close: nothing more comes; what is queued is still delivered, then the
+// channel is closed (a query that completed). abort, or stop (the session's
+// done channel) closing: what is queued is dropped and the channel closed at
+// once, even if nobody reads it any more (an undeclared subscriber, a closed
+// session), so the goroutine never outlives its consumer's interest.
 // -----------------------------------------------------------------------------
 
 type fifo[T any] struct {
-	mu     sync.Mutex
-	q      []T
-	closed bool
-	wake   chan struct{}
-	out    chan T
+	mu      sync.Mutex
+	q       []T
+	closed  bool
+	wake    chan struct{}
+	out     chan T
+	aborted chan struct{}
+	once    sync.Once
+	stop    <-chan struct{}
 }
 
-func newFifo[T any]() *fifo[T] {
-	f := &fifo[T]{wake: make(chan struct{}, 1), out: make(chan T)}
+func newFifo[T any](stop <-chan struct{}) *fifo[T] {
+	f := &fifo[T]{wake: make(chan struct{}, 1), out: make(chan T), aborted: make(chan struct{}), stop: stop}
 	go f.run()
 	return f
+}
+
+func (f *fifo[T]) abort() {
+	f.once.Do(func() { close(f.aborted) })
+	f.mu.Lock()
+	f.closed = true
+	f.q = nil
+	f.mu.Unlock()
 }
 
 func (f *fifo[T]) push(v T) {
@@ -430,7 +447,21 @@ func (f *fifo[T]) signal() {
 }
 
 func (f *fifo[T]) run() {
+	defer func() {
+		f.mu.Lock()
+		f.closed = true
+		f.q = nil
+		f.mu.Unlock()
+		close(f.out)
+	}()
 	for {
+		select {
+		case <-f.aborted:
+			return
+		case <-f.stop:
+			return
+		default:
+		}
 		f.mu.Lock()
 		if len(f.q) > 0 {
 			v := f.q[0]
@@ -438,15 +469,25 @@ func (f *fifo[T]) run() {
 			f.q[0] = zero
 			f.q = f.q[1:]
 			f.mu.Unlock()
-			f.out <- v
-			continue
+			select {
+			case f.out <- v:
+				continue
+			case <-f.aborted:
+			case <-f.stop:
+			}
+			return
 		}
 		if f.closed {
 			f.mu.Unlock()
-			close(f.out)
 			return
 		}
 		f.mu.Unlock()
-		<-f.wake
+		select {
+		case <-f.wake:
+		case <-f.aborted:
+			return
+		case <-f.stop:
+			return
+		}
 	}
 }

@@ -22,6 +22,7 @@ import (
 var (
 	fuzzOnce        sync.Once
 	fuzzRouterS     *Session
+	fuzzClientS     *Session
 	fuzzPeerS       *Session
 	fuzzZIDs        atomic.Uint32
 	fuzzFailedSetup error
@@ -60,6 +61,7 @@ func fuzzSessions(t testing.TB) (router, peer *Session) {
 		}
 		c, err := Open(Config{Mode: ModeClient, Connect: r.Locators()})
 		if err == nil {
+			fuzzClientS = c
 			err = fuzzEntities(c)
 		}
 		if err != nil {
@@ -116,6 +118,14 @@ func fuzzSeeds() [][]byte {
 }
 
 func FuzzRouterMessages(f *testing.F) {
+	f.Cleanup(func() {
+		for _, s := range []*Session{fuzzClientS, fuzzPeerS, fuzzRouterS} {
+			if s != nil {
+				_ = s.Close()
+			}
+		}
+		fuzzOnce, fuzzRouterS, fuzzClientS, fuzzPeerS, fuzzFailedSetup = sync.Once{}, nil, nil, nil, nil
+	})
 	for _, s := range fuzzSeeds() {
 		for w := range byte(5) {
 			f.Add(s, w)

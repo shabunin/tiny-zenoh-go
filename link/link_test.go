@@ -3,6 +3,7 @@ package link
 import (
 	"bytes"
 	"encoding/base64"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -31,11 +32,21 @@ func TestParseConfig(t *testing.T) {
 // echo accepts one link and echoes what it reads, one Read per Write so
 // packet boundaries survive.
 func echo(t *testing.T, ln Listener) {
+	accepted := make(chan io.Closer, 1)
+	t.Cleanup(func() {
+		_ = ln.Close()
+		select {
+		case c := <-accepted:
+			_ = c.Close()
+		default:
+		}
+	})
 	go func() {
 		c, err := ln.Accept()
 		if err != nil {
 			return
 		}
+		accepted <- c
 		defer c.Close()
 		buf := make([]byte, 0xffff)
 		for {

@@ -629,6 +629,28 @@ go run ./examples/boardtest/sim tcp/127.0.0.1:7447 board/sim/plain   # same run 
 go run ./examples/zprobe                        # hex-dump a raw handshake
 ```
 
+### Leak checks and the mesh simulation
+
+Every package's tests end with a goroutine leak check
+(`internal/leaktest`): once the tests are done, nothing started by this
+module may still run (sessions, transports, links, subscriber channels);
+`LEAKTEST=off` skips it, `LEAKTEST_WAIT=5s` shortens the 10 s grace.
+
+`TestMeshSim` (`zenoh/meshsim_test.go`) runs a 16-router mesh (4x4 grid
+plus random extra links) in one process, routers linked through proxies
+that can reset or blackhole each link, with clients publishing numbered
+samples to each other and holding liveliness tokens. It forms the mesh,
+blackholes every link for three leases, flaps random links (resets,
+blackholes and sub-100 ms blips) for five rounds, and restarts a router;
+after each phase every flow and token must come back and the mesh be whole
+(every link up, every graph equal to the topology), and a quiet window must
+then carry every sample exactly once. Failures print the seed:
+
+```bash
+ZENOH_MESHSIM_SEED=<seed> go test -run TestMeshSim -v ./zenoh/   # replay a topology and its flaps
+ZENOH_MESHSIM=large go test -run TestMeshSimLarge -v ./zenoh/     # 7x7 grid, 8 hosts, 8 flap rounds
+```
+
 ### Fuzzing
 
 Everything a remote node controls has a Go fuzz target; run one with

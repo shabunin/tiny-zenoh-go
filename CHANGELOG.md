@@ -4,6 +4,29 @@ All notable changes to this project are listed here. Versions follow
 [Semantic Versioning](https://semver.org); before 1.0 the API may change in
 minor releases.
 
+## Unreleased
+
+### Fixed
+
+- Channel handlers (`DeclareSubscriberChan`, channel queries, queriers and
+  liveliness subscribers) no longer leak a goroutine when the reader stops
+  reading: `Undeclare` (or closing the session) now ends delivery at once,
+  drops samples still queued and closes the channel. Previously the
+  forwarding goroutine stayed blocked on the unread channel forever (seen in
+  the REST plugin's SSE handler after a client disconnected).
+- `tzd`: the debug signal handler is installed by `main`, not at package
+  init, so importing the package doesn't start a goroutine.
+
+### Tests
+
+- Every package's tests now fail if they leave goroutines behind
+  (`internal/leaktest`; `LEAKTEST=off` disables, `LEAKTEST_WAIT` sets the
+  grace period). Several test-only leaks fixed.
+- `TestMeshSim`: an in-process 16-router mesh with chords, proxied links,
+  mass cuts, flaps and router restarts, checking convergence, liveliness and
+  exactly-once delivery. `ZENOH_MESHSIM=large` runs a 49-router variant;
+  `ZENOH_MESHSIM_SEED` replays a run.
+
 ## v0.1.0 — first release
 
 A pure-Go implementation of Eclipse Zenoh (wire protocol `0x09`, Zenoh 1.0

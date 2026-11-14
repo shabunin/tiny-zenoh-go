@@ -153,6 +153,7 @@ type Subscriber struct {
 	handler func(Sample)
 	stop    chan struct{} // closed by Undeclare
 	once    sync.Once
+	abort   func() // DeclareSubscriberChan: ends the channel
 }
 
 // KeyExpr returns the subscriber's key expression.
@@ -193,21 +194,16 @@ func (s *Session) DeclareSubscriber(key string, handler func(Sample), opts ...Su
 }
 
 // DeclareSubscriberChan is like DeclareSubscriber but delivers samples on an
-// unbounded channel, closed by Undeclare or when the session ends.
+// unbounded channel, closed by Undeclare or when the session ends; samples
+// not yet received then are dropped.
 func (s *Session) DeclareSubscriberChan(key string, opts ...SubscriberOption) (*Subscriber, <-chan Sample, error) {
-	f := newFifo[Sample]()
+	f := newFifo[Sample](s.done)
 	sub, err := s.DeclareSubscriber(key, f.push, opts...)
 	if err != nil {
-		f.close()
+		f.abort()
 		return nil, nil, err
 	}
-	go func() {
-		select {
-		case <-s.done:
-		case <-sub.stop:
-		}
-		f.close()
-	}()
+	sub.abort = f.abort // the session ending stops f by itself
 	return sub, f.out, nil
 }
 
@@ -223,6 +219,9 @@ func (sub *Subscriber) Undeclare() error {
 	}
 	s.subsChangedLocked()
 	sub.once.Do(func() { close(sub.stop) })
+	if sub.abort != nil {
+		sub.abort()
+	}
 	if !sub.remote() {
 		s.mu.Unlock()
 		s.checkMatching()

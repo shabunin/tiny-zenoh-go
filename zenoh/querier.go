@@ -38,7 +38,7 @@ func (q *Querier) KeyExpr() string { return q.s.userKey(q.key.String()) }
 // Get queries the querier's key with selector parameters params (may be
 // empty); replies arrive on a channel closed when the query completes.
 func (q *Querier) Get(params string, opts ...GetOption) (<-chan Reply, error) {
-	f := newFifo[Reply]()
+	f := newFifo[Reply](q.s.done)
 	if err := q.GetFunc(params, f.push, f.close, opts...); err != nil {
 		f.close()
 		return nil, err

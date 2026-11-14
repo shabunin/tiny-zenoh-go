@@ -175,10 +175,11 @@ func TestRouteCacheChurn(t *testing.T) {
 		}()
 	}
 	for _, hub := range []*Session{r, peer} {
-		p, err := Open(Config{Mode: ModePeer, Connect: hub.Locators(), Scouting: ScoutingConfig{Disable: true}})
+		cfg := Config{Mode: ModePeer, Connect: hub.Locators(), Scouting: ScoutingConfig{Disable: true}}
 		if hub == r {
-			p, err = Open(Config{Connect: hub.Locators()})
+			cfg = Config{Connect: hub.Locators()}
 		}
+		p, err := Open(cfg)
 		if err != nil {
 			t.Fatal(err)
 		}

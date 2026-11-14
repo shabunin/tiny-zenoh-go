@@ -16,7 +16,19 @@ type memPrioLink struct {
 	r [numPrio]io.Reader
 }
 
-func (m *memPrioLink) PriorityStreams() bool                        { return true }
+func (m *memPrioLink) PriorityStreams() bool { return true }
+
+// Close closes every stream, as closing a QUIC connection does.
+func (m *memPrioLink) Close() error {
+	for p := 1; p < numPrio; p++ {
+		for _, s := range []any{m.w[p], m.r[p]} {
+			if c, ok := s.(io.Closer); ok {
+				_ = c.Close()
+			}
+		}
+	}
+	return m.Conn.Close()
+}
 func (m *memPrioLink) PriorityWriter(p protocol.Priority) io.Writer { return m.w[p] }
 func (m *memPrioLink) PriorityReader(p protocol.Priority) io.Reader { return m.r[p] }
 

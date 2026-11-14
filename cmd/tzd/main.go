@@ -44,7 +44,14 @@ type list []string
 func (l *list) String() string     { return strings.Join(*l, ",") }
 func (l *list) Set(v string) error { *l = append(*l, v); return nil }
 
+// debugSignals, if set (sigdump.go), installs the stack/memory dump
+// signal handlers.
+var debugSignals func()
+
 func main() {
+	if debugSignals != nil {
+		debugSignals()
+	}
 	var listen, connect list
 	flag.Var(&listen, "l", "locator to listen on (repeatable; default tcp/0.0.0.0:7447)")
 	flag.Var(&connect, "e", "locator to connect to (repeatable)")

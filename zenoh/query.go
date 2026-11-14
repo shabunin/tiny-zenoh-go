@@ -183,9 +183,11 @@ func Param(params, name string) (string, bool) {
 }
 
 // Get queries "key[?parameters]" and returns replies on a channel that is
-// closed when the query completes (all finals received, or timeout).
+// closed when the query completes (all finals received, or timeout). Replies
+// not read by then stay in the channel until read, or until the session
+// closes; read the channel to the end to release them.
 func (s *Session) Get(selector string, opts ...GetOption) (<-chan Reply, error) {
-	f := newFifo[Reply]()
+	f := newFifo[Reply](s.done)
 	if err := s.GetFunc(selector, f.push, f.close, opts...); err != nil {
 		f.close()
 		return nil, err

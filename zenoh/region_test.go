@@ -335,10 +335,11 @@ func TestRegionConflictRefused(t *testing.T) {
 	// peer (zenoh-rust: "auto preset conflicts with custom configuration").
 	r := openRegionNode(t, regionOpts{mode: ModeRouter,
 		gateway: []Subregion{{Filters: []GatewayFilter{{Modes: MatchClient}}}}})
-	_, err := Open(Config{Mode: ModeClient, Connect: []string{loc(r)}, Scouting: ScoutingConfig{Disable: true}})
+	c, err := Open(Config{Mode: ModeClient, Connect: []string{loc(r)}, Scouting: ScoutingConfig{Disable: true}})
 	if err != nil {
 		t.Fatalf("client refused: %v", err)
 	}
+	t.Cleanup(func() { _ = c.Close() })
 	p := openRegionNode(t, regionOpts{mode: ModePeer}, loc(r))
 	time.Sleep(300 * time.Millisecond)
 	if connected(p, r) {
