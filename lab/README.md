@@ -313,6 +313,23 @@ sudo setsid nohup sh -c 'HOURS=12 exec ./run.sh soak grid49-tzd > results/soak.l
 sudo ./run.sh soak-summary grid49-tzd       # the summary so far
 ```
 
+Results, 7x7 grid of tzd (v0.1.1+), 8 hosts at 50/s, 12 h (36 windows,
+SEED=7, about 2,100 link cuts and flaps), on the 4-core VM:
+
+| | |
+|---|---|
+| flows delivering at the end of their window | 2304/2304 |
+| tokens missing | 0 |
+| duplicates / reordered | 1 / 0 (in window 20, right after a flap of r1-r8, h1's router's link: one sample took the old and the new path while the trees changed) |
+| samples lost | 465,572 of about 138 M (0.34%), all around the cuts |
+| goroutines per router | flat for 11 h (e.g. r9 18 → 18) |
+| tzd heap in use | median 2.9 MiB, slope +0.007 MiB/h |
+| RSS, 49 routers together | 750 MiB at 1 h, 776 at 6 h, 786 at 10, 11 and 12 h |
+| RSS slope per router (after 1 h) | median +0.06 MiB/h, max +0.13 (r31) |
+
+The heap and goroutines don't grow; the RSS creep of the first hours
+(the Go runtime keeping freed pages) levels off by 10 h.
+
 What the lab host takes: a 4-core VM with 16 GB runs 225 tzd routers and
 10 hosts in about 3 GB, deploying in 90 s; idle, the routers take 0.1% CPU
 each, and the traffic above keeps 3 of the 4 cores busy. Memory per node

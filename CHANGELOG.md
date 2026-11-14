@@ -19,6 +19,10 @@ minor releases.
   (usrpwd, pubkey, mutual TLS), ACL, plugins and admin-space writes,
   two joined routers, and the real binary's signals. Package coverage
   58% → 88%.
+- Lab `soak` scenario (`lab/run.sh soak`): hours of traffic, liveliness and
+  link faults on a containerlab mesh with memory trends. 12 h on 49 tzd
+  routers: every flow and token recovered after every fault, no goroutine
+  or heap growth (lab/README.md).
 
 ## v0.1.1 — goroutine leak fix
 
