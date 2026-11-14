@@ -6,4 +6,7 @@ import (
 	"github.com/shabunin/tiny-zenoh-go/internal/leaktest"
 )
 
-func TestMain(m *testing.M) { leaktest.Main(m) }
+// teardown runs after the tests (binary_test.go removes the built tzd).
+var teardown []func()
+
+func TestMain(m *testing.M) { leaktest.Main(m, teardown...) }

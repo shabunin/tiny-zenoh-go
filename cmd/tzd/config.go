@@ -486,8 +486,6 @@ func applyConfig(tree map[string]any, cfg *zenoh.Config) (*pluginsConfig, error)
 
 const defaultScoutAddr = "224.0.0.224:7446"
 
-func warnf(f string, a ...any) { fmt.Fprintf(os.Stderr, "tzd: config: "+f+"\n", a...) }
-
 // modeValue decodes a zenoh mode-dependent value: the value itself, or
 // {"router": v, "peer": v, "client": v} (the entry for mode is used).
 func modeValue(raw json.RawMessage, mode zenoh.Mode, out any) error {

@@ -4,6 +4,22 @@ All notable changes to this project are listed here. Versions follow
 [Semantic Versioning](https://semver.org); before 1.0 the API may change in
 minor releases.
 
+## Unreleased
+
+### Changed
+
+- `tzd` prints its plugins stopping on shutdown (`storage <name> stopped`,
+  `volume <name> closed`, `REST API stopped`). Exit status: 0 after
+  SIGINT/SIGTERM or `--version`/`-h`, 2 for a bad command line or
+  configuration, 1 when it can't start (listen or plugin failure).
+
+### Tests
+
+- `tzd` end to end: every flag, bad command lines and configurations, auth
+  (usrpwd, pubkey, mutual TLS), ACL, plugins and admin-space writes,
+  two joined routers, and the real binary's signals. Package coverage
+  58% → 88%.
+
 ## v0.1.1 — goroutine leak fix
 
 ### Fixed

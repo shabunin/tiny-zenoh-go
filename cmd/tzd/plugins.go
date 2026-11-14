@@ -88,13 +88,13 @@ func (r *pluginRunner) applyLocked(p *pluginsConfig) error {
 		if ns, ok := want[name]; !ok || ns.raw != rs.raw || goneVol[rs.volume] {
 			_ = rs.stop()
 			delete(r.storages, name)
-			fmt.Printf("storage %s stopped\n", name)
+			printf("storage %s stopped\n", name)
 		}
 	}
 	for name := range goneVol {
 		_ = r.volumes[name].vol.Close()
 		delete(r.volumes, name)
-		fmt.Printf("volume %s closed\n", name)
+		printf("volume %s closed\n", name)
 	}
 	var errs []error
 	for _, nv := range p.volumes {
@@ -107,7 +107,7 @@ func (r *pluginRunner) applyLocked(p *pluginsConfig) error {
 			continue
 		}
 		r.volumes[nv.name] = runningVolume{nv.raw, vol}
-		fmt.Printf("volume %s (backend %s)\n", nv.name, nv.backend)
+		printf("volume %s (backend %s)\n", nv.name, nv.backend)
 	}
 	for _, ns := range p.storages {
 		if _, ok := r.storages[ns.name]; ok {
@@ -132,13 +132,13 @@ func (r *pluginRunner) applyLocked(p *pluginsConfig) error {
 			continue
 		}
 		r.storages[ns.name] = runningStorage{ns.raw, ns.volume, m.Close}
-		fmt.Printf("storage %s on %s (volume %s)\n", ns.name, ns.cfg.KeyExpr, ns.volume)
+		printf("storage %s on %s (volume %s)\n", ns.name, ns.cfg.KeyExpr, ns.volume)
 	}
 	if p.restAddr != r.restAddr {
 		if r.restStop != nil {
 			_ = r.restStop()
 			r.restStop, r.restAddr = nil, ""
-			fmt.Println("REST API stopped")
+			printf("REST API stopped\n")
 		}
 		if p.restAddr != "" {
 			closeREST, addr, err := startREST(r.s, p.restAddr)
@@ -146,7 +146,7 @@ func (r *pluginRunner) applyLocked(p *pluginsConfig) error {
 				errs = append(errs, err)
 			} else {
 				r.restStop, r.restAddr = closeREST, p.restAddr
-				fmt.Printf("REST API on http://%s\n", addr)
+				printf("REST API on http://%s\n", addr)
 			}
 		}
 	}
@@ -163,14 +163,17 @@ func (r *pluginRunner) stopLocked() {
 	if r.restStop != nil {
 		_ = r.restStop()
 		r.restStop, r.restAddr = nil, ""
+		printf("REST API stopped\n")
 	}
 	for name, rs := range r.storages {
 		_ = rs.stop()
 		delete(r.storages, name)
+		printf("storage %s stopped\n", name)
 	}
 	for name, rv := range r.volumes {
 		_ = rv.vol.Close()
 		delete(r.volumes, name)
+		printf("volume %s closed\n", name)
 	}
 }
 

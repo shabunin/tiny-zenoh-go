@@ -23,8 +23,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"runtime"
@@ -48,79 +50,167 @@ func (l *list) Set(v string) error { *l = append(*l, v); return nil }
 // signal handlers.
 var debugSignals func()
 
+// statusEvery is how often -v prints the connected sessions.
+var statusEvery = 10 * time.Second
+
 func main() {
 	if debugSignals != nil {
 		debugSignals()
 	}
-	var listen, connect list
-	flag.Var(&listen, "l", "locator to listen on (repeatable; default tcp/0.0.0.0:7447)")
-	flag.Var(&connect, "e", "locator to connect to (repeatable)")
-	noScout := flag.Bool("no-multicast-scouting", false, "don't answer multicast SCOUTs")
-	scoutAddr := flag.String("scouting-address", defaultScoutAddr, "multicast scouting group")
-	id := flag.String("i", "", "router ZID in hex (default random)")
-	verbose := flag.Bool("v", false, "log connected sessions every 10s")
-	shmOn := flag.Bool("shm", false, "enable shared memory with same-host nodes (Linux)")
-	compress := flag.Bool("compression", false, "enable LZ4 batch compression with nodes that enable it")
-	maxLinks := flag.Int("max-links", 1, "links per peer transport (>1 enables multilink)")
-	var tlsCfg link.TLSConfig
-	flag.StringVar(&tlsCfg.ListenCertificate, "tls-cert", "", "PEM certificate chain for tls/ listeners")
-	flag.StringVar(&tlsCfg.ListenPrivateKey, "tls-key", "", "PEM private key for tls/ listeners")
-	flag.StringVar(&tlsCfg.RootCACertificate, "tls-ca", "", "PEM CA to verify tls/ peers (default: system roots)")
-	flag.StringVar(&tlsCfg.ConnectCertificate, "tls-client-cert", "", "PEM client certificate for -e tls/ (mutual TLS)")
-	flag.StringVar(&tlsCfg.ConnectPrivateKey, "tls-client-key", "", "PEM client key for -e tls/ (mutual TLS)")
-	flag.BoolVar(&tlsCfg.EnableMTLS, "tls-mtls", false, "require client certificates signed by --tls-ca")
-	usrpwdDict := flag.String("usrpwd-dict", "", "require user/password authentication: file of user:password lines")
-	user := flag.String("user", "", "user name to present to -e nodes that require authentication")
-	password := flag.String("password", "", "password to present with --user")
-	authKey := flag.String("auth-key", "", "PKCS#1 PEM RSA private key: enables pubkey authentication")
-	var knownKeys list
-	flag.Var(&knownKeys, "auth-known-key", "PKCS#1 PEM RSA public key accepted from nodes (repeatable)")
-	lowLatency := flag.Bool("lowlatency", false, "low-latency transport (no batching, no QoS) with nodes that enable it")
-	aclFile := flag.String("acl", "", "access control: JSON file with zenoh's access_control section")
-	regionName := flag.String("region-name", "", "region name announced to the nodes we connect to")
-	gatewayFile := flag.String("gateway", "", "south subregions: JSON file with zenoh's gateway section")
-	configFile := flag.String("config", "", "zenoh config file (JSON5): its mode, id, listen, connect, scouting/multicast, "+
-		"downsampling, low_pass_filter, qos/network, timestamping, access_control, gateway, adminspace, stats, metadata "+
-		"and plugins (rest, storage_manager with memory, fs, influxdb, influxdb2 and s3 volumes) sections")
-	flag.StringVar(configFile, "c", "", "same as -config")
-	restPort := flag.String("rest-http-port", "", "enable the REST API: a port, <ip>:<port>, or none")
-	var cfgOverrides list
-	flag.Var(&cfgOverrides, "cfg", "config change KEY:VALUE, VALUE in JSON5, KEY a /-separated path or empty for the whole config (repeatable)")
-	noTimestamp := flag.Bool("no-timestamp", false, "don't timestamp routed data that has no timestamp")
-	adminPerms := flag.String("adminspace-permissions", "", "admin space permissions: r, rw or none (rw: plugins/... config writes at @/<zid>/router/config/**)")
-	showVersion := flag.Bool("version", false, "print the version and exit")
-	flag.Parse()
-	if *showVersion {
-		fmt.Println("tzd", zenoh.Version, runtime.Version(), runtime.GOOS+"/"+runtime.GOARCH)
-		return
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, stop))
+}
+
+// options is what the command line and the configuration ask for.
+type options struct {
+	version bool
+	verbose bool
+	cfg     zenoh.Config
+	plugins *pluginsConfig
+	tree    map[string]any // the whole configuration (its plugins section is live)
+}
+
+// usageError is a bad command line or configuration: exit status 2.
+type usageError struct{ error }
+
+// run is tzd: it routes until stop delivers, then closes everything and
+// returns the exit status (0 ok, 1 runtime failure, 2 bad usage or
+// configuration).
+func run(args []string, stdout, stderr io.Writer, stop <-chan os.Signal) int {
+	defer setConsole(setConsole(stdout, stderr))
+	o, err := parseArgs(args, stderr)
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		return 0
+	case err != nil:
+		var ue usageError
+		if errors.As(err, &ue) && ue.error == nil {
+			return 2 // the flag package already said why
+		}
+		errorf("%v", err)
+		return 2
+	case o.version:
+		printf("tzd %s %s %s/%s\n", zenoh.Version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+		return 0
 	}
 
-	cfg := zenoh.Config{
+	pluginTree, _ := o.tree["plugins"].(map[string]any)
+	runner := newPluginRunner(pluginTree)
+	cfg := o.cfg
+	cfg.AdminSpace.OnConfig = runner.onConfig
+	cfg.AdminSpace.OnConfigError = func(key string, err error) { warnf("config %s: %v", key, err) }
+	r, err := zenoh.Open(cfg)
+	if err != nil {
+		errorf("%v", err)
+		return 1
+	}
+	printf("tzd %s listening on %s\n", r.ZID(), strings.Join(r.Locators(), " "))
+	if err = runner.start(r, o.plugins); err != nil {
+		errorf("%v", err)
+		_ = r.Close()
+		return 1
+	}
+
+	tick := time.NewTicker(statusEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			runner.stop()
+			_ = r.Close()
+			return 0
+		case <-tick.C:
+			if o.verbose {
+				printf("clients=%d peers=%d routers=%d\n",
+					len(r.ClientsZID()), len(r.PeersZID()), len(r.RoutersZID()))
+			}
+		}
+	}
+}
+
+// parseArgs reads the command line and the configuration it names into
+// options. Flag errors and -h come back as usageError{nil} and
+// flag.ErrHelp (the flag package has printed them to stderr), other
+// problems as usageError.
+func parseArgs(args []string, stderr io.Writer) (*options, error) {
+	fs := flag.NewFlagSet("tzd", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var listen, connect list
+	fs.Var(&listen, "l", "locator to listen on (repeatable; default tcp/0.0.0.0:7447)")
+	fs.Var(&connect, "e", "locator to connect to (repeatable)")
+	noScout := fs.Bool("no-multicast-scouting", false, "don't answer multicast SCOUTs")
+	scoutAddr := fs.String("scouting-address", defaultScoutAddr, "multicast scouting group")
+	id := fs.String("i", "", "router ZID in hex (default random)")
+	verbose := fs.Bool("v", false, "log connected sessions every 10s")
+	shmOn := fs.Bool("shm", false, "enable shared memory with same-host nodes (Linux)")
+	compress := fs.Bool("compression", false, "enable LZ4 batch compression with nodes that enable it")
+	maxLinks := fs.Int("max-links", 1, "links per peer transport (>1 enables multilink)")
+	var tlsCfg link.TLSConfig
+	fs.StringVar(&tlsCfg.ListenCertificate, "tls-cert", "", "PEM certificate chain for tls/ listeners")
+	fs.StringVar(&tlsCfg.ListenPrivateKey, "tls-key", "", "PEM private key for tls/ listeners")
+	fs.StringVar(&tlsCfg.RootCACertificate, "tls-ca", "", "PEM CA to verify tls/ peers (default: system roots)")
+	fs.StringVar(&tlsCfg.ConnectCertificate, "tls-client-cert", "", "PEM client certificate for -e tls/ (mutual TLS)")
+	fs.StringVar(&tlsCfg.ConnectPrivateKey, "tls-client-key", "", "PEM client key for -e tls/ (mutual TLS)")
+	fs.BoolVar(&tlsCfg.EnableMTLS, "tls-mtls", false, "require client certificates signed by --tls-ca")
+	usrpwdDict := fs.String("usrpwd-dict", "", "require user/password authentication: file of user:password lines")
+	user := fs.String("user", "", "user name to present to -e nodes that require authentication")
+	password := fs.String("password", "", "password to present with --user")
+	authKey := fs.String("auth-key", "", "PKCS#1 PEM RSA private key: enables pubkey authentication")
+	var knownKeys list
+	fs.Var(&knownKeys, "auth-known-key", "PKCS#1 PEM RSA public key accepted from nodes (repeatable)")
+	lowLatency := fs.Bool("lowlatency", false, "low-latency transport (no batching, no QoS) with nodes that enable it")
+	aclFile := fs.String("acl", "", "access control: JSON file with zenoh's access_control section")
+	regionName := fs.String("region-name", "", "region name announced to the nodes we connect to")
+	gatewayFile := fs.String("gateway", "", "south subregions: JSON file with zenoh's gateway section")
+	configFile := fs.String("config", "", "zenoh config file (JSON5): its mode, id, listen, connect, scouting/multicast, "+
+		"downsampling, low_pass_filter, qos/network, timestamping, access_control, gateway, adminspace, stats, metadata "+
+		"and plugins (rest, storage_manager with memory, fs, influxdb, influxdb2 and s3 volumes) sections")
+	fs.StringVar(configFile, "c", "", "same as -config")
+	restPort := fs.String("rest-http-port", "", "enable the REST API: a port, <ip>:<port>, or none")
+	var cfgOverrides list
+	fs.Var(&cfgOverrides, "cfg", "config change KEY:VALUE, VALUE in JSON5, KEY a /-separated path or empty for the whole config (repeatable)")
+	noTimestamp := fs.Bool("no-timestamp", false, "don't timestamp routed data that has no timestamp")
+	adminPerms := fs.String("adminspace-permissions", "", "admin space permissions: r, rw or none (rw: plugins/... config writes at @/<zid>/router/config/**)")
+	showVersion := fs.Bool("version", false, "print the version and exit")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil, err
+		}
+		return nil, usageError{}
+	}
+	if fs.NArg() > 0 {
+		return nil, usageError{fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	o := &options{version: *showVersion, verbose: *verbose}
+	if o.version {
+		return o, nil
+	}
+
+	o.cfg = zenoh.Config{
 		Mode:     zenoh.ModeRouter,
 		Listen:   listen,
 		Connect:  connect,
 		Scouting: zenoh.ScoutingConfig{Address: defaultScoutAddr},
 	}
+	cfg := &o.cfg
 	var err error
 	if *aclFile != "" {
 		if cfg.ACL, err = loadACL(*aclFile); err != nil {
-			fmt.Fprintln(os.Stderr, "tzd:", err)
-			os.Exit(2)
+			return nil, usageError{err}
 		}
 	}
 	if *gatewayFile != "" {
 		if cfg.Gateway, err = loadGateway(*gatewayFile); err != nil {
-			fmt.Fprintln(os.Stderr, "tzd:", err)
-			os.Exit(2)
+			return nil, usageError{err}
 		}
 	}
 	tree, err := configTree(*configFile, *restPort, cfgOverrides)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tzd:", err)
-		os.Exit(2)
+		return nil, usageError{err}
 	}
 	// Flags given explicitly win over the configuration, as in zenohd.
-	flag.Visit(func(f *flag.Flag) {
+	fs.Visit(func(f *flag.Flag) {
 		set := func(path string, v any) { _ = insertPath(tree, path, v) }
 		switch f.Name {
 		case "no-multicast-scouting":
@@ -162,61 +252,23 @@ func main() {
 	switch *adminPerms {
 	case "":
 	case "r", "rw", "none":
-		insertPath(tree, "adminspace/permissions", map[string]any{"read": *adminPerms != "none", "write": *adminPerms == "rw"})
+		_ = insertPath(tree, "adminspace/permissions", map[string]any{"read": *adminPerms != "none", "write": *adminPerms == "rw"})
 	default:
-		fmt.Fprintln(os.Stderr, "tzd: --adminspace-permissions: r, rw or none")
-		os.Exit(2)
+		return nil, usageError{errors.New("--adminspace-permissions: r, rw or none")}
 	}
-	plugins, err := applyConfig(tree, &cfg)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "tzd: config:", err)
-		os.Exit(2)
+	if o.plugins, err = applyConfig(tree, cfg); err != nil {
+		return nil, usageError{fmt.Errorf("config: %w", err)}
 	}
-	if err = pubkeyAuth(&cfg, *authKey, knownKeys); err != nil {
-		fmt.Fprintln(os.Stderr, "tzd:", err)
-		os.Exit(2)
+	if err = pubkeyAuth(cfg, *authKey, knownKeys); err != nil {
+		return nil, usageError{err}
 	}
 	if *id != "" {
 		if cfg.ZID, err = parseZIDHex(*id); err != nil {
-			fmt.Fprintln(os.Stderr, "tzd: bad -i:", err)
-			os.Exit(2)
+			return nil, usageError{fmt.Errorf("bad -i: %w", err)}
 		}
 	}
-	pluginTree, _ := tree["plugins"].(map[string]any)
-	runner := newPluginRunner(pluginTree)
-	cfg.AdminSpace.OnConfig = runner.onConfig
-	cfg.AdminSpace.OnConfigError = func(key string, err error) { warnf("config %s: %v", key, err) }
-	r, err := zenoh.Open(cfg)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "tzd:", err)
-		os.Exit(1)
-	}
-	fmt.Printf("tzd %s listening on %s\n", r.ZID(), strings.Join(r.Locators(), " "))
-	stopPlugins := runner.stop
-	err = runner.start(r, plugins)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "tzd:", err)
-		_ = r.Close()
-		os.Exit(1)
-	}
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	tick := time.NewTicker(10 * time.Second)
-	defer tick.Stop()
-	for {
-		select {
-		case <-sig:
-			stopPlugins()
-			_ = r.Close()
-			return
-		case <-tick.C:
-			if *verbose {
-				fmt.Printf("clients=%d peers=%d routers=%d\n",
-					len(r.ClientsZID()), len(r.PeersZID()), len(r.RoutersZID()))
-			}
-		}
-	}
+	o.tree = tree
+	return o, nil
 }
 
 // pubkeyAuth adds the --auth-key/--auth-known-key public key
