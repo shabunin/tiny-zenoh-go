@@ -13,6 +13,13 @@ import (
 // setupQoS is setup with a router that answers INIT with ackExts.
 func setupQoS(t *testing.T, ackExts []protocol.Extension, cb Callbacks) (*Unicast, *fakeRouter, *protocol.Init) {
 	t.Helper()
+	return setupQoSCfg(t, ackExts, cb, Config{})
+}
+
+// setupQoSCfg is setupQoS with the client's Config (ZID, WhatAmI and QoS
+// are set here).
+func setupQoSCfg(t *testing.T, ackExts []protocol.Extension, cb Callbacks, cfg Config) (*Unicast, *fakeRouter, *protocol.Init) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -44,12 +51,13 @@ func setupQoS(t *testing.T, ackExts []protocol.Extension, cb Callbacks) (*Unicas
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr, err := Open(c, Config{ZID: testZID(t), WhatAmI: protocol.Client, QoS: true}, cb)
+	cfg.ZID, cfg.WhatAmI, cfg.QoS = testZID(t), protocol.Client, true
+	tr, err := Open(c, cfg, cb)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	r := <-ch
-	t.Cleanup(func() { _ = tr.Close(); _ = r.f.conn.Close() })
+	t.Cleanup(func() { _ = r.f.conn.Close(); _ = tr.Close() }) // fake side first: Close lingers until the peer closes
 	return tr, r.f, r.syn
 }
 

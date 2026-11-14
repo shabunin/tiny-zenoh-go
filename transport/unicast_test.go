@@ -127,7 +127,7 @@ func setup(t *testing.T, batch uint16, leaseMS uint64, cfg Config, cb Callbacks)
 		t.Fatalf("Open: %v", err)
 	}
 	f := <-routerCh
-	t.Cleanup(func() { _ = tr.Close(); _ = f.conn.Close() })
+	t.Cleanup(func() { _ = f.conn.Close(); _ = tr.Close() }) // fake side first: Close lingers until the peer closes
 	return tr, f
 }
 
