@@ -345,6 +345,18 @@ func TestInterceptorsConfig(t *testing.T) {
 		{QoSOverwrite: []QoSOverwriteConfig{{Messages: msgs(MessagePut), PayloadSize: "1-2"}}},
 		{QoSOverwrite: []QoSOverwriteConfig{{Messages: msgs(MessagePut), QoS: &QoSFilter{Priority: "urgent"}}}},
 		{QoSOverwrite: []QoSOverwriteConfig{{Messages: msgs(MessagePut), Overwrite: QoSOverwrites{CongestionControl: "maybe"}}}},
+		{Downsampling: []DownsamplingConfig{{Messages: msgs(MessagePut), Flows: []ACLFlow{"up"}, Rules: []DownsamplingRule{{KeyExpr: "a", Freq: 1}}}}},
+		{Downsampling: []DownsamplingConfig{{Messages: msgs(MessagePut)}}},
+		{LowPassFilter: []LowPassFilterConfig{{ID: "l", Messages: msgs(MessagePut), KeyExprs: []string{"a"}},
+			{ID: "l", Messages: msgs(MessagePut), KeyExprs: []string{"b"}}}},
+		{LowPassFilter: []LowPassFilterConfig{{Messages: msgs("publish"), KeyExprs: []string{"a"}}}},
+		{LowPassFilter: []LowPassFilterConfig{{Messages: msgs(MessagePut), KeyExprs: []string{"a//b"}}}},
+		{LowPassFilter: []LowPassFilterConfig{{Messages: msgs(MessagePut), KeyExprs: []string{"a"}, SizeLimit: -1}}},
+		{QoSOverwrite: []QoSOverwriteConfig{{ID: "q", Messages: msgs(MessagePut)}, {ID: "q", Messages: msgs(MessagePut)}}},
+		{QoSOverwrite: []QoSOverwriteConfig{{Messages: msgs(MessagePut), ZIDs: []string{"not-hex"}}}},
+		{QoSOverwrite: []QoSOverwriteConfig{{Messages: msgs(MessagePut), Flows: []ACLFlow{"out"}}}},
+		{QoSOverwrite: []QoSOverwriteConfig{{Messages: msgs(MessagePut), PayloadSize: "x.."}}},
+		{QoSOverwrite: []QoSOverwriteConfig{{Messages: msgs(MessagePut), PayloadSize: "..y"}}},
 	}
 	for i, c := range bad {
 		c.Listen, c.Scouting.Disable, c.Connect = []string{}, true, []string{"tcp/127.0.0.1:1"}

@@ -104,6 +104,26 @@ func TestACLConfigErrors(t *testing.T) {
 		func(c *ACLConfig) { c.Policies[0].Subjects = []string{"nobody"} },
 		func(c *ACLConfig) { c.Policies[0].Rules = nil },
 		func(c *ACLConfig) { c.DefaultPermission = "open" },
+		func(c *ACLConfig) { c.Rules[0].ID = " " },
+		func(c *ACLConfig) { c.Rules[0].Flows = []ACLFlow{"sideways"} },
+		func(c *ACLConfig) { c.Subjects[0].ID = "" },
+		func(c *ACLConfig) { c.Subjects[1].ID = c.Subjects[0].ID },
+		func(c *ACLConfig) { c.Policies[0].ID, c.Policies[1].ID = "p", "p" },
+		func(c *ACLConfig) { c.Policies[0].Rules = []string{"no-such-rule"} },
+	}
+	// With empty (but present) rules, subjects or policies, only the
+	// default applies; absent ones are refused (as in zenoh-rust).
+	if _, err := newACL(&ACLConfig{DefaultPermission: ACLAllow}); err == nil {
+		t.Error("absent rules/subjects/policies accepted")
+	}
+	for _, d := range []ACLPermission{ACLAllow, ACLDeny} {
+		e, err := newACL(&ACLConfig{DefaultPermission: d, Rules: []ACLRule{}, Subjects: []ACLSubject{}, Policies: []ACLPolicy{}})
+		if err != nil {
+			t.Fatalf("default only (%s): %v", d, err)
+		}
+		if got := e.decide(0, 0, msgIndex(ACLPut), "k/a"); got != (d == ACLAllow) {
+			t.Errorf("default only (%s): decide %v", d, got)
+		}
 	}
 	if _, err := newACL(ok); err != nil {
 		t.Fatalf("valid config: %v", err)
