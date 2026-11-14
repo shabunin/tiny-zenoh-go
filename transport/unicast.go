@@ -26,6 +26,9 @@ var (
 	// ErrDuplicate may be returned by Config.Admit when a transport to the peer
 	// already exists; the new link is closed with reason MAX_LINKS.
 	ErrDuplicate = errors.New("transport: already connected to peer")
+	// ErrMaxSessions may be returned by Config.Admit when the node has as
+	// many transports as it allows: the peer is told CLOSE (max sessions).
+	ErrMaxSessions = errors.New("transport: too many sessions")
 	// ErrSelf may be returned by Config.Admit when the peer is this node.
 	ErrSelf = errors.New("transport: connection to self")
 
@@ -594,6 +597,8 @@ func closeReason(err error) byte {
 	switch {
 	case errors.Is(err, ErrDuplicate):
 		return protocol.CloseMaxLinks
+	case errors.Is(err, ErrMaxSessions):
+		return protocol.CloseMaxSessions
 	case errors.Is(err, ErrSelf):
 		return protocol.CloseConnectionToSelf
 	case errors.Is(err, errInvalid):

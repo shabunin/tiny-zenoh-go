@@ -4,6 +4,16 @@ All notable changes to this project are listed here. Versions follow
 [Semantic Versioning](https://semver.org); before 1.0 the API may change in
 minor releases.
 
+## Unreleased
+
+### Added
+
+- Connection limits, as zenohd's: `Config.MaxSessions` (default 1000; one
+  node more is refused with CLOSE "max sessions"), `Config.AcceptPending`
+  (default 100 inbound handshakes at once; links beyond are closed at once)
+  and `Config.AcceptTimeout` (handshake deadline, default 10 s). In tzd:
+  `transport/unicast/max_sessions`, `accept_pending`, `accept_timeout`.
+
 ## v0.1.2 — tzd exit codes, soak results, test coverage
 
 ### Changed

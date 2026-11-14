@@ -65,7 +65,7 @@ func TestConfigTree(t *testing.T) {
 	}
 
 	tree, err = configTree("", "", []string{
-		`transport:{unicast:{lowlatency:true,max_links:3,qos:{enabled:false},compression:{enabled:true}},` +
+		`transport:{unicast:{lowlatency:true,max_links:3,max_sessions:50,accept_pending:7,accept_timeout:2500,qos:{enabled:false},compression:{enabled:true}},` +
 			`link:{tx:{lease:5000,batch_size:8192,queue:{size:{control:1,background:16},` +
 			`congestion_control:{drop:{wait_before_drop:2000,max_wait_before_drop_fragments:40000},block:{wait_before_close:3000000}},batching:{enabled:true,time_limit:2}}},tls:{root_ca_certificate:"ca.pem",verify_name_on_connect:false}},` +
 			`shared_memory:{enabled:true},auth:{usrpwd:{user:"u",password:"p"}}}`,
@@ -79,7 +79,7 @@ func TestConfigTree(t *testing.T) {
 	if _, err = applyConfig(tree, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.LowLatency || cfg.MaxLinks != 3 || !cfg.DisableQoS || !cfg.Compression || cfg.Lease != 5*time.Second ||
+	if !cfg.LowLatency || cfg.MaxLinks != 3 || cfg.MaxSessions != 50 || cfg.AcceptPending != 7 || cfg.AcceptTimeout != 2500*time.Millisecond || !cfg.DisableQoS || !cfg.Compression || cfg.Lease != 5*time.Second ||
 		cfg.BatchSize != 8192 || cfg.TLS == nil || cfg.TLS.RootCACertificate != "ca.pem" || !cfg.TLS.SkipNameVerification ||
 		cfg.SharedMemory == nil || cfg.Auth == nil || cfg.Auth.User != "u" || cfg.Auth.Password != "p" ||
 		cfg.RegionName != "r1" || cfg.QueryTimeout != 2500*time.Millisecond || cfg.Namespace != "ns" ||

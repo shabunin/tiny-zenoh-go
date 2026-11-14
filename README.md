@@ -118,7 +118,7 @@ tzd reads zenohd's configuration files (JSON5) and command line: `-c`,
 explicit flags winning over the file as in zenohd. Understood sections:
 `mode`, `id`, `listen`/`connect` endpoints, `scouting` (multicast
 enabled/address, gossip enabled/multihop), `region_name`, `namespace`,
-`queries_default_timeout`, `transport` (unicast lowlatency / max_links / qos /
+`queries_default_timeout`, `transport` (unicast lowlatency / max_links / max_sessions / accept_pending / accept_timeout / qos /
 compression, link tx lease / batch_size / queue, link tls, shared_memory, auth
 usrpwd), `timestamping`, `downsampling`, `low_pass_filter`, `qos/network`,
 `access_control`, `gateway`, `adminspace`, `metadata` and `plugins`; others

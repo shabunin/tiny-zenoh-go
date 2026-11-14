@@ -122,10 +122,13 @@ func insertPath(tree map[string]any, path string, v any) error {
 func applyTransport(v json.RawMessage, cfg *zenoh.Config) error {
 	var tr struct {
 		Unicast struct {
-			Lowlatency  *bool                   `json:"lowlatency"`
-			MaxLinks    *int                    `json:"max_links"`
-			QoS         struct{ Enabled *bool } `json:"qos"`
-			Compression struct{ Enabled *bool } `json:"compression"`
+			Lowlatency    *bool                   `json:"lowlatency"`
+			MaxLinks      *int                    `json:"max_links"`
+			MaxSessions   *int                    `json:"max_sessions"`
+			AcceptPending *int                    `json:"accept_pending"`
+			AcceptTimeout *int64                  `json:"accept_timeout"` // ms
+			QoS           struct{ Enabled *bool } `json:"qos"`
+			Compression   struct{ Enabled *bool } `json:"compression"`
 		} `json:"unicast"`
 		Link struct {
 			Tx struct {
@@ -174,6 +177,15 @@ func applyTransport(v json.RawMessage, cfg *zenoh.Config) error {
 	u := tr.Unicast
 	if u.Lowlatency != nil {
 		cfg.LowLatency = *u.Lowlatency
+	}
+	if u.MaxSessions != nil {
+		cfg.MaxSessions = *u.MaxSessions
+	}
+	if u.AcceptPending != nil {
+		cfg.AcceptPending = *u.AcceptPending
+	}
+	if u.AcceptTimeout != nil {
+		cfg.AcceptTimeout = time.Duration(*u.AcceptTimeout) * time.Millisecond
 	}
 	if u.MaxLinks != nil {
 		cfg.MaxLinks = *u.MaxLinks

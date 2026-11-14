@@ -144,6 +144,18 @@ type Config struct {
 	QueryTimeout time.Duration
 	// ConnectTimeout bounds dialing each locator. Default 5s.
 	ConnectTimeout time.Duration
+	// MaxSessions is how many nodes may be connected at once, dialed or
+	// accepted (zenoh-rust: transport/unicast/max_sessions). One more is
+	// refused with CLOSE (max sessions). Default 1000; negative: no limit.
+	MaxSessions int
+	// AcceptPending is how many inbound links may be in their handshake at
+	// once (zenoh-rust: transport/unicast/accept_pending); links arriving
+	// beyond it are closed at once. Default 100; negative: no limit.
+	AcceptPending int
+	// AcceptTimeout bounds the handshake of an inbound or outbound link
+	// (zenoh-rust: transport/unicast/accept_timeout and open_timeout).
+	// Default 10s.
+	AcceptTimeout time.Duration
 	// TLS configures "tls/" locators (certificates, CA, mutual TLS). Locators
 	// can also carry these settings in their "#..." config part.
 	TLS *link.TLSConfig
@@ -237,6 +249,12 @@ func (c *Config) setDefaults() {
 	if c.QueryTimeout == 0 {
 		c.QueryTimeout = 10 * time.Second
 	}
+	if c.MaxSessions == 0 {
+		c.MaxSessions = 1000
+	}
+	if c.AcceptPending == 0 {
+		c.AcceptPending = 100
+	}
 	if c.ConnectTimeout == 0 {
 		c.ConnectTimeout = 5 * time.Second
 	}
@@ -272,6 +290,7 @@ type Session struct {
 	done chan struct{}
 
 	closed    atomic.Bool
+	accepting atomic.Int64 // inbound links in their handshake
 	closeOnce sync.Once
 	// redial is held by clientKeeper while it connects, so that Close
 	// waits for a connection under way instead of leaving it open.
@@ -783,24 +802,25 @@ func splitSelector(sel string) (string, string) {
 
 func (s *Session) transportConfig(f *face) transport.Config {
 	return transport.Config{
-		ZID:          s.zid,
-		WhatAmI:      s.cfg.Mode.whatAmI(),
-		Lease:        s.cfg.Lease,
-		CloseLinger:  s.cfg.CloseLinger,
-		BatchSize:    s.cfg.BatchSize,
-		Admit:        func(z protocol.ZID, w protocol.WhatAmI) error { return s.admit(f, z, w) },
-		Ext:          s.shmExt(),
-		QoS:          !s.cfg.DisableQoS && !s.cfg.LowLatency,
-		LowLatency:   s.cfg.LowLatency,
-		Compression:  s.cfg.Compression,
-		MaxLinks:     s.cfg.MaxLinks,
-		MultiLinkKey: s.mlKey,
-		Join:         func(z protocol.ZID) *transport.Unicast { return s.join(f, z) },
-		Auth:         s.cfg.Auth,
-		RegionName:   s.cfg.RegionName,
-		Bound:        func(p transport.PeerInfo) (transport.Bound, error) { return s.boundFor(f, p) },
-		Stats:        s.stats != nil,
-		TxQueue:      s.cfg.TxQueue,
+		ZID:              s.zid,
+		WhatAmI:          s.cfg.Mode.whatAmI(),
+		Lease:            s.cfg.Lease,
+		HandshakeTimeout: s.cfg.AcceptTimeout,
+		CloseLinger:      s.cfg.CloseLinger,
+		BatchSize:        s.cfg.BatchSize,
+		Admit:            func(z protocol.ZID, w protocol.WhatAmI) error { return s.admit(f, z, w) },
+		Ext:              s.shmExt(),
+		QoS:              !s.cfg.DisableQoS && !s.cfg.LowLatency,
+		LowLatency:       s.cfg.LowLatency,
+		Compression:      s.cfg.Compression,
+		MaxLinks:         s.cfg.MaxLinks,
+		MultiLinkKey:     s.mlKey,
+		Join:             func(z protocol.ZID) *transport.Unicast { return s.join(f, z) },
+		Auth:             s.cfg.Auth,
+		RegionName:       s.cfg.RegionName,
+		Bound:            func(p transport.PeerInfo) (transport.Bound, error) { return s.boundFor(f, p) },
+		Stats:            s.stats != nil,
+		TxQueue:          s.cfg.TxQueue,
 	}
 }
 
@@ -867,6 +887,9 @@ func (s *Session) admit(f *face, z protocol.ZID, w protocol.WhatAmI) error {
 	}
 	if _, dup := s.faces[string(z.Bytes())]; dup {
 		return transport.ErrDuplicate
+	}
+	if s.cfg.MaxSessions > 0 && len(s.faces) >= s.cfg.MaxSessions {
+		return transport.ErrMaxSessions
 	}
 	if w == protocol.Router && s.cfg.Mode == ModeRouter {
 		if t, ok := s.meshGone[string(z.Bytes())]; ok {
@@ -1014,7 +1037,15 @@ func (s *Session) acceptLoop(ln link.Listener) {
 			time.Sleep(100 * time.Millisecond) // e.g. too many open files
 			continue
 		}
-		go s.accept(l, ln.Locator().Protocol)
+		if n := s.accepting.Add(1); s.cfg.AcceptPending > 0 && n > int64(s.cfg.AcceptPending) {
+			s.accepting.Add(-1)
+			_ = l.Close() // too many handshakes running
+			continue
+		}
+		go func() {
+			defer s.accepting.Add(-1)
+			s.accept(l, ln.Locator().Protocol)
+		}()
 	}
 }
 
