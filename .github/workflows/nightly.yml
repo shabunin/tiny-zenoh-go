@@ -7,6 +7,10 @@ name: Nightly
 #
 #   ZENOH_MESHSIM=large ZENOH_MESHSIM_SEED=<seed> go test -run '^TestMeshSimLarge$' ./zenoh/
 
+# Also nightly: every fuzz target fuzzed for a while (CI only replays the saved
+# inputs), and the interop tests against the latest zenohd and Python binding
+# rather than the versions CI pins.
+
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -15,6 +19,9 @@ on:
       count:
         description: runs of each simulation
         default: "8"
+      fuzztime:
+        description: fuzzing time per target
+        default: "60s"
 
 permissions:
   contents: read
@@ -47,3 +54,75 @@ jobs:
       - name: failing seeds
         if: failure()
         run: grep -B2 -A2 -E 'seed [0-9]+|--- FAIL' meshsim.log | tail -60
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      FUZZTIME: ${{ inputs.fuzztime || '60s' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: fuzz every target
+        run: |
+          fail=0
+          for f in $(git ls-files '*_test.go' | xargs grep -l '^func Fuzz'); do
+            dir=./$(dirname "$f")
+            for t in $(grep -oE '^func Fuzz[A-Za-z0-9_]+' "$f" | sed 's/func //'); do
+              echo "::group::$dir $t"
+              LEAKTEST=off go test -run '^$' -fuzz "^$t\$" -fuzztime "$FUZZTIME" "$dir" || { fail=1; echo "::error::$dir $t failed"; }
+              echo "::endgroup::"
+            done
+          done
+          exit $fail
+      - name: failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-failures
+          path: "**/testdata/fuzz/**"
+
+  # The tests CI runs against pinned versions, here against whatever zenoh
+  # released last: a failure means a new zenoh changed something we rely on.
+  latest-zenoh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      ZENOH_IMAGE: eclipse/zenoh:latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: python zenoh
+        run: |
+          python -m venv "$RUNNER_TEMP/zpy"
+          "$RUNNER_TEMP/zpy/bin/pip" install -q eclipse-zenoh
+          "$RUNNER_TEMP/zpy/bin/pip" show eclipse-zenoh | grep Version
+          echo "ZENOH_PY=$RUNNER_TEMP/zpy/bin/python" >> "$GITHUB_ENV"
+      - name: start routers
+        run: |
+          R='replication:{interval:1,sub_intervals:5,hot:6,warm:30,propagation_delay:250}'
+          docker run -d --name zenohd -p 127.0.0.1:7447:7447 $ZENOH_IMAGE
+          docker run -d --name zenohd2 --net=host $ZENOH_IMAGE -l tcp/127.0.0.1:7448 --no-multicast-scouting
+          docker run -d --name zenohd-repl --net=host $ZENOH_IMAGE -l tcp/127.0.0.1:17470 --no-multicast-scouting \
+            --cfg "plugins/storage_manager/storages/demo:{key_expr:\"repl/**\",volume:\"memory\",$R}" \
+            --cfg "plugins/storage_manager/storages/strip:{key_expr:\"replp/**\",strip_prefix:\"replp\",volume:\"memory\",$R}"
+          for p in 7447 7448 17470; do
+            for i in $(seq 1 60); do if bash -c "</dev/tcp/127.0.0.1/$p" 2>/dev/null; then break; fi; sleep 2; done
+          done
+          docker logs zenohd 2>&1 | grep -i -m1 'zenohd v' || true
+      - name: go test
+        env:
+          ZENOH_ROUTER: tcp/127.0.0.1:7447
+          ZENOH_MESH: tcp/127.0.0.1:7447,tcp/127.0.0.1:7448
+          ZENOH_REPL: tcp/127.0.0.1:17470
+        run: go test -count=1 -timeout 30m ./zenoh/ ./plugins/storage/ ./cmd/tzd/
+      - name: router logs
+        if: failure()
+        run: for c in zenohd zenohd2 zenohd-repl; do echo "== $c"; docker logs $c 2>&1 | tail -50; done

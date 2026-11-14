@@ -105,6 +105,23 @@ jobs:
         if: failure()
         run: for c in zenohd zenohd2 zenohd-repl; do echo "== $c"; docker logs $c 2>&1 | tail -50; done
 
+  # The unit tests on the other platforms tzd is released for (no containers
+  # there: the interop tests skip themselves).
+  test-os:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    name: test (${{ matrix.os }})
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 -timeout 25m ./...
+
   tinygo:
     runs-on: ubuntu-latest
     steps:
