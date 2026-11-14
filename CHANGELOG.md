@@ -13,6 +13,11 @@ minor releases.
   (default 100 inbound handshakes at once; links beyond are closed at once)
   and `Config.AcceptTimeout` (handshake deadline, default 10 s). In tzd:
   `transport/unicast/max_sessions`, `accept_pending`, `accept_timeout`.
+- `Config.MaxDeclarations` (default 10000): how many key expressions,
+  subscribers, queryables, liveliness tokens and standing interests one
+  connected node may hold at once; a node declaring one more is
+  disconnected. Routers of the mesh are exempt. In tzd:
+  `transport/unicast/max_declarations` (not a zenohd key).
 
 ## v0.1.2 — tzd exit codes, soak results, test coverage
 

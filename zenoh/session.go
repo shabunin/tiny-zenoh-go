@@ -148,6 +148,12 @@ type Config struct {
 	// accepted (zenoh-rust: transport/unicast/max_sessions). One more is
 	// refused with CLOSE (max sessions). Default 1000; negative: no limit.
 	MaxSessions int
+	// MaxDeclarations is how many declarations a connected node may hold
+	// with us at once: its key expressions, subscribers, queryables,
+	// liveliness tokens and standing interests together. A node that
+	// declares one more is disconnected. Routers of our mesh are exempt.
+	// Default 10000; negative: no limit.
+	MaxDeclarations int
 	// AcceptPending is how many inbound links may be in their handshake at
 	// once (zenoh-rust: transport/unicast/accept_pending); links arriving
 	// beyond it are closed at once. Default 100; negative: no limit.
@@ -251,6 +257,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.MaxSessions == 0 {
 		c.MaxSessions = 1000
+	}
+	if c.MaxDeclarations == 0 {
+		c.MaxDeclarations = 10000
 	}
 	if c.AcceptPending == 0 {
 		c.AcceptPending = 100

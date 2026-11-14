@@ -518,9 +518,15 @@ func (f *face) dispatch(m protocol.Message, reliable bool) error {
 				return nil
 			}
 		}
+		if f.overLimit(m) {
+			return errTooManyDeclarations
+		}
 		f.handleDeclare(m)
 		s.checkMatching()
 	case *protocol.Interest:
+		if f.overLimit(m) {
+			return errTooManyDeclarations
+		}
 		defer s.routesChanged()
 		switch {
 		case f.mesh: // routers don't send each other interests
@@ -531,6 +537,54 @@ func (f *face) dispatch(m protocol.Message, reliable bool) error {
 		}
 	}
 	return nil
+}
+
+var errTooManyDeclarations = errors.New("zenoh: the node declared more than Config.MaxDeclarations allows")
+
+// overLimit reports whether m would add one declaration (key expression,
+// subscriber, queryable, token or standing interest) to the
+// Config.MaxDeclarations that f already holds: its transport is then closed
+// rather than left out of step with what the node believes it declared.
+// Routers of our mesh are trusted with what they relay.
+func (f *face) overLimit(m protocol.Message) bool {
+	s := f.s
+	max := s.cfg.MaxDeclarations
+	if max <= 0 || f.mesh {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	known := true
+	switch m := m.(type) {
+	case *protocol.Declare:
+		switch d := m.Body.(type) {
+		case *protocol.DeclareKeyExpr:
+			s.exprMu.RLock()
+			_, known = f.remoteExprs[d.ID]
+			s.exprMu.RUnlock()
+		case *protocol.DeclareSubscriber:
+			_, known = f.subs[d.ID]
+		case *protocol.DeclareQueryable:
+			_, known = f.qbls[d.ID]
+		case *protocol.DeclareToken:
+			_, known = f.tokens[d.ID]
+		}
+	case *protocol.Interest:
+		if f.router != nil && (m.Mode == protocol.InterestFuture || m.Mode == protocol.InterestCurrentFuture) {
+			_, known = f.router.interests[m.ID]
+		}
+	}
+	if known {
+		return false
+	}
+	s.exprMu.RLock()
+	n := len(f.remoteExprs)
+	s.exprMu.RUnlock()
+	n += len(f.subs) + len(f.qbls) + len(f.tokens)
+	if f.router != nil {
+		n += len(f.router.interests)
+	}
+	return n >= max
 }
 
 func (f *face) handleDeclare(m *protocol.Declare) {

@@ -98,3 +98,60 @@ func TestAcceptPending(t *testing.T) {
 	waitFor(t, "no pending handshake", func() bool { return r.accepting.Load() == 0 })
 	clientOf(t, r)
 }
+
+// MaxDeclarations: a node holding as many declarations as allowed keeps
+// working (redeclaring and undeclaring included); one more disconnects it.
+func TestMaxDeclarations(t *testing.T) {
+	r, err := Open(Config{Mode: ModeRouter, Listen: []string{"tcp/127.0.0.1:0"},
+		Scouting: ScoutingConfig{Disable: true}, MaxDeclarations: 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	held := func() int {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		n := 0
+		for _, f := range r.faces {
+			n += len(f.subs) + len(f.qbls) + len(f.tokens) + len(f.remoteExprs)
+			if f.router != nil {
+				n += len(f.router.interests)
+			}
+		}
+		return n
+	}
+	c, err := Open(Config{Connect: r.Locators()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	base := held() // what a client declares by itself (its interest)
+	if base >= 6 {
+		t.Fatalf("a bare client holds %d declarations", base)
+	}
+	nop := func(Sample) {}
+	var subs []*Subscriber
+	for i := base; i < 6; i++ {
+		sub, err := c.DeclareSubscriber("lim/s"+string(rune('a'+i)), nop)
+		if err != nil {
+			t.Fatal(err)
+		}
+		subs = append(subs, sub)
+	}
+	waitFor(t, "the allowed declarations", func() bool { return held() == 6 })
+	// At the limit: replacing one is fine.
+	_ = subs[0].Undeclare()
+	waitFor(t, "the undeclaration", func() bool { return held() == 5 })
+	if _, err := c.Liveliness().DeclareToken("lim/token"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the token", func() bool { return held() == 6 })
+	if len(r.Transports()) != 1 {
+		t.Fatal("the client was disconnected within its limit")
+	}
+	// One more: disconnected.
+	if _, err := c.DeclareQueryable("lim/q", func(*Query) {}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the disconnection", func() bool { return len(r.Transports()) == 0 })
+}
