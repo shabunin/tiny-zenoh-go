@@ -23,6 +23,7 @@ const initialInterestID = 0
 // (a peer or client seen from a peer): both sides push their declarations, and
 // we send it only data its declarations ask for.
 type face struct {
+	routing int // queries of this node we are routing (Session.mu)
 	s       *Session
 	tr      *transport.Unicast
 	shm     *shm.Link // negotiated shared memory, nil if none

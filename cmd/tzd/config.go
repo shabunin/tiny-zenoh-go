@@ -418,6 +418,13 @@ func applyConfig(tree map[string]any, cfg *zenoh.Config) (*pluginsConfig, error)
 			if err = json.Unmarshal(v, &ms); err == nil && ms != nil {
 				cfg.QueryTimeout = time.Duration(*ms) * time.Millisecond
 			}
+		case "queries_max_timeout": // tzd's own
+			var ms *int64
+			if err = json.Unmarshal(v, &ms); err == nil && ms != nil {
+				cfg.MaxQueryTimeout = time.Duration(*ms) * time.Millisecond
+			}
+		case "queries_max_pending": // tzd's own
+			err = json.Unmarshal(v, &cfg.MaxPendingQueries)
 		case "transport":
 			err = applyTransport(v, cfg)
 		case "downsampling":

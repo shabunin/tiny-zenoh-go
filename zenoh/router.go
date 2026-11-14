@@ -595,6 +595,12 @@ func (s *Session) routerRequest(src *face, key string, m *protocol.Request) {
 		_ = src.send(true, &protocol.ResponseFinal{RequestID: m.ID, QoS: protocol.QoSRequest})
 		return
 	}
+	if max := s.cfg.MaxPendingQueries; max > 0 && !src.mesh && src.routing >= max {
+		s.mu.Unlock() // too many of its queries are still running: this one gets no reply
+		_ = src.send(true, &protocol.ResponseFinal{RequestID: m.ID, QoS: protocol.QoSRequest})
+		return
+	}
+	src.routing++
 	rid := s.nextQID
 	s.nextQID++
 	s.routes[rid] = rq
@@ -608,10 +614,17 @@ func (s *Session) routerRequest(src *face, key string, m *protocol.Request) {
 	if m.TimeoutMS > 0 {
 		timeout = time.Duration(m.TimeoutMS) * time.Millisecond
 	}
+	capped := false
+	if max := s.cfg.MaxQueryTimeout; max > 0 && timeout > max {
+		timeout, capped = max, true
+	}
 	rq.timer = time.AfterFunc(timeout, func() { s.routeDone(rid, nil, true) })
 
 	fwd := *m
 	fwd.ID = rid
+	if capped {
+		fwd.TimeoutMS = uint64(timeout / time.Millisecond)
+	}
 	fwd.WireExpr = protocol.WireExpr{Suffix: key}
 	fwd.NodeID = 0
 	for _, f := range dst {
@@ -657,6 +670,7 @@ func (s *Session) routeDone(rid uint32, dst *face, all bool) {
 		return
 	}
 	delete(s.routes, rid)
+	rq.origin.routing--
 	s.mu.Unlock()
 	rq.timer.Stop()
 	_ = rq.origin.send(true, &protocol.ResponseFinal{RequestID: rq.originRID, QoS: protocol.QoSRequest})

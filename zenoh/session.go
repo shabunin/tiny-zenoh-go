@@ -154,6 +154,15 @@ type Config struct {
 	// declares one more is disconnected. Routers of our mesh are exempt.
 	// Default 10000; negative: no limit.
 	MaxDeclarations int
+	// MaxQueryTimeout caps how long we keep a query that we route for
+	// another node open, whatever timeout it asks for; replies after it are
+	// dropped. Default 10 minutes; negative: no cap.
+	MaxQueryTimeout time.Duration
+	// MaxPendingQueries is how many queries of one connected node we route
+	// at once; further ones end at once, without replies, until some
+	// finish. Routers of our mesh are exempt. Default 10000; negative: no
+	// limit.
+	MaxPendingQueries int
 	// AcceptPending is how many inbound links may be in their handshake at
 	// once (zenoh-rust: transport/unicast/accept_pending); links arriving
 	// beyond it are closed at once. Default 100; negative: no limit.
@@ -260,6 +269,12 @@ func (c *Config) setDefaults() {
 	}
 	if c.MaxDeclarations == 0 {
 		c.MaxDeclarations = 10000
+	}
+	if c.MaxQueryTimeout == 0 {
+		c.MaxQueryTimeout = 10 * time.Minute
+	}
+	if c.MaxPendingQueries == 0 {
+		c.MaxPendingQueries = 10000
 	}
 	if c.AcceptPending == 0 {
 		c.AcceptPending = 100

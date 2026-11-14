@@ -155,3 +155,77 @@ func TestMaxDeclarations(t *testing.T) {
 	}
 	waitFor(t, "the disconnection", func() bool { return len(r.Transports()) == 0 })
 }
+
+// Routed queries: the timeout a node asks for is capped, and a node with
+// MaxPendingQueries queries running gets no replies to further ones.
+func TestRoutedQueryLimits(t *testing.T) {
+	r, err := Open(Config{Mode: ModeRouter, Listen: []string{"tcp/127.0.0.1:0"},
+		Scouting: ScoutingConfig{Disable: true}, MaxPendingQueries: 2, MaxQueryTimeout: 500 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	a, b := clientOf(t, r), clientOf(t, r)
+	release := make(chan struct{})
+	q, err := a.DeclareQueryable("lim/q", func(q *Query) {
+		<-release
+		_ = q.Reply("lim/q", []byte("late"))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Undeclare()
+	defer close(release)
+	pub, err := b.DeclareQuerier("lim/q", WithTimeout(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the queryable", func() bool { st, _ := pub.MatchingStatus(); return st.Matching })
+
+	type result struct {
+		replies int
+		took    time.Duration
+	}
+	run := func() chan result {
+		ch := make(chan result, 1)
+		start := time.Now()
+		replies, err := b.Get("lim/q", WithTimeout(time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			n := 0
+			for range replies {
+				n++
+			}
+			ch <- result{n, time.Since(start)}
+		}()
+		return ch
+	}
+	routing := func() int {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return len(r.routes)
+	}
+	q1, q2 := run(), run()
+	waitFor(t, "two routed queries", func() bool { return routing() == 2 })
+	// The third is over the limit: ended at once.
+	if res := <-run(); res.replies != 0 || res.took > 300*time.Millisecond {
+		t.Fatalf("query over the limit: %+v, want no reply at once", res)
+	}
+	// The first two end at the router's cap, not after their minute.
+	for _, ch := range []chan result{q1, q2} {
+		select {
+		case res := <-ch:
+			if res.replies != 0 || res.took < 400*time.Millisecond {
+				t.Fatalf("capped query: %+v", res)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a query outlived the router's cap")
+		}
+	}
+	waitFor(t, "the routes to be gone", func() bool { return routing() == 0 })
+	// There is room again.
+	run()
+	waitFor(t, "a query after the others ended", func() bool { return routing() == 1 })
+}

@@ -18,6 +18,12 @@ minor releases.
   connected node may hold at once; a node declaring one more is
   disconnected. Routers of the mesh are exempt. In tzd:
   `transport/unicast/max_declarations` (not a zenohd key).
+- Limits on the queries a node routes for others: `Config.MaxQueryTimeout`
+  (default 10 min) caps the timeout a query may ask for, and
+  `Config.MaxPendingQueries` (default 10000 per connected node; mesh
+  routers exempt) ends further queries at once, without replies, while that
+  many are still running. In tzd: `queries_max_timeout`,
+  `queries_max_pending` (not zenohd keys).
 
 ## v0.1.2 — tzd exit codes, soak results, test coverage
 
