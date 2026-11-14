@@ -29,13 +29,13 @@ Targets the **Zenoh 1.0.0 wire specification** (<https://spec.zenoh.io/spec/1.0.
 protocol version `0x09`; verified against **zenohd 1.10.2**.
 
 ```bash
-go get github.com/shabunin/tiny-zenoh-go@v0.1.2
-go install github.com/shabunin/tiny-zenoh-go/cmd/tzd@v0.1.2   # the router
+go get github.com/shabunin/tiny-zenoh-go@v0.1.3
+go install github.com/shabunin/tiny-zenoh-go/cmd/tzd@v0.1.3   # the router
 ```
 
 ## Project status
 
-**v0.1.2, early.** The code is young (written in November 2026 by
+**v0.1.3, early.** The code is young (written in November 2026 by
 Anthropic's Claude Opus 5.5 model; see NOTICE), has no production users yet and has not
 been audited. The API may change before 1.0. What backs it:
 
