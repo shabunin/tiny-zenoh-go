@@ -29,13 +29,13 @@ Targets the **Zenoh 1.0.0 wire specification** (<https://spec.zenoh.io/spec/1.0.
 protocol version `0x09`; verified against **zenohd 1.10.2**.
 
 ```bash
-go get github.com/shabunin/tiny-zenoh-go@v0.1.0
-go install github.com/shabunin/tiny-zenoh-go/cmd/tzd@v0.1.0   # the router
+go get github.com/shabunin/tiny-zenoh-go@v0.1.1
+go install github.com/shabunin/tiny-zenoh-go/cmd/tzd@v0.1.1   # the router
 ```
 
 ## Project status
 
-**v0.1.0, early.** The code is young (written in November 2026 by
+**v0.1.1, early.** The code is young (written in November 2026 by
 Anthropic's Claude Opus 5.5 model; see NOTICE), has no production users yet and has not
 been audited. The API may change before 1.0. What backs it:
 
@@ -650,6 +650,11 @@ then carry every sample exactly once. Failures print the seed:
 ZENOH_MESHSIM_SEED=<seed> go test -run TestMeshSim -v ./zenoh/   # replay a topology and its flaps
 ZENOH_MESHSIM=large go test -run TestMeshSimLarge -v ./zenoh/     # 7x7 grid, 8 hosts, 8 flap rounds
 ```
+
+CI runs `TestMeshSim` once per push. Subtle routing bugs show up only in
+some topologies, so the nightly workflow (`.github/workflows/nightly.yml`)
+also runs `TestMeshSimLarge` 8 times, and both simulations 8 more times under
+the race detector, each run with a fresh seed.
 
 ### Fuzzing
 

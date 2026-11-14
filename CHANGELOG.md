@@ -4,7 +4,7 @@ All notable changes to this project are listed here. Versions follow
 [Semantic Versioning](https://semver.org); before 1.0 the API may change in
 minor releases.
 
-## Unreleased
+## v0.1.1 — goroutine leak fix
 
 ### Fixed
 
