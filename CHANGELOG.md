@@ -23,6 +23,15 @@ minor releases.
   link faults on a containerlab mesh with memory trends. 12 h on 49 tzd
   routers: every flow and token recovered after every fault, no goroutine
   or heap growth (lab/README.md).
+- Hostile-input tests: every prefix and bit flip of protocol messages and
+  link states, scripted handshakes that misbehave at each step (open and
+  accept), the TinyGo-default sync transmit path, advanced subscriber
+  ordering, reply consolidation, configuration errors, and an in-memory S3
+  fake for the S3 backend's failure paths and TLS. Library + tzd coverage
+  86.5% → 89.6% (protocol 82% → 96%, transport 87% → 91%, zenoh 88% → 90%,
+  S3 77% → 98%).
+- Fixed a load-dependent race in the storage replication test (publishing
+  before the router had the other replica's subscription).
 
 ## v0.1.1 — goroutine leak fix
 

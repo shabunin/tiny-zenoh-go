@@ -106,6 +106,10 @@ func TestAPIArgumentErrors(t *testing.T) {
 	_, checks["DeclareAdvancedPublisher metadata"] = s.DeclareAdvancedPublisher("ok", AdvancedPublisherConfig{Metadata: bad})
 	_, checks["DeclareAdvancedPublisher cache"] = s.DeclareAdvancedPublisher("ok", AdvancedPublisherConfig{Cache: &CacheConfig{MaxSamples: -1}})
 	_, checks["DeclareAdvancedSubscriber key"] = s.DeclareAdvancedSubscriber(bad, nop, AdvancedSubscriberConfig{})
+	_, checks["DeclareAdvancedSubscriber history"] = s.DeclareAdvancedSubscriber("ok", nop, AdvancedSubscriberConfig{History: &HistoryConfig{MaxSamples: -1}})
+	_, checks["DeclareAdvancedSubscriber metadata"] = s.DeclareAdvancedSubscriber("ok", nop, AdvancedSubscriberConfig{Metadata: bad})
+	_, checks["DeclareTransportEventsListener nil"] = s.DeclareTransportEventsListener(nil)
+	_, checks["DeclareLinkEventsListener nil"] = s.DeclareLinkEventsListener(nil)
 	for name, err := range checks {
 		if err == nil {
 			t.Errorf("%s accepted %q", name, bad)

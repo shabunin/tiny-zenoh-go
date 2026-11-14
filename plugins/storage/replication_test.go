@@ -83,7 +83,22 @@ func replicationScenario(t *testing.T, base string, pub *zenoh.Session, mine fun
 		t.Fatalf("%s: other replica holds %v, want %v", what, got, want)
 	}
 
-	// Initial alignment: data published before our storage exists.
+	// Initial alignment: data published before our storage exists, once
+	// the router has the other replica's subscription (under load it may
+	// not yet, and the puts would be lost).
+	p, err := pub.DeclarePublisher(pfx + "/init/0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if st, err := p.MatchingStatus(); err == nil && st.Matching {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the other replica's subscription never reached the publisher")
+		}
+	}
+	_ = p.Undeclare()
 	for i := range 3 {
 		if err := pub.Put(fmt.Sprintf("%s/init/%d", pfx, i), []byte(fmt.Sprint("v", i))); err != nil {
 			t.Fatal(err)

@@ -2,6 +2,7 @@ package zenoh
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -127,4 +128,48 @@ func TestMultiLinkRustPeer(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	startRust(t, string(c), false, "pub", pfx+"/b")
 	sink.wait(t, 2)
+}
+
+// Link events follow the links of a multilink transport: one dropped and
+// redialed into the same transport is a delete then a put, the transport
+// itself staying up.
+func TestMultiLinkLinkEvents(t *testing.T) {
+	a := openMLPeer(t, 2, []string{"tcp/127.0.0.1:0", "tcp/127.0.0.1:0"})
+	var mu sync.Mutex
+	var dialed []transport.Link
+	b, err := Open(Config{
+		Mode: ModePeer, Connect: a.Locators(), Scouting: ScoutingConfig{Disable: true}, MaxLinks: 2,
+		Dial: func(loc string, timeout time.Duration) (transport.Link, error) {
+			l, err := link.Dial(loc, timeout)
+			if err == nil {
+				mu.Lock()
+				dialed = append(dialed, l)
+				mu.Unlock()
+			}
+			return l, err
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	waitFor(t, "two links", func() bool { return links(b) == 2 })
+	ev := listenEvents(t, b, WithHistory(true))
+	az := a.ZID().String()
+	if got := ev.waitN(t, 3); !slices.Equal(got, []string{"T+ " + az, "L+ " + az, "L+ " + az}) {
+		t.Fatalf("history %q", got)
+	}
+	mu.Lock()
+	_ = dialed[1].Close()
+	mu.Unlock()
+	waitFor(t, "relinked", func() bool { return len(ev.get()) >= 5 && links(b) == 2 })
+	if got := ev.get()[3:]; !slices.Equal(got, []string{"L- " + az, "L+ " + az}) {
+		t.Errorf("after a link drop %q, want a link delete then put", got)
+	}
+	ev.mu.Lock()
+	gone, back := ev.links[2].Link, ev.links[3].Link
+	ev.mu.Unlock()
+	if gone.Src == "" || gone.Dst == "" || back.Src == "" {
+		t.Errorf("links without endpoints: %+v %+v", gone, back)
+	}
 }
