@@ -294,6 +294,25 @@ and keeps the traffic going 15 min more, to look at the mesh as it is;
 gen.py gives grid/random routers fixed ZIDs (r22 is e00016) so the dumps
 read.
 
+**soak**: hours of the same mesh, to catch what minutes don't (slow
+leaks, tables that grow, a fault that only shows up after many others).
+`HOURS` (default 12, or `MINUTES`) of `WINDOW_MIN` (20) windows; in each,
+every host opens new sessions, publishes `RATE` (50) samples/s to every
+other and holds a liveliness token, while a random router link is cut for
+6 s, the centre router cut off for 10 s and 5 random links flapped for 3 s
+(`SEED` picks them). A sampler records every router's RSS each minute and
+sends the tzd routers SIGUSR2 every 5 minutes (heap and goroutines, from
+their logs). After each window `results/TOPO-soak/windows.txt` gets a line:
+the flows (every host to every host) still delivering at its end, samples
+lost around the cuts, duplicates and reordering (expected 0), tokens
+missing. The final summary adds the memory trends after a warm-up hour:
+RSS slope per router, tzd heap and goroutines, the host's free memory.
+
+```bash
+sudo setsid nohup sh -c 'HOURS=12 exec ./run.sh soak grid49-tzd > results/soak.log 2>&1' </dev/null &
+sudo ./run.sh soak-summary grid49-tzd       # the summary so far
+```
+
 What the lab host takes: a 4-core VM with 16 GB runs 225 tzd routers and
 10 hosts in about 3 GB, deploying in 90 s; idle, the routers take 0.1% CPU
 each, and the traffic above keeps 3 of the 4 cores busy. Memory per node

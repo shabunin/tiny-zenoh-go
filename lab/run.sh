@@ -28,6 +28,16 @@
 #                           STOP=1 stops at the first broken round and
 #                           leaves it running (recut-summary TOPO: the
 #                           summary of the last run again)
+#   run.sh soak TOPO        grid/random with --hosts: HOURS (default 12) of
+#                           WINDOW_MIN (20) windows; in each, every host
+#                           opens new sessions, publishes RATE (50)/s to
+#                           every other and holds a token, while one random
+#                           router link, the centre and 5 random links (all
+#                           at once) are cut in turn; every router's memory
+#                           sampled each minute (tzd: heap and goroutines
+#                           every 5); SEED picks the links; MINUTES
+#                           instead of HOURS for a short run (soak-summary
+#                           TOPO: the summary so far, while it runs)
 #
 # Results (the agents' JSON, an event log, a summary) go to
 # results/TOPO-SCENARIO.
@@ -731,6 +741,109 @@ for i in range(1, rounds + 1):
 PY
 }
 
+# soak_sampler: every minute, each router's resident memory and the host's
+# available memory and load to mem.tsv ("unix-time node metric value");
+# every 5 minutes SIGUSR2 to the tzd routers, which log their heap and
+# goroutine counts (collected from docker logs at the end).
+soak_sampler() {
+	set +e
+	local n=0 now name pid r
+	declare -A impl
+	local rs=($ROUTERS) is=($IMPLS) i
+	for i in "${!rs[@]}"; do impl[${rs[$i]}]=${is[$i]}; done
+	while :; do
+		now=$(date +%s)
+		docker inspect -f '{{.Name}} {{.State.Pid}}' $(docker ps -q --filter "name=clab-$LAB-r") 2>/dev/null |
+			while read -r name pid; do
+				r=${name##*-}
+				[ -n "${impl[$r]:-}" ] || continue
+				echo "$now $r rss_kib $(awk '/VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null || echo 0)"
+				if [ $((n % 5)) = 0 ] && [ "${impl[$r]}" = tzd ]; then kill -USR2 "$pid" 2>/dev/null || true; fi
+			done >>"$OUT/mem.tsv"
+		{
+			echo "$now host avail_mib $(awk '/^MemAvailable/{print int($2/1024)}' /proc/meminfo)"
+			echo "$now host load1 $(cut -d' ' -f1 /proc/loadavg)"
+		} >>"$OUT/mem.tsv"
+		n=$((n + 1))
+		sleep_until $((now + 60))
+	done
+}
+
+# soak_logs: the tzd routers' logs (with their SIGUSR2 memory lines) to logs/.
+soak_logs() {
+	mkdir -p "$OUT/logs"
+	local r
+	for r in $ROUTERS; do
+		docker logs -t "$(ns "$r")" >"$OUT/logs/$r.log" 2>&1 || true
+	done
+}
+
+# sleep_until UNIX-TIME (no-op if it has passed).
+sleep_until() {
+	local d=$(($1 - $(date +%s)))
+	if [ "$d" -gt 0 ]; then sleep "$d"; fi
+}
+
+# soak: hours of traffic, tokens and link faults; see the header.
+soak() {
+	[ -n "${CENTRE:-}" ] && [ -n "$HOSTS" ] || { echo "soak: needs a grid/random topology with --hosts"; exit 1; }
+	OUT=results/$TOPO-soak
+	rm -rf "$OUT" && mkdir -p "$OUT"
+	local minutes=${MINUTES:-$((${HOURS:-12} * 60))} wmin=${WINDOW_MIN:-20} rate=${RATE:-50} seed=${SEED:-1}
+	local ws=$((wmin * 60)) nw hs="" h rr cv v i W pids t0 arr pick
+	nw=$((minutes / wmin))
+	for h in $HOSTS; do [ "${h#h}" != "$h" ] && hs="$hs $h"; done
+	rr=$(router_link_vars)
+	arr=($rr)
+	cv=""
+	for v in $(links_of "$CENTRE"); do cv="$cv $v"; done
+	RANDOM=$seed
+	T0=$(date +%s.%N)
+	echo "$minutes $wmin $rate $seed $hs" >"$OUT/params"
+	event "soak: $(echo "$ROUTERS" | wc -w) routers ($IMPLS), hosts$hs; $nw windows of $wmin min, $rate samples/s per host, seed $seed"
+	soak_sampler &
+	SAMPLER=$!
+	trap 'kill $SAMPLER 2>/dev/null || true' EXIT
+	sleep 10
+	for i in $(seq 1 "$nw"); do
+		W=$OUT/$(printf 'w%03d' "$i")
+		mkdir -p "$W"
+		pids=""
+		for h in $hs; do
+			agent "$h" alive -k "lab/alive/$h" -watch 'lab/alive/**' -d $((ws + 8))s >"$W/alive-$h.jsonl" &
+			pids="$pids $!"
+			agent "$h" sub -k 'lab/soak/**' -per-key -d $((ws + 6))s >"$W/sub-$h.json" &
+			pids="$pids $!"
+		done
+		sleep 3
+		t0=$(date +%s)
+		event "w$i: pubs start"
+		for h in $hs; do
+			agent "$h" pub -k "lab/soak/$h" -rate "$rate" -d "${ws}s" -linger 2s >"$W/pub-$h.json" &
+			pids="$pids $!"
+		done
+		sleep_until $((t0 + ws / 4))
+		pick=${arr[RANDOM % ${#arr[@]}]}
+		event "w$i: cut $pick for 6 s" && links_par "$pick" down
+		sleep 6 && links_par "$pick" up
+		sleep_until $((t0 + ws / 2))
+		event "w$i: cut the centre $CENTRE for 10 s" && links_par "$cv" down
+		sleep 10 && links_par "$cv" up
+		sleep_until $((t0 + 3 * ws / 4))
+		pick=""
+		for v in 1 2 3 4 5; do pick="$pick ${arr[RANDOM % ${#arr[@]}]}"; done
+		event "w$i: flap$pick for 3 s" && links_par "$pick" down
+		sleep 3 && links_par "$pick" up
+		# shellcheck disable=SC2086
+		wait $pids || event "w$i: an agent failed"
+		python3 soak_summary.py --window "$W" "$OUT" | tee -a "$OUT/windows.txt"
+	done
+	kill $SAMPLER 2>/dev/null || true
+	event "done"
+	soak_logs
+	python3 soak_summary.py "$OUT" | tee "$OUT/summary.txt"
+}
+
 # guard_start runs a watchdog for the lab: if the host's available memory
 # drops below GUARD_MIB (default 2000), it kills the lab's containers before
 # the host starts thrashing (a 225-router mesh once froze the 16 GB lab VM).
@@ -775,9 +888,15 @@ down)
 	(cd "$TD" && sudo containerlab destroy -t topo.clab.yml --cleanup >/dev/null)
 	guard_stop
 	;;
-failover | partition | gateway | netem | scale | recut)
+failover | partition | gateway | netem | scale | recut | soak)
 	load "$2"
 	"$1"
+	;;
+soak-summary)
+	load "$2"
+	OUT=results/$TOPO-soak
+	soak_logs
+	python3 soak_summary.py "$OUT"
 	;;
 recut-summary)
 	load "$2"
