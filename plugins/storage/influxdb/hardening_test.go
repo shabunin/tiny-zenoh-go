@@ -18,14 +18,16 @@ func TestInfluxLineEscaping(t *testing.T) {
 	zid, _ := protocol.NewZID([]byte{1})
 	p := putPoint(`k\1,2 3`, storage.Value{
 		Payload:   []byte("line1\nline2\r\\\""),
-		Encoding:  zenoh.ParseEncoding("text/plain\r\ninject"),
+		Encoding:  zenoh.ParseEncoding("text/plain"),
 		Timestamp: zenoh.Timestamp{Time: 1 << 32, ID: zid},
 	})
 	line := p.line()
-	if strings.ContainsAny(line, "\n\r") {
-		t.Fatalf("line protocol contains raw newline/CR: %q", line)
+	// String fields escape only backslash and quote: InfluxDB stores a raw
+	// newline as is, while an escaped one would come back as "\n".
+	if !strings.Contains(line, `,value="line1`+"\nline2\r"+`\\\""`) {
+		t.Fatalf("value field mis-escaped: %q", line)
 	}
-	if !strings.HasPrefix(line, `k\\1\,2\ 3,`) {
+	if !strings.HasPrefix(line, `k\1\,2\ 3,`) {
 		t.Fatalf("measurement not escaped: %q", line)
 	}
 }

@@ -79,8 +79,9 @@ func delPoint(key string, ts zenoh.Timestamp) point {
 }
 
 var (
-	measurementEscaper = strings.NewReplacer(`\`, `\\`, `,`, `\,`, ` `, `\ `, "\n", `\n`, "\r", `\r`)
-	stringEscaper      = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`)
+	measurementEscaper = strings.NewReplacer(`,`, `\,`, ` `, `\ `, "\n", `\n`)
+	// String fields: InfluxDB unescapes only \" and \\; newlines stay as they are.
+	stringEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 )
 
 // line is the point in line protocol.
