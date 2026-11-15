@@ -422,6 +422,9 @@ type fragWait struct {
 	deadline  time.Time
 }
 
+// maxFragWait is where a message's per-fragment wait stops doubling.
+const maxFragWait = time.Hour
+
 func (w *fragWait) get() time.Time {
 	if w.deadline.IsZero() {
 		w.deadline = time.Now().Add(w.wait)
@@ -431,7 +434,9 @@ func (w *fragWait) get() time.Time {
 
 func (w *fragWait) next() {
 	w.get()
-	w.wait *= 2
+	if w.wait < maxFragWait { // doubling on would overflow after some 30 fragments
+		w.wait *= 2
+	}
 	if w.limited {
 		if w.max <= 0 {
 			return

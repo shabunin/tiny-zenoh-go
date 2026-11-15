@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
@@ -131,6 +132,34 @@ func TestSyncQoSFrames(t *testing.T) {
 		}
 		if n := countMsgs(t, fr.Payload); n != w.n {
 			t.Errorf("frame %d: %d messages, want %d", i, n, w.n)
+		}
+	}
+}
+
+// A message of many fragments keeps a deadline in the future: its wait
+// stops doubling instead of overflowing (which closed transports that sent
+// large blocking messages through a full queue).
+func TestFragWaitManyFragments(t *testing.T) {
+	for _, w := range []fragWait{
+		{wait: 5 * time.Second},
+		{wait: time.Second, max: 50 * time.Millisecond, limited: true},
+	} {
+		limited := w.limited
+		first := w.get()
+		prev := first
+		for i := range 5000 {
+			w.next()
+			d := w.get()
+			if d.Before(prev) {
+				t.Fatalf("limited %v: deadline went back at fragment %d: %v after %v", limited, i, d, prev)
+			}
+			prev = d
+		}
+		if limited && prev.Sub(first) > 50*time.Millisecond {
+			t.Errorf("droppable message may wait %v, beyond its 50ms", prev.Sub(first))
+		}
+		if !limited && time.Until(prev) < time.Hour {
+			t.Errorf("blocking message's deadline %v is not far ahead", time.Until(prev))
 		}
 	}
 }

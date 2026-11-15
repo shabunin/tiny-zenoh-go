@@ -176,7 +176,7 @@ func TestLargePayloadFragmentation(t *testing.T) {
 	for i := range big {
 		big[i] = byte(i * 7)
 	}
-	if err := a.Put(pfx, big); err != nil {
+	if err := a.Put(pfx, big, WithCongestionControl(CongestionBlock)); err != nil {
 		t.Fatal(err)
 	}
 	got := sink.wait(t, 1)

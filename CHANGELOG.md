@@ -4,6 +4,25 @@ All notable changes to this project are listed here. Versions follow
 [Semantic Versioning](https://semver.org); before 1.0 the API may change in
 minor releases.
 
+## Unreleased
+
+### Fixed
+
+- A blocking message (`CongestionBlock`: also queries, replies and
+  declarations) split into more than about 30 fragments closed its
+  transport as soon as its queue was momentarily full, instead of waiting
+  `wait_before_close`: the per-fragment wait doubled until it overflowed.
+  With the default 64 KiB batches that is payloads over ~2 MiB; on
+  datagram links (QUIC datagrams, UDP) anything over ~35 KiB.
+
+### Tests
+
+- CI also runs the unit tests on macOS and Windows (which found the bug
+  above). The nightly workflow fuzzes every fuzz target and runs the
+  interop tests against the latest zenohd and Python binding.
+- `unixpipe/` links don't work on macOS (FIFOs can't be locked there);
+  documented, tests skip.
+
 ## v0.1.3 — connection, declaration and query limits
 
 ### Added

@@ -1,0 +1,2 @@
+# Golden files are compared byte for byte: no CRLF checkouts.
+* text=auto eol=lf

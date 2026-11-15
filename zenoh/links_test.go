@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -44,13 +45,16 @@ func linkCases(t *testing.T) []linkCase {
 			certs: &f,
 		}
 	}
-	return []linkCase{
+	cases := []linkCase{
 		{proto: "udp"},
 		tlsCase("tls"),
 		tlsCase("quic"),
 		{proto: "ws"},
-		{proto: "unixsock-stream"},
 	}
+	if runtime.GOOS != "windows" { // no unixsock-stream there
+		cases = append(cases, linkCase{proto: "unixsock-stream"})
+	}
+	return cases
 }
 
 // unixPath returns a fresh socket path, short enough for sun_path.
@@ -143,7 +147,7 @@ func TestLinksGoRouter(t *testing.T) {
 			defer sub.Undeclare()
 			settle()
 			big := bytes.Repeat([]byte("0123456789"), 30000)
-			if err := a.Put(pfx+"/big", big); err != nil {
+			if err := a.Put(pfx+"/big", big, WithCongestionControl(CongestionBlock)); err != nil {
 				t.Fatal(err)
 			}
 			if got := sink.wait(t, 1)[0]; !bytes.Equal(got.Payload, big) {
@@ -289,7 +293,7 @@ func TestGoOnlyLinks(t *testing.T) {
 			for i := range big {
 				big[i] = byte(i)
 			}
-			_ = b.Put(pfx+"/x", big)
+			_ = b.Put(pfx+"/x", big, WithCongestionControl(CongestionBlock))
 			if got := sink.wait(t, 1); len(got[0].Payload) != len(big) || got[0].Payload[1234] != big[1234] {
 				t.Errorf("got %d bytes", len(got[0].Payload))
 			}

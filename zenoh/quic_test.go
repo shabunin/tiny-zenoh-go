@@ -112,7 +112,7 @@ func TestQUICVariantsGo(t *testing.T) {
 			checkPrios(t, prios, 2, v)
 			// A payload far larger than a batch: FRAGMENTs.
 			big := bytes.Repeat([]byte("0123456789"), 30000)
-			if err := a.Put(pfx+"/big", big); err != nil {
+			if err := a.Put(pfx+"/big", big, WithCongestionControl(CongestionBlock)); err != nil {
 				t.Fatal(err)
 			}
 			if got := sink.wait(t, 1); !bytes.Equal(got[len(got)-1].Payload, big) {

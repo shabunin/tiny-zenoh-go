@@ -2,6 +2,7 @@ package zenoh
 
 import (
 	"encoding/json"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -263,7 +264,7 @@ func TestInterceptorsFaces(t *testing.T) {
 		Scouting: ScoutingConfig{Disable: true},
 		LowPassFilter: []LowPassFilterConfig{
 			{Messages: msgs(MessagePut), KeyExprs: []string{key + "/egress/**"}, SizeLimit: 2, Flows: []ACLFlow{ACLEgress}},
-			{Messages: msgs(MessagePut), KeyExprs: []string{key + "/lo/**"}, SizeLimit: 2, Interfaces: []string{"lo"}},
+			{Messages: msgs(MessagePut), KeyExprs: []string{key + "/lo/**"}, SizeLimit: 2, Interfaces: []string{loopbackName(t)}},
 			{Messages: msgs(MessagePut), KeyExprs: []string{key + "/eth/**"}, SizeLimit: 2, Interfaces: []string{"no-such-if"}},
 			{Messages: msgs(MessageQuery), KeyExprs: []string{key + "/egq/**"}, SizeLimit: 2, Flows: []ACLFlow{ACLEgress}},
 		},
@@ -387,4 +388,20 @@ func TestInterceptorsConfig(t *testing.T) {
 	if lo, hi, err := parseRange("..3"); err != nil || lo != 0 || hi != 3 {
 		t.Errorf("..3: %d %d %v", lo, hi, err)
 	}
+}
+
+// loopbackName is the loopback interface's name ("lo", "lo0", ...).
+func loopbackName(t *testing.T) string {
+	t.Helper()
+	ifs, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ifc := range ifs {
+		if ifc.Flags&net.FlagLoopback != 0 {
+			return ifc.Name
+		}
+	}
+	t.Skip("no loopback interface")
+	return ""
 }
