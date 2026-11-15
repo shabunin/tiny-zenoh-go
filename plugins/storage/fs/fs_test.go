@@ -182,7 +182,7 @@ func TestFilesystemForeignFiles(t *testing.T) {
 		t.Errorf("without keep_mime_types: %v", val.Encoding)
 	}
 
-	for _, bad := range []map[string]any{nil, {}, {"dir": "/abs"}, {"dir": "a/../b"}, {"dir": "d", "on_closure": "x"},
+	for _, bad := range []map[string]any{nil, {}, {"dir": t.TempDir()}, {"dir": "a/../b"}, {"dir": "d", "on_closure": "x"},
 		{"dir": "d", "read_only": 3}} {
 		if _, err := v.CreateStorage(storage.Config{}, bad); err == nil {
 			t.Errorf("accepted %v", bad)

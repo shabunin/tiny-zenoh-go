@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -417,6 +418,9 @@ func TestECDSA(t *testing.T) {
 // TestOpenSSLKeyUpdate: the server updates its keys and asks us to update
 // ours (openssl s_server's "K" command).
 func TestOpenSSLKeyUpdate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("openssl s_server driven through a stdin pipe does not answer on Windows")
+	}
 	bin, err := exec.LookPath("openssl")
 	if err != nil {
 		t.Skip("no openssl")
@@ -445,9 +449,11 @@ func TestOpenSSLKeyUpdate(t *testing.T) {
 	for i := 0; ; i++ {
 		nc, err := net.Dial("tcp", addr)
 		if err == nil {
+			_ = nc.SetDeadline(time.Now().Add(10 * time.Second))
 			if c, err = Client(nc, &Config{ServerName: "localhost", RootCAs: roots(t, ca.cert)}); err != nil {
 				t.Fatal(err)
 			}
+			_ = nc.SetDeadline(time.Time{})
 			break
 		}
 		if i == 50 {

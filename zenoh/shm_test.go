@@ -4,8 +4,6 @@ package zenoh
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"testing"
 	"time"
@@ -14,15 +12,6 @@ import (
 )
 
 // pattern matches zpeer.py's pattern().
-func pattern(n int) []byte {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = byte((i*7 + 3) % 251)
-	}
-	return b
-}
-
-func sum(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 
 func openShmPeer(t *testing.T, connect ...string) *Session {
 	t.Helper()

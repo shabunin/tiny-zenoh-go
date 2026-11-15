@@ -5,6 +5,7 @@ package link
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -31,6 +32,7 @@ func TestUnixPipe(t *testing.T) {
 	stale.Close()
 
 	ln, err := Listen(loc + "#file_mask=384")
+	skipNoFIFOLock(t, err)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,6 +69,7 @@ func TestUnixPipe(t *testing.T) {
 func TestUnixPipeWire(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zp")
 	ln, err := Listen("unixpipe/" + path)
+	skipNoFIFOLock(t, err)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,5 +116,14 @@ func TestUnixPipeWire(t *testing.T) {
 	_ = r.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := r.Read(buf); err != nil || string(buf) != "hi" {
 		t.Fatalf("read %q %v", buf, err)
+	}
+}
+
+// skipNoFIFOLock skips where FIFOs can't be locked (macOS: flock on a FIFO is
+// ENOTSUP), which unixpipe needs to tell a live listener from a stale file.
+func skipNoFIFOLock(t *testing.T, err error) {
+	t.Helper()
+	if errors.Is(err, syscall.ENOTSUP) {
+		t.Skipf("unixpipe is not usable on this platform: %v", err)
 	}
 }
