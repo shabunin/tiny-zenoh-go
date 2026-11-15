@@ -55,8 +55,10 @@ func lingerBurst(t *testing.T, n int, linger time.Duration) int {
 			ach <- nil
 			return
 		}
-		// A short lease: keep-alives every 100 ms.
-		a, _ := Accept(c, Config{ZID: testZID(t), WhatAmI: protocol.Peer, QoS: true, Lease: 400 * time.Millisecond},
+		// A short lease: keep-alives every 500 ms. The sender stops lingering
+		// after half of it without them, so a shorter one is at the mercy of
+		// a loaded CI runner (macOS, 200 ms: a late keep-alive lost the tail).
+		a, _ := Accept(c, Config{ZID: testZID(t), WhatAmI: protocol.Peer, QoS: true, Lease: 2 * time.Second},
 			Callbacks{
 				OnMessage: func(protocol.Message, bool) error {
 					time.Sleep(time.Millisecond)
