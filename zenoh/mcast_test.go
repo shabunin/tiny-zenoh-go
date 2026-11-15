@@ -21,7 +21,7 @@ func mcastLocator(t *testing.T) string {
 	}
 	ifname, err := link.DefaultMulticastInterface()
 	if err != nil {
-		t.Skip(err)
+		t.Fatal(err) // asked for multicast tests: no silent skip
 	}
 	return fmt.Sprintf("udp/224.0.0.%d:%d#iface=%s", 200+rand.IntN(50), 20000+rand.IntN(20000), ifname)
 }
