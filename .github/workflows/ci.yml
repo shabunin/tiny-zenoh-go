@@ -33,9 +33,10 @@ jobs:
           done
 
   # Unit tests plus interop against zenoh-rust: zenohd routers, the Python
-  # binding, zenohd's replicated storages, InfluxDB 1.x/2.x and an S3 server.
-  # Tests needing locally built binaries (zenoh-pico, Rust helpers) and
-  # multicast skip themselves here; see "Running the tests" in README.md.
+  # binding, zenohd's replicated storages, InfluxDB 1.x/2.x and an S3 server,
+  # and multicast (scouting and groups, between processes on the runner).
+  # Tests needing locally built binaries (zenoh-pico, Rust helpers) skip
+  # themselves here; see "Running the tests" in README.md.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -93,6 +94,7 @@ jobs:
           INFLUXDB1_URL: http://127.0.0.1:18086
           INFLUXDB2_URL: http://127.0.0.1:18087
           S3_URL: http://127.0.0.1:18333
+          ZENOH_MULTICAST: 1
         run: |
           if [ "${{ matrix.router }}" = zenohd ]; then
             export ZENOH_ROUTER=tcp/127.0.0.1:7447

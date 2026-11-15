@@ -43,8 +43,8 @@ been audited. The API may change before 1.0. What backs it:
   zenoh-pico, Rust peers and zenoh-rust's storage backends, 32 fuzz targets,
   all under the race detector; about 85% statement coverage with the interop
   suites (79% without). CI runs the unit tests and the zenohd, Python,
-  replication, InfluxDB and S3 interop tests on every push; the zenoh-pico,
-  Rust-helper and multicast tests run locally (see
+  replication, InfluxDB, S3 and multicast tests on every push; the
+  zenoh-pico and Rust-helper tests run locally (see
   [Running the tests](#running-the-tests)).
 - **Network lab:** containerlab scenarios in [`lab/`](lab/) (failover,
   partitions, gateways, netem loss and delay, grids of up to 225 routers
