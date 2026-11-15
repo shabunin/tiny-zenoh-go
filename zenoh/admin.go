@@ -18,7 +18,7 @@ import (
 type transportLinkInfo = transport.LinkInfo
 
 // Version is the library version reported in the admin space.
-const Version = "v0.1.3"
+const Version = "v0.1.4"
 
 // versionString is what the admin space reports as "version" (zenoh-rust:
 // LONG_VERSION, "v1.10.2-<commit> built with rustc ...").
