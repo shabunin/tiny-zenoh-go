@@ -129,7 +129,7 @@ func (f *face) send(reliable bool, msgs ...transport.Encoder) error {
 		// put every caller's variadic list on the heap.
 		return f.sendFiltered(reliable, append([]transport.Encoder(nil), msgs...))
 	}
-	return f.sendNow(reliable, msgs)
+	return f.sendNow(reliable, msgs, nil)
 }
 
 // enqueue queues control messages (declarations, link states) for the next
@@ -160,16 +160,19 @@ func (f *face) sendFiltered(reliable bool, msgs []transport.Encoder) error {
 			return nil
 		}
 	}
+	var done func(error)
 	if f.shm != nil {
-		var sent func()
-		msgs, sent = f.toShm(msgs)
-		defer sent()
+		msgs, done = f.toShm(msgs)
 	}
-	return f.sendNow(reliable, msgs)
+	return f.sendNow(reliable, msgs, done)
 }
 
-func (f *face) sendNow(reliable bool, msgs []transport.Encoder) error {
+// sendNow sends msgs; done, if any, gets the transport's error first.
+func (f *face) sendNow(reliable bool, msgs []transport.Encoder, done func(error)) error {
 	err := f.tr.Send(reliable, msgs...)
+	if done != nil {
+		done(err)
+	}
 	ce := congestionOf(err)
 	if ce != nil {
 		// Dropped on congestion, as zenoh does: not an error for the sender.

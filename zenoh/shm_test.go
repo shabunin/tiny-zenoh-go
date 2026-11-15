@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shabunin/tiny-zenoh-go/protocol"
 	"github.com/shabunin/tiny-zenoh-go/shm"
+	"github.com/shabunin/tiny-zenoh-go/transport"
 )
 
 // pattern matches zpeer.py's pattern().
@@ -315,4 +317,42 @@ func TestShmRustPeer(t *testing.T) {
 			t.Errorf("query body: %d bytes", len(body))
 		}
 	})
+}
+
+// Messages the transport dropped on congestion give their shared memory
+// back at once: with a pool that holds one payload, every round must still
+// find room. The dropped list also holds a message toShm left inline.
+func TestShmDroppedReleased(t *testing.T) {
+	m1, err := shm.New(shm.Options{PoolSize: 64 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := shm.New(shm.Options{PoolSize: 64 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m1.Close()
+	defer m2.Close()
+	a, b := m1.NewLink(), m2.NewLink()
+	b.AcceptInitSyn(a.InitSyn())
+	a.InitAck(b.AcceptInitAck())
+	if err := b.AcceptOpenSyn(a.OpenSyn(true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.OpenAck(b.AcceptOpenAck(true)); err != nil {
+		t.Fatal(err)
+	}
+	f := &face{s: &Session{shm: m1}, shm: a}
+	push := func(n int) *protocol.Push {
+		return &protocol.Push{WireExpr: protocol.WireExpr{Suffix: "k"}, QoS: protocol.QoSRequest,
+			Body: &protocol.Put{Payload: make([]byte, n)}}
+	}
+	for round := range 5 {
+		small := push(10)
+		out, done := f.toShm([]transport.Encoder{small, push(48 << 10)})
+		if out[1].(*protocol.Push).Body.(*protocol.Put).Parts == nil {
+			t.Fatalf("round %d: payload not in shared memory (pool still held)", round)
+		}
+		done(&transport.CongestionError{Dropped: []transport.Encoder{small, out[1]}})
+	}
 }

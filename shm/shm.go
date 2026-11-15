@@ -67,20 +67,33 @@ func (o *Options) setDefaults() {
 // ExtID is the INIT/OPEN extension id zenoh uses for SHM negotiation.
 const ExtID = 0x2
 
-// Wrapped is a payload placed in shared memory for one link. Call Sent after
-// the message carrying Parts has been handed to the transport (whether or not
-// that succeeded).
+// Wrapped is a payload placed in shared memory for one link. Once the
+// message carrying Parts has been handed to the transport, call Sent, or
+// Discard if the transport dropped it (it never reached the peer).
 type Wrapped struct {
-	Parts []protocol.PayloadPart
-	sent  func()
+	Parts   []protocol.PayloadPart
+	sent    func()
+	discard func()
 }
 
 // Sent releases the sender's own reference to the buffer.
 func (w *Wrapped) Sent() {
 	if w.sent != nil {
 		w.sent()
-		w.sent = nil
 	}
+	w.sent, w.discard = nil, nil
+}
+
+// Discard takes back the reference given to the peer, which will never
+// read it, and releases the sender's own.
+func (w *Wrapped) Discard() {
+	if w.discard != nil {
+		w.discard()
+	}
+	if w.sent != nil {
+		w.sent()
+	}
+	w.sent, w.discard = nil, nil
 }
 
 var _ transport.HandshakeExt = (*Link)(nil)

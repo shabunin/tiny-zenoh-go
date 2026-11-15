@@ -113,3 +113,87 @@ func TestPoolExhaustion(t *testing.T) {
 		t.Errorf("fit %d 100KiB buffers in 1MiB", len(ws))
 	}
 }
+
+// waitFreed waits until m has no chunk allocated any more.
+func waitFreed(t *testing.T, m *Manager) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		g.mu.Lock()
+		n := len(m.busy)
+		g.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d chunk(s) never reclaimed", n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A message the transport dropped gives its references back: the handoff
+// counter must not stay up (it would keep later buffers held for good) and
+// the chunk must be freed.
+func TestDiscard(t *testing.T) {
+	for _, reliable := range []bool{true, false} {
+		m1, _, a, b := pair(t, reliable)
+		prio := protocol.PriorityData
+		data := bytes.Repeat([]byte("x"), 8<<10)
+		var ws []*Wrapped
+		for range 3 {
+			w, err := a.Wrap(data, prio)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ws = append(ws, w)
+		}
+		ws[0].Sent()
+		ws[1].Discard() // dropped on congestion: never reaches b
+		ws[1].Sent()    // no-op once discarded
+		ws[2].Sent()
+		for _, i := range []int{0, 2} {
+			if _, err := b.Resolve(ws[i].Parts, prio); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// Zero-copy: the application's buffer, given to a dropped message.
+		buf, err := m1.Alloc(4 << 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wb, err := a.WrapBuf(buf, prio)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wb.Discard()
+		if n := atomic.LoadUint32(buf.h.refcount()); n != 1 {
+			t.Errorf("refcount after discarding a zero-copy handoff = %d, want 1", n)
+		}
+		buf.Close()
+
+		waitFreed(t, m1)
+		g.mu.Lock()
+		if reliable && (len(a.pending[prio]) != 0 || atomic.LoadUint32(m1.counter(a.txIDs[prio])) != 0) {
+			t.Errorf("handoff state left: %d pending, counter %d",
+				len(a.pending[prio]), atomic.LoadUint32(m1.counter(a.txIDs[prio])))
+		}
+		if !reliable && len(a.timed) != 2 { // the two delivered ones keep theirs
+			t.Errorf("%d timed holds, want 2", len(a.timed))
+		}
+		g.mu.Unlock()
+	}
+}
+
+// Discarding after the link closed only drops the receiver's reference.
+func TestDiscardAfterClose(t *testing.T) {
+	m1, _, a, _ := pair(t, true)
+	w, err := a.Wrap(make([]byte, 8<<10), protocol.PriorityData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+	w.Discard()
+	waitFreed(t, m1)
+}

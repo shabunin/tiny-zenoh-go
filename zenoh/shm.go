@@ -2,6 +2,7 @@ package zenoh
 
 import (
 	"errors"
+	"slices"
 	"sync/atomic"
 
 	"github.com/shabunin/tiny-zenoh-go/protocol"
@@ -93,17 +94,26 @@ func (f *face) unshm(m protocol.Message) error {
 	return nil
 }
 
+// shmSent is a message whose payload toShm moved to shared memory.
+type shmSent struct {
+	msg transport.Encoder
+	w   *shm.Wrapped
+}
+
 // toShm returns msgs with large payloads moved to shared memory for this
-// face, and a function to call once they were handed to the transport.
-// Messages are copied, never modified: the same message may go to several
-// faces.
-func (f *face) toShm(msgs []transport.Encoder) ([]transport.Encoder, func()) {
-	var wrapped []*shm.Wrapped
+// face, and a function to call with the transport's Send error once they
+// were handed to it: messages it dropped on congestion get their shared
+// memory references back. Messages are copied, never modified: the same
+// message may go to several faces.
+func (f *face) toShm(msgs []transport.Encoder) ([]transport.Encoder, func(error)) {
+	var wrapped []shmSent
+	var last *shm.Wrapped // set by wrap for the message being converted
 	threshold := f.s.shm.Threshold()
 	wrap := func(payload []byte, qos protocol.QoS, src any) []protocol.PayloadPart {
 		if b, ok := src.(*shm.Buf); ok && b != nil {
 			if w, err := f.shm.WrapBuf(b, qos.Priority()); err == nil {
 				shmStats.zeroCopy.Add(1)
+				last = w
 				return w.Parts
 			}
 		}
@@ -114,13 +124,14 @@ func (f *face) toShm(msgs []transport.Encoder) ([]transport.Encoder, func()) {
 		if err != nil {
 			return nil // e.g. pool exhausted: send it inline
 		}
-		wrapped = append(wrapped, w)
 		shmStats.wrapped.Add(1)
+		last = w
 		return w.Parts
 	}
 	var out []transport.Encoder
 	for i, e := range msgs {
 		var repl transport.Encoder
+		last = nil
 		switch m := e.(type) {
 		case *protocol.Push:
 			if p, ok := m.Body.(*protocol.Put); ok && p.Parts == nil {
@@ -169,14 +180,27 @@ func (f *face) toShm(msgs []transport.Encoder) ([]transport.Encoder, func()) {
 				out = append([]transport.Encoder(nil), msgs...)
 			}
 			out[i] = repl
+			if last != nil {
+				wrapped = append(wrapped, shmSent{repl, last})
+			}
 		}
 	}
 	if out == nil {
-		return msgs, func() {}
+		return msgs, func(error) {}
 	}
-	return out, func() {
-		for _, w := range wrapped {
-			w.Sent()
+	return out, func(err error) {
+		var dropped []transport.Encoder
+		if ce := congestionOf(err); ce != nil {
+			// Never queued. On other errors some messages may be on their
+			// way: the link is going down, and closing it releases them.
+			dropped = ce.Dropped
+		}
+		for _, s := range wrapped {
+			if slices.Contains(dropped, s.msg) {
+				s.w.Discard()
+			} else {
+				s.w.Sent()
+			}
 		}
 	}
 }

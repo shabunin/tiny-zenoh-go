@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -865,7 +866,8 @@ func (l *Link) Wrap(payload []byte, prio protocol.Priority) (*Wrapped, error) {
 }
 
 // WrapBuf gives the peer of this link a reference to b, without copying.
-// The result's Parts replace the message payload (Sent has nothing to do).
+// The result's Parts replace the message payload (Sent has nothing to do;
+// Discard takes the reference back if the message was dropped).
 func (l *Link) WrapBuf(b *Buf, prio protocol.Priority) (*Wrapped, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -873,17 +875,48 @@ func (l *Link) WrapBuf(b *Buf, prio protocol.Priority) (*Wrapped, error) {
 		return nil, ErrInvalidBuffer
 	}
 	k := confirmKey{b.h, b.info.Generation}
+	p := int(prio) & (numPrio - 1)
 	atomic.AddUint32(b.h.refcount(), 1) // the receiver's reference
 	holdLocked(k)                       // kept confirmed until the receiver has it
 	if l.txIDs != nil {
-		p := int(prio) & (numPrio - 1)
 		atomic.AddUint32(l.m.counter(l.txIDs[p]), 1)
 		l.pending[p] = append(l.pending[p], k)
 	} else {
 		l.timed = append(l.timed, timedHold{k, time.Now().Add(disabledHold)})
 	}
 	info := b.info
-	return &Wrapped{Parts: []protocol.PayloadPart{{Shm: &info}}}, nil
+	return &Wrapped{
+		Parts:   []protocol.PayloadPart{{Shm: &info}},
+		discard: func() { l.unwrap(k, p) },
+	}, nil
+}
+
+// unwrap undoes WrapBuf for a message the transport dropped: the receiver
+// never acknowledges it, so its handoff counter would stay up for good and
+// keep the buffers sent after it held, and its reference would keep the
+// buffer allocated until the watchdog gave up on it.
+func (l *Link) unwrap(k confirmKey, p int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.confirms == nil {
+		return // every Manager closed: segments unmapped
+	}
+	if !l.closed { // closeLocked already released the handoff state
+		if l.txIDs != nil {
+			if i := slices.Index(l.pending[p], k); i >= 0 {
+				l.pending[p] = slices.Delete(l.pending[p], i, i+1)
+				atomic.AddUint32(l.m.counter(l.txIDs[p]), ^uint32(0))
+				unholdLocked(k)
+			}
+		} else if i := slices.IndexFunc(l.timed, func(t timedHold) bool { return t.k == k }); i >= 0 {
+			l.timed = slices.Delete(l.timed, i, i+1)
+			unholdLocked(k)
+		}
+	}
+	// Only while the allocation is the one we referenced (not reclaimed).
+	if k.h.generation() == k.gen && atomic.LoadUint32(k.h.refcount()) > 0 {
+		atomic.AddUint32(k.h.refcount(), ^uint32(0))
+	}
 }
 
 // Resolve assembles a payload received in parts, reading shared-memory
