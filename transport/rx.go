@@ -53,6 +53,17 @@ func (r *rxState) frame(rd *codec.Reader) error {
 	if err != nil {
 		return err
 	}
+	if accept {
+		// Any earlier incomplete fragment chain on this channel cannot resume
+		// across a valid FRAME (e.g., an unpatched sender dropped its tail).
+		i := 0
+		if fh.Reliable {
+			i = 1
+		}
+		if s := &r.frag[prio][i]; s.active {
+			s.buf, s.active, s.skip = s.buf[:0], false, false
+		}
+	}
 	for rd.Remaining() > 0 {
 		if h, _ := rd.PeekByte(); protocol.IsTransportID(h) {
 			break

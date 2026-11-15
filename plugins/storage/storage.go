@@ -349,13 +349,16 @@ func (m *Storage) processLocked(ke string, kind zenoh.SampleKind, payload []byte
 	act := actionOf(kind)
 	var keys []string
 	if !keyexpr.IsConcrete(ke) {
-		m.registerWildLocked(ke, kind, ts, payload, enc)
-		act = action{kind: actWildPut, wild: ke}
-		if kind == zenoh.SampleKindDelete {
-			act.kind = actWildDel
+		if m.registerWildLocked(ke, kind, ts, payload, enc) {
+			act = action{kind: actWildPut, wild: ke}
+			if kind == zenoh.SampleKindDelete {
+				act.kind = actWildDel
+			}
+			ev := newEvent(ke, true, ts, act)
+			if cur := m.latest[ev.logKey()]; cur == nil || tsLess(cur.ts, ts) {
+				m.latest[ev.logKey()] = ev
+			}
 		}
-		ev := newEvent(ke, true, ts, act)
-		m.latest[ev.logKey()] = ev
 		keys = m.matchingLocked(ke)
 	} else {
 		keys = []string{ke}
@@ -410,13 +413,17 @@ func (m *Storage) isLatestLocked(ev *event) bool {
 	return true
 }
 
-func (m *Storage) registerWildLocked(ke string, kind zenoh.SampleKind, ts zenoh.Timestamp, payload []byte, enc zenoh.Encoding) {
+func (m *Storage) registerWildLocked(ke string, kind zenoh.SampleKind, ts zenoh.Timestamp, payload []byte, enc zenoh.Encoding) bool {
 	u := &update{kind: kind, stored: stored{payload, enc, ts}}
+	w := m.wildDels
 	if kind == zenoh.SampleKindPut {
-		m.wildPuts[ke] = u
-	} else {
-		m.wildDels[ke] = u
+		w = m.wildPuts
 	}
+	if prev, ok := w[ke]; ok && !tsLess(prev.ts, ts) {
+		return false
+	}
+	w[ke] = u
+	return true
 }
 
 // overridingLocked is zenoh's overriding_wild_update: for a put, delete or
@@ -498,6 +505,9 @@ func (m *Storage) onQuery(q *zenoh.Query) {
 }
 
 func (m *Storage) gcLoop() {
+	if m.cfg.GCPeriod <= 0 {
+		return
+	}
 	t := time.NewTicker(m.cfg.GCPeriod)
 	defer t.Stop()
 	for {
@@ -513,7 +523,12 @@ func (m *Storage) gcLoop() {
 // gc forgets wildcard updates and (without replication) cached events
 // older than GCLifespan, by their timestamps.
 func (m *Storage) gc(now time.Time) {
-	limit := ntpMillis(zenohNTP(now)) - uint64(m.cfg.GCLifespan.Milliseconds())
+	cur := ntpMillis(zenohNTP(now))
+	life := max(m.cfg.GCLifespan, 0)
+	var limit uint64
+	if ms := uint64(life.Milliseconds()); cur > ms {
+		limit = cur - ms
+	}
 	old := func(ts zenoh.Timestamp) bool { return ntpMillis(ts.Time) < limit }
 	m.mu.Lock()
 	defer m.mu.Unlock()

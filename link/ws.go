@@ -61,6 +61,7 @@ type wsConn struct {
 
 	wmu       sync.Mutex
 	closeSent bool
+	closeOnce sync.Once
 
 	rest []byte // unread part of the current message
 	msg  []byte
@@ -83,7 +84,9 @@ func dialWS(l Locator, timeout time.Duration) (transport.Link, error) {
 	if tc, ok := c.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
 	}
-	_ = c.SetDeadline(time.Now().Add(timeout))
+	if timeout > 0 {
+		_ = c.SetDeadline(time.Now().Add(timeout))
+	}
 	var nonce [16]byte
 	binary.LittleEndian.PutUint64(nonce[:8], rand.Uint64())
 	binary.LittleEndian.PutUint64(nonce[8:], rand.Uint64())
@@ -226,11 +229,28 @@ func (w *wsConn) readMessage() ([]byte, error) {
 				return nil, err
 			}
 			n = uint64(binary.BigEndian.Uint16(hdr[:2]))
+			if n < 126 {
+				return nil, fmt.Errorf("%w: non-canonical 16-bit length", errWSProtocol)
+			}
 		case 127:
 			if _, err := io.ReadFull(w.br, hdr[:8]); err != nil {
 				return nil, err
 			}
 			n = binary.BigEndian.Uint64(hdr[:8])
+			if n < 0x10000 {
+				return nil, fmt.Errorf("%w: non-canonical 64-bit length", errWSProtocol)
+			}
+		}
+		if op >= 0x8 {
+			if !fin {
+				return nil, fmt.Errorf("%w: fragmented control frame", errWSProtocol)
+			}
+			if n > 125 {
+				return nil, fmt.Errorf("%w: control frame too large", errWSProtocol)
+			}
+			if op != wsClose && op != wsPing && op != wsPong {
+				return nil, fmt.Errorf("%w: unknown control opcode %#x", errWSProtocol, op)
+			}
 		}
 		var mask [4]byte
 		if masked {
@@ -301,10 +321,17 @@ func (w *wsConn) Read(b []byte) (int, error) {
 	return n, nil
 }
 
+func (w *wsConn) LocalAddr() net.Addr  { return w.c.LocalAddr() }
+func (w *wsConn) RemoteAddr() net.Addr { return w.c.RemoteAddr() }
+
 func (w *wsConn) Close() error {
-	_ = w.c.SetWriteDeadline(time.Now().Add(time.Second))
-	_ = w.writeFrame(wsClose, nil)
-	return w.c.Close()
+	var err error
+	w.closeOnce.Do(func() {
+		_ = w.c.SetWriteDeadline(time.Now().Add(time.Second))
+		_ = w.writeFrame(wsClose, nil)
+		err = w.c.Close()
+	})
+	return err
 }
 
 type wsListener struct {

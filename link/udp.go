@@ -74,6 +74,8 @@ type udpListener struct {
 // errNoUDPListen is returned by UDP listeners in TinyGo builds.
 var errNoUDPListen = errors.New("link: udp listeners are not available in TinyGo builds")
 
+const udpMaxLinks = 1024
+
 func listenUDP(l Locator, bound Locator) (Listener, error) {
 	if !udpCanListen {
 		return nil, errNoUDPListen
@@ -117,6 +119,10 @@ func (ln *udpListener) readLoop() {
 		c := ln.links[key]
 		fresh := c == nil
 		if fresh {
+			if len(ln.links) >= udpMaxLinks {
+				ln.mu.Unlock()
+				continue
+			}
 			c = &udpLink{ln: ln, addr: addr, key: key, in: make(chan []byte, udpQueue), done: make(chan struct{})}
 			ln.links[key] = c
 		}
@@ -126,6 +132,15 @@ func (ln *udpListener) readLoop() {
 			case ln.accept <- c:
 			case <-ln.done:
 				return
+			default:
+				// Accept queue is full: drop instead of stalling active links.
+				ln.mu.Lock()
+				if ln.links[key] == c {
+					delete(ln.links, key)
+				}
+				ln.mu.Unlock()
+				c.shut()
+				continue
 			}
 		}
 		pkt := append([]byte(nil), buf[:n]...)
@@ -176,6 +191,9 @@ type udpLink struct {
 var _ transport.PacketLink = (*udpLink)(nil)
 
 func (c *udpLink) MTU() int { return udpMTU() }
+
+func (c *udpLink) LocalAddr() net.Addr  { return c.ln.pc.LocalAddr() }
+func (c *udpLink) RemoteAddr() net.Addr { return c.addr }
 
 func (c *udpLink) Read(b []byte) (int, error) {
 	var timeout <-chan time.Time

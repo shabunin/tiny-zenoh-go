@@ -14,9 +14,15 @@ var ErrTLSConfig = errors.New("link: tls configuration")
 // first, then the file named in the TLSConfig, then its PEM bytes.
 func tlsMaterial(cfg map[string]string, key, file string, data []byte) ([]byte, error) {
 	if v, ok := cfg[key+"_raw"]; ok {
+		if v == "" {
+			return nil, fmt.Errorf("%w: empty %s_raw", ErrTLSConfig, key)
+		}
 		return []byte(v), nil
 	}
 	if v, ok := cfg[key+"_base64"]; ok {
+		if v == "" {
+			return nil, fmt.Errorf("%w: empty %s_base64", ErrTLSConfig, key)
+		}
 		b, err := base64.StdEncoding.DecodeString(v)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s_base64: %v", ErrTLSConfig, key, err)
@@ -24,6 +30,9 @@ func tlsMaterial(cfg map[string]string, key, file string, data []byte) ([]byte, 
 		return b, nil
 	}
 	if v, ok := cfg[key+"_file"]; ok {
+		if v == "" {
+			return nil, fmt.Errorf("%w: empty %s_file", ErrTLSConfig, key)
+		}
 		file = v
 	}
 	if file == "" {

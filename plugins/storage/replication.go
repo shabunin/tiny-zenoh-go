@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shabunin/tiny-zenoh-go/keyexpr"
 	"github.com/shabunin/tiny-zenoh-go/zenoh"
 )
 
@@ -33,14 +34,23 @@ type replicator struct {
 	alignerKey string
 	sub        *zenoh.Subscriber
 	qbl        *zenoh.Queryable
+	ct         *zenoh.CancellationToken
 	stop       chan struct{}
+	mu         sync.Mutex
+	stopped    bool
 	wg         sync.WaitGroup
 }
 
 func alignerKey(zid, fp string) string { return "@zid/" + zid + "/" + fp + "/aligner" }
 
 func startReplication(m *Storage) (*replicator, error) {
-	r := &replicator{m: m, rc: *m.cfg.Replication, fp: fmt.Sprint(m.log.cfgFP), stop: make(chan struct{})}
+	r := &replicator{
+		m:    m,
+		rc:   *m.cfg.Replication,
+		fp:   fmt.Sprint(m.log.cfgFP),
+		ct:   zenoh.NewCancellationToken(),
+		stop: make(chan struct{}),
+	}
 	zid := m.s.ZID().String()
 	r.digestKey = "@-digest/" + zid + "/" + r.fp
 	r.alignerKey = alignerKey(zid, r.fp)
@@ -61,10 +71,28 @@ func startReplication(m *Storage) (*replicator, error) {
 }
 
 func (r *replicator) close() error {
+	r.mu.Lock()
+	r.stopped = true
+	r.mu.Unlock()
 	close(r.stop)
+	r.ct.Cancel()
 	err := errors.Join(r.sub.Undeclare(), r.qbl.Undeclare())
 	r.wg.Wait()
 	return err
+}
+
+func (r *replicator) spawnAligner(key string, q *alignQuery) {
+	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		return
+	}
+	r.wg.Add(1)
+	r.mu.Unlock()
+	go func() {
+		defer r.wg.Done()
+		r.queryAligner(key, q)
+	}()
 }
 
 func (r *replicator) sleep(d time.Duration) bool {
@@ -128,7 +156,7 @@ func (r *replicator) publishDigests() {
 
 func (r *replicator) onDigest(s zenoh.Sample) {
 	parts := strings.Split(s.KeyExpr, "/")
-	if len(parts) != 3 {
+	if len(parts) != 3 || parts[1] == "" || !keyexpr.IsConcrete(parts[1]) || keyexpr.Validate(parts[1]) != nil {
 		return
 	}
 	other, err := decodeDigest(s.Payload)
@@ -139,7 +167,7 @@ func (r *replicator) onDigest(s zenoh.Sample) {
 	mine := r.m.log.digest(time.Now())
 	r.m.mu.Unlock()
 	if d := mine.diff(other); d != nil {
-		go r.queryAligner(alignerKey(parts[1], r.fp), &alignQuery{kind: qDiff, diff: *d})
+		r.spawnAligner(alignerKey(parts[1], r.fp), &alignQuery{kind: qDiff, diff: *d})
 	}
 }
 
@@ -155,7 +183,7 @@ func (r *replicator) queryAligner(key string, q *alignQuery) {
 	if q.kind == qDiscovery {
 		cons = zenoh.ConsolidationMonotonic
 	}
-	replies, err := r.m.s.Get(key, zenoh.WithQueryAttachment(encodeQuery(q)), zenoh.WithConsolidation(cons))
+	replies, err := r.m.s.Get(key, zenoh.WithQueryAttachment(encodeQuery(q)), zenoh.WithConsolidation(cons), zenoh.WithCancellation(r.ct))
 	if err != nil {
 		return
 	}
@@ -216,7 +244,7 @@ func (r *replicator) onAlignQuery(q *zenoh.Query) {
 	case qDiff:
 		if aq.diff.coldDiffer {
 			m.mu.Lock()
-			warmLow := m.log.lastElapsed(time.Now()) - m.log.hot - m.log.warm + 1
+			warmLow := m.log.warmLow(m.log.lastElapsed(time.Now()))
 			ivs := map[uint64]uint64{}
 			for idx, iv := range m.log.intervals {
 				if idx < warmLow {
@@ -314,7 +342,10 @@ func (r *replicator) processReply(alignerKe string, ar *alignReply, smp *zenoh.S
 	m := r.m
 	switch ar.kind {
 	case rDiscovery:
-		go r.queryAligner(alignerKey(ar.zid, r.fp), &alignQuery{kind: qAll})
+		if ar.zid == "" || !keyexpr.IsConcrete(ar.zid) || keyexpr.Validate(ar.zid) != nil {
+			return
+		}
+		r.spawnAligner(alignerKey(ar.zid, r.fp), &alignQuery{kind: qAll})
 	case rIntervals:
 		var diff []uint64
 		m.mu.Lock()
@@ -325,7 +356,7 @@ func (r *replicator) processReply(alignerKe string, ar *alignReply, smp *zenoh.S
 		}
 		m.mu.Unlock()
 		if len(diff) > 0 {
-			go r.queryAligner(alignerKe, &alignQuery{kind: qIntervals, intervals: diff})
+			r.spawnAligner(alignerKe, &alignQuery{kind: qIntervals, intervals: diff})
 		}
 	case rSubIntervals:
 		diff := map[uint64][]uint64{}
@@ -338,11 +369,13 @@ func (r *replicator) processReply(alignerKe string, ar *alignReply, smp *zenoh.S
 					d = append(d, s)
 				}
 			}
-			diff[idx] = d
+			if len(d) > 0 {
+				diff[idx] = d
+			}
 		}
 		m.mu.Unlock()
 		if len(diff) > 0 {
-			go r.queryAligner(alignerKe, &alignQuery{kind: qSubIntervals, subs: diff})
+			r.spawnAligner(alignerKe, &alignQuery{kind: qSubIntervals, subs: diff})
 		}
 	case rEventsMetadata:
 		var missing []eventMeta
@@ -354,12 +387,28 @@ func (r *replicator) processReply(alignerKe string, ar *alignReply, smp *zenoh.S
 		}
 		m.mu.Unlock()
 		if len(missing) > 0 {
-			go r.queryAligner(alignerKe, &alignQuery{kind: qEvents, events: missing})
+			r.spawnAligner(alignerKe, &alignQuery{kind: qEvents, events: missing})
 		}
 	case rRetrieval:
 		m.mu.Lock()
 		r.processRetrievalLocked(ar.event, smp.Payload, smp.Encoding)
 		m.mu.Unlock()
+	}
+}
+
+func (r *replicator) validEvent(ev *eventMeta) bool {
+	m := r.m
+	switch ev.act.kind {
+	case actPut, actDelete:
+		if !ev.hasKey && m.cfg.StripPrefix == "" {
+			return false
+		}
+		full := m.full(ev.key, ev.hasKey)
+		return full != "" && keyexpr.IsConcrete(full) && keyexpr.Validate(full) == nil && keyexpr.Intersect(full, m.cfg.KeyExpr)
+	case actWildPut, actWildDel:
+		return keyexpr.Validate(ev.act.wild) == nil && !keyexpr.IsConcrete(ev.act.wild) && keyexpr.Intersect(ev.act.wild, m.cfg.KeyExpr)
+	default:
+		return false
 	}
 }
 
@@ -373,7 +422,7 @@ func (r *replicator) cachedNewerLocked(ev *eventMeta) bool {
 // whether its value must be retrieved (zenoh's process_event_metadata).
 func (r *replicator) processEventMetaLocked(ev eventMeta) bool {
 	m := r.m
-	if r.cachedNewerLocked(&ev) || !r.needsProcessingLocked(&ev) {
+	if !r.validEvent(&ev) || r.cachedNewerLocked(&ev) || !r.needsProcessingLocked(&ev) {
 		return false
 	}
 	switch ev.act.kind {
@@ -399,7 +448,7 @@ func (r *replicator) processEventMetaLocked(ev eventMeta) bool {
 // process_event_retrieval).
 func (r *replicator) processRetrievalLocked(ev eventMeta, payload []byte, enc zenoh.Encoding) {
 	m := r.m
-	if r.cachedNewerLocked(&ev) || !r.needsProcessingLocked(&ev) {
+	if !r.validEvent(&ev) || r.cachedNewerLocked(&ev) || !r.needsProcessingLocked(&ev) {
 		return
 	}
 	m.log.removeOlder(&ev)

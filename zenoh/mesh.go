@@ -346,19 +346,21 @@ func (s *Session) meshLinkUp(f *face) {
 	out.send()
 }
 
-// meshLinkDown removes a neighbour router.
-func (s *Session) meshLinkDown(f *face, out outbox) {
+// meshLinkDown removes a neighbour router and returns keys of remote tokens
+// that lost their last source.
+func (s *Session) meshLinkDown(f *face, out outbox) []string {
 	m := s.meshOf(f)
 	if m == nil || m.net.links[f] == nil {
-		return
+		return nil
 	}
 	removed, sends := m.net.removeLink(f)
 	if meshTrace {
 		mtrace("link down %s, removed %v", f.zid, removed)
 	}
 	s.queueLinkStates(sends, out)
-	s.meshRoutersGoneLocked(m, removed, out)
+	goneTokens := s.meshRoutersGoneLocked(m, removed, out)
 	s.meshTreesChangedLocked(m, out)
+	return goneTokens
 }
 
 // meshOAM handles a link-state message from neighbour router f.
@@ -383,13 +385,16 @@ func (s *Session) meshOAM(f *face, m *protocol.OAM) {
 		mtrace("link states from %s: changed [%s] removed %v", f.zid, mesh.net.names(mesh.net.changed), removed)
 	}
 	s.queueLinkStates(sends, out)
-	s.meshRoutersGoneLocked(mesh, removed, out)
+	goneTokens := s.meshRoutersGoneLocked(mesh, removed, out)
 	// Stale lists (the same states come over every link) change nothing.
 	if mesh.net.singlehop || len(mesh.net.changed) > 0 || len(removed) > 0 {
 		s.meshTreesChangedLocked(mesh, out)
 	}
 	s.mu.Unlock()
 	out.send()
+	for _, key := range goneTokens {
+		s.livelinessEvent(nil, key, SampleKindDelete)
+	}
 }
 
 func (s *Session) queueLinkStates(sends []lsSend, out outbox) {
@@ -399,10 +404,11 @@ func (s *Session) queueLinkStates(sends []lsSend, out outbox) {
 	}
 }
 
-// meshRoutersGoneLocked forgets the entities sourced by unreachable routers.
-func (s *Session) meshRoutersGoneLocked(m *meshState, removed []ZID, out outbox) {
+// meshRoutersGoneLocked forgets the entities sourced by unreachable routers and
+// returns keys of remote tokens that have no remaining source.
+func (s *Session) meshRoutersGoneLocked(m *meshState, removed []ZID, out outbox) []string {
 	if len(removed) == 0 {
-		return
+		return nil
 	}
 	gone := map[string]bool{}
 	for _, z := range removed {
@@ -433,9 +439,14 @@ func (s *Session) meshRoutersGoneLocked(m *meshState, removed []ZID, out outbox)
 	if meshTrace {
 		mtrace("gone: routers %v, %d entities lost a source", removed, len(changes))
 	}
+	var goneTokens []string
 	for _, c := range changes {
 		s.routerUpdateLocked(c.k, c.key, nil, out)
+		if c.k == kindToken && !s.tokenKnownElsewhereLocked(c.key, "") {
+			goneTokens = append(goneTokens, c.key)
+		}
 	}
+	return goneTokens
 }
 
 // treesDelay is how long after a change of the graph the trees are

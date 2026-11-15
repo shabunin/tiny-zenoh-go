@@ -254,6 +254,10 @@ func (as *AdvancedSubscriber) seqSourceLocked(si *SourceInfo) (*seqSource, bool)
 	return st, true
 }
 
+// advMaxPending bounds the out-of-order samples kept per source while
+// recovery is pending.
+const advMaxPending = 4096
+
 func (as *AdvancedSubscriber) missLocked(si *SourceInfo, n uint32) {
 	m := Miss{Source: EntityGlobalID{ZID: si.ZID, EID: si.EID}, Count: n}
 	for _, cb := range as.misses {
@@ -312,6 +316,15 @@ func (as *AdvancedSubscriber) handleLocked(smp Sample) bool {
 			if snLess(st.last, sn) {
 				if as.recov != nil {
 					st.pending[sn] = smp
+					// Bound what a source can make us hold: past the cap the
+					// oldest goes out, its gap reported as missed.
+					for len(st.pending) > advMaxPending {
+						first := st.sortedSNs()[0]
+						s0 := st.pending[first]
+						delete(st.pending, first)
+						as.missLocked(si, first-st.last-1)
+						as.deliverAndFlushLocked(s0, first, st)
+					}
 				} else {
 					as.missLocked(si, sn-st.last-1)
 					as.cb(smp)

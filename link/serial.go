@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+	"net"
 	"strconv"
 	"sync"
 	"time"
@@ -205,21 +206,34 @@ func (s *Serial) writeFrame(flags byte, payload []byte) error {
 	return err
 }
 
-func (s *Serial) next(timeout <-chan time.Time) (serialFrame, error) {
+func (s *Serial) closedErr() error {
+	s.mu.Lock()
+	err := s.rxErr
+	s.mu.Unlock()
+	if err == nil {
+		err = io.EOF
+	}
+	return err
+}
+
+func (s *Serial) next(abort <-chan struct{}) (serialFrame, error) {
 	select {
+	case <-abort:
+		return serialFrame{}, net.ErrClosed
+	case <-s.done:
+		return serialFrame{}, net.ErrClosed
+	default:
+	}
+	select {
+	case <-abort:
+		return serialFrame{}, net.ErrClosed
+	case <-s.done:
+		return serialFrame{}, net.ErrClosed
 	case f, ok := <-s.rx:
 		if !ok {
-			s.mu.Lock()
-			err := s.rxErr
-			s.mu.Unlock()
-			if err == nil {
-				err = io.EOF
-			}
-			return serialFrame{}, err
+			return serialFrame{}, s.closedErr()
 		}
 		return f, nil
-	case <-timeout:
-		return serialFrame{}, errors.New("link: serial handshake timed out")
 	}
 }
 
@@ -233,17 +247,24 @@ func (s *Serial) Connect(timeout time.Duration) error {
 		deadline = t.C
 	}
 	for {
+		select {
+		case <-s.done:
+			return net.ErrClosed
+		default:
+		}
 		if err := s.writeFrame(serialInit, nil); err != nil {
 			return err
 		}
 		retry := time.NewTimer(serialRetry)
 		for waiting := true; waiting; {
 			select {
+			case <-s.done:
+				retry.Stop()
+				return net.ErrClosed
 			case f, ok := <-s.rx:
 				if !ok {
 					retry.Stop()
-					_, err := s.next(nil)
-					return err
+					return s.closedErr()
 				}
 				switch {
 				case f.flags&(serialInit|serialAck) == serialInit|serialAck:
@@ -293,8 +314,12 @@ func (s *Serial) MTU() int { return SerialMTU }
 // established link means the peer restarted: it is answered with R and the
 // link fails, as zenoh-rust does.
 func (s *Serial) Read(b []byte) (int, error) {
+	return s.read(nil, b)
+}
+
+func (s *Serial) read(abort <-chan struct{}, b []byte) (int, error) {
 	for {
-		f, err := s.next(nil)
+		f, err := s.next(abort)
 		if err != nil {
 			return 0, err
 		}
@@ -400,7 +425,7 @@ func (ln *serialListener) Accept() (transport.Link, error) {
 		ln.free <- struct{}{}
 		return nil, err
 	}
-	return &serialSession{Serial: ln.s, ln: ln}, nil
+	return &serialSession{Serial: ln.s, ln: ln, closed: make(chan struct{})}, nil
 }
 
 func (ln *serialListener) Close() error {
@@ -414,12 +439,39 @@ func (ln *serialListener) Locator() Locator { return ln.loc }
 // next one instead of closing the device.
 type serialSession struct {
 	*Serial
-	ln   *serialListener
-	once sync.Once
+	ln     *serialListener
+	closed chan struct{}
+	once   sync.Once
+	useMu  sync.RWMutex
+}
+
+func (c *serialSession) Read(b []byte) (int, error) {
+	c.useMu.RLock()
+	defer c.useMu.RUnlock()
+	select {
+	case <-c.closed:
+		return 0, net.ErrClosed
+	default:
+	}
+	return c.Serial.read(c.closed, b)
+}
+
+func (c *serialSession) Write(b []byte) (int, error) {
+	c.useMu.RLock()
+	defer c.useMu.RUnlock()
+	select {
+	case <-c.closed:
+		return 0, net.ErrClosed
+	default:
+	}
+	return c.Serial.Write(b)
 }
 
 func (c *serialSession) Close() error {
 	c.once.Do(func() {
+		close(c.closed)
+		c.useMu.Lock()
+		c.useMu.Unlock()
 		c.mu.Lock()
 		c.established = false
 		c.mu.Unlock()

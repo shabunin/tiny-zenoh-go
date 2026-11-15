@@ -62,17 +62,26 @@ func (c *CancellationToken) IsCancelled() bool {
 
 // bind ties a query to the token: cancel runs on Cancel, and the returned
 // callbacks wrap cb (which stops being called once the token is cancelled)
-// and done (which releases the binding). ok is false if already cancelled.
-func (c *CancellationToken) bind(cb func(Reply), done func(), cancel func()) (func(Reply), func(), bool) {
+// and done (which releases the binding). unbind releases the binding without
+// calling done (for setup failures). ok is false if already cancelled.
+func (c *CancellationToken) bind(cb func(Reply), done func(), cancel func()) (func(Reply), func(), func(), bool) {
 	c.mu.Lock()
 	if c.cancelled {
 		c.mu.Unlock()
-		return nil, nil, false
+		return nil, nil, nil, false
+	}
+	if c.handlers == nil {
+		c.handlers = map[uint64]func(){}
 	}
 	c.nextID++
 	reg := c.nextID
 	c.handlers[reg] = cancel
 	c.mu.Unlock()
+	unbind := func() {
+		c.mu.Lock()
+		delete(c.handlers, reg) // nil map after Cancel: no-op
+		c.mu.Unlock()
+	}
 	wcb := func(r Reply) {
 		c.mu.Lock()
 		if c.cancelled {
@@ -85,12 +94,10 @@ func (c *CancellationToken) bind(cb func(Reply), done func(), cancel func()) (fu
 		cb(r)
 	}
 	wdone := func() {
-		c.mu.Lock()
-		delete(c.handlers, reg) // nil map after Cancel: no-op
-		c.mu.Unlock()
+		unbind()
 		if done != nil {
 			done()
 		}
 	}
-	return wcb, wdone, true
+	return wcb, wdone, unbind, true
 }

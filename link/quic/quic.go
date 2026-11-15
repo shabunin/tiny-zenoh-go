@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"sync"
 	"time"
 
@@ -243,6 +244,18 @@ func (c *conn) BestEffort() transport.PacketLink {
 	return c.dg
 }
 
+func peerCommonName(qc *quicgo.Conn) string {
+	certs := qc.ConnectionState().TLS.PeerCertificates
+	if len(certs) == 0 {
+		return ""
+	}
+	return certs[0].Subject.CommonName
+}
+
+func (c *conn) PeerCommonName() string { return peerCommonName(c.qc) }
+func (c *conn) LocalAddr() net.Addr    { return c.qc.LocalAddr() }
+func (c *conn) RemoteAddr() net.Addr   { return c.qc.RemoteAddr() }
+
 func (c *conn) Close() error {
 	c.once.Do(func() {
 		_ = c.Stream.Close()
@@ -263,7 +276,10 @@ type dgram struct {
 
 var _ transport.PacketLink = (*dgram)(nil)
 
-func (d *dgram) MTU() int { return d.mtu }
+func (d *dgram) MTU() int               { return d.mtu }
+func (d *dgram) PeerCommonName() string { return peerCommonName(d.qc) }
+func (d *dgram) LocalAddr() net.Addr    { return d.qc.LocalAddr() }
+func (d *dgram) RemoteAddr() net.Addr   { return d.qc.RemoteAddr() }
 
 func (d *dgram) Read(b []byte) (int, error) {
 	p, err := d.qc.ReceiveDatagram(d.ctx)
@@ -314,8 +330,12 @@ func dial(l link.Locator, timeout time.Duration, o link.Options) (transport.Link
 	}
 	tc.NextProtos = opts.alpn
 	tc.MinVersion = 0x0304 // QUIC requires TLS 1.3
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	qc, err := quicgo.DialAddr(ctx, l.Address, tc, opts.quicConfig())
 	if err != nil {
 		return nil, err

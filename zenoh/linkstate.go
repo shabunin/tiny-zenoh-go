@@ -209,7 +209,10 @@ type lsNode struct {
 type lsLink struct {
 	f        *face
 	mappings map[uint64]ZID // the neighbour's psids
+	seenSelf bool
 }
+
+const maxPSMappings = 8192
 
 type lsTree struct {
 	parent     int   // -1: none
@@ -435,12 +438,13 @@ func (n *lsNetwork) removeLink(f *face) ([]ZID, []lsSend) {
 		return nil, nil
 	}
 	delete(n.links, f)
+	if n.isNeighbour(f.zid) {
+		return nil, nil
+	}
 	delete(n.nodes[0].links, zkey(f.zid))
 	if n.singlehop {
-		if !n.isNeighbour(f.zid) {
-			if i := n.idx(f.zid); i > 0 {
-				n.dropNode(i)
-			}
+		if i := n.idx(f.zid); i > 0 {
+			n.dropNode(i)
 		}
 		return nil, nil
 	}
@@ -481,6 +485,33 @@ func (n *lsNetwork) removeDetached() []ZID {
 	return removed
 }
 
+func equalLinkWeights(a, b map[string]uint16) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+func (l *lsLink) checkSelfReset(srcZID, stZID ZID, st lsLocal, nd *lsNode) bool {
+	if !stZID.Equal(srcZID) {
+		return false
+	}
+	first := !l.seenSelf
+	l.seenSelf = true
+	if !first || nd == nil {
+		return false
+	}
+	if st.ls.sn < nd.sn {
+		return true
+	}
+	return st.ls.sn == nd.sn && (!equalLinkWeights(nd.links, st.links) || (st.ls.hasLoc && !equalStrings(nd.locators, st.ls.locators)))
+}
+
 // linkStates applies a LinkStateList received from neighbour src. It returns
 // the routers that disappeared and the messages to send.
 func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
@@ -493,6 +524,9 @@ func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
 	for _, ls := range list {
 		z := ls.zid
 		if !z.IsZero() {
+			if _, ok := link.mappings[ls.psid]; !ok && len(link.mappings) >= maxPSMappings {
+				continue
+			}
 			link.mappings[ls.psid] = z
 		} else if z = link.mappings[ls.psid]; z.IsZero() {
 			continue // unknown psid
@@ -532,7 +566,8 @@ func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
 		}
 		if i >= 0 {
 			nd := n.nodes[i]
-			if nd.sn >= st.ls.sn {
+			restarted := link.checkSelfReset(src.zid, st.zid, st, nd)
+			if !restarted && nd.sn >= st.ls.sn {
 				continue
 			}
 			old := nd.sn
@@ -547,6 +582,9 @@ func (n *lsNetwork) linkStates(list []linkState, src *face) ([]ZID, []lsSend) {
 				updated[i] = true
 			}
 		} else {
+			if st.zid.Equal(src.zid) {
+				link.seenSelf = true
+			}
 			i = n.addNode(&lsNode{zid: st.zid, whatami: whatami, hasWAI: hasWAI, locators: st.ls.locators,
 				hasLoc: st.ls.hasLoc, sn: st.ls.sn, links: st.links, gateway: st.ls.gateway})
 			newNodes = append(newNodes, i)

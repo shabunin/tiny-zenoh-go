@@ -2,6 +2,7 @@ package transport
 
 import (
 	"errors"
+	"math"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -464,7 +465,8 @@ func (m *Multicast) handleJoin(src string, p *mcastPeer, j *protocol.Join) *mcas
 		return p
 	}
 	if j.Version != protocol.ProtocolVersion || j.Resolution != protocol.DefaultResolution ||
-		j.BatchSize != m.cfg.BatchSize || (j.QoS != nil && !m.cfg.QoS) || j.ZID.Equal(m.cfg.ZID) {
+		j.BatchSize != m.cfg.BatchSize || (j.QoS != nil && !m.cfg.QoS) || j.ZID.Equal(m.cfg.ZID) ||
+		j.LeaseMillis > uint64(math.MaxInt64/time.Millisecond) {
 		return nil
 	}
 	np := &mcastPeer{join: *j}

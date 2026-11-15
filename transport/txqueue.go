@@ -607,6 +607,13 @@ func (t *Unicast) pushEncoded(l *tlink, q *txQueue, i int, prio protocol.Priorit
 
 	// Fragments, each in a batch of its own.
 	first := t.patch >= patchFragmentMarkers
+	minCap := capacity
+	if first {
+		minCap--
+	}
+	if minCap <= 0 {
+		return false, ErrBatchSize
+	}
 	sent := false
 	for len(msg) > 0 {
 		q.mu.Lock()

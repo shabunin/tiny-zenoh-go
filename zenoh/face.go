@@ -334,11 +334,12 @@ func (f *face) teardown() {
 	f.live = false
 	published := f.published
 	f.published = nil
+	var gone []string
 	if wasLive && s.cfg.Mode != ModeClient && !f.mesh {
 		s.routerFaceGoneLocked(f, out)
 	}
 	if f.mesh {
-		s.meshLinkDown(f, out)
+		gone = append(gone, s.meshLinkDown(f, out)...)
 		if wasLive {
 			s.meshGone[string(f.zid.Bytes())] = time.Now()
 		}
@@ -350,7 +351,6 @@ func (f *face) teardown() {
 		s.gossipNetLinkDownLocked(f, out)
 	}
 	s.southLinkDownLocked(f)
-	var gone []string
 	for _, key := range f.tokens {
 		gone = append(gone, key)
 	}
@@ -568,7 +568,11 @@ func (f *face) overLimit(m protocol.Message) bool {
 		case *protocol.DeclareQueryable:
 			_, known = f.qbls[d.ID]
 		case *protocol.DeclareToken:
-			_, known = f.tokens[d.ID]
+			if m.HasInterestID && s.livGets[m.InterestID] != nil {
+				known = true
+			} else {
+				_, known = f.tokens[d.ID]
+			}
 		}
 	case *protocol.Interest:
 		if f.router != nil && (m.Mode == protocol.InterestFuture || m.Mode == protocol.InterestCurrentFuture) {
@@ -598,7 +602,9 @@ func (f *face) handleDeclare(m *protocol.Declare) {
 		if key, ok := f.resolve(we); ok {
 			s.mu.Lock()
 			s.exprMu.Lock()
-			f.remoteExprs[d.ID] = key
+			if old, exists := f.remoteExprs[d.ID]; !exists || old == key {
+				f.remoteExprs[d.ID] = key
+			}
 			s.exprMu.Unlock()
 			s.mu.Unlock()
 		}
@@ -611,6 +617,10 @@ func (f *face) handleDeclare(m *protocol.Declare) {
 	case *protocol.DeclareSubscriber:
 		if key, ok := f.resolve(d.WireExpr); ok {
 			s.mu.Lock()
+			if old, exists := f.subs[d.ID]; exists && old != key {
+				s.mu.Unlock()
+				return
+			}
 			f.subs[d.ID] = key
 			f.propagateLocked(kindSub, key)
 		}
@@ -626,6 +636,10 @@ func (f *face) handleDeclare(m *protocol.Declare) {
 	case *protocol.DeclareQueryable:
 		if key, ok := f.resolve(d.WireExpr); ok {
 			s.mu.Lock()
+			if old, exists := f.qbls[d.ID]; exists && old.key != key {
+				s.mu.Unlock()
+				return
+			}
 			f.qbls[d.ID] = remoteQueryable{key: key, complete: d.Complete}
 			f.propagateLocked(kindQbl, key)
 		}
@@ -641,7 +655,16 @@ func (f *face) handleDeclare(m *protocol.Declare) {
 	case *protocol.DeclareToken:
 		if key, ok := f.resolve(d.WireExpr); ok {
 			s.mu.Lock()
-			_, known := f.tokens[d.ID]
+			if m.HasInterestID && s.livGets[m.InterestID] != nil {
+				s.mu.Unlock()
+				s.livelinessEvent(m, key, SampleKindPut)
+				return
+			}
+			old, known := f.tokens[d.ID]
+			if known && old != key {
+				s.mu.Unlock()
+				return
+			}
 			f.tokens[d.ID] = key
 			f.propagateLocked(kindToken, key)
 			// A token re-declared to answer an interest is news only to that

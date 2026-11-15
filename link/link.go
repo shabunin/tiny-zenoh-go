@@ -40,6 +40,12 @@ func (l Locator) String() string {
 	return s
 }
 
+// WithoutConfig returns a copy of l with its config section cleared.
+func (l Locator) WithoutConfig() Locator {
+	l.Config = ""
+	return l
+}
+
 // Parse parses a locator such as "tcp/127.0.0.1:7447" or "tcp/[::1]:7447".
 func Parse(s string) (Locator, error) {
 	var l Locator
@@ -105,8 +111,10 @@ func registered(name string) (Protocol, bool) {
 // Options configures links beyond what a locator says.
 type Options struct {
 	// TLS holds defaults for "tls/" locators; keys in a locator's config part
-	// ("#key=value;...") override them.
+	// ("#key=value;...") override them unless IgnoreLocatorConfig is set.
 	TLS *TLSConfig
+	// IgnoreLocatorConfig strips any "#key=value" section when dialing.
+	IgnoreLocatorConfig bool
 }
 
 // ConfigValues parses the config part of a locator ("k=v;k=v").
@@ -143,6 +151,9 @@ func DialWith(locator string, timeout time.Duration, o Options) (transport.Link,
 	l, err := Parse(locator)
 	if err != nil {
 		return nil, err
+	}
+	if o.IgnoreLocatorConfig {
+		l.Config = ""
 	}
 	switch l.Protocol {
 	case "tcp":

@@ -795,7 +795,7 @@ func (c *Conn) serverCertificates(msg []byte) error {
 	if err := verifyChain(c.peer, c.cfg.RootCAs, c.now(), oidEKUServer); err != nil {
 		return c.fail(alertBadCertificate, err)
 	}
-	if !c.cfg.SkipNameVerification && c.cfg.ServerName != "" {
+	if !c.cfg.SkipNameVerification {
 		if err := c.peer[0].VerifyHostname(c.cfg.ServerName); err != nil {
 			return c.fail(alertBadCertificate, err)
 		}

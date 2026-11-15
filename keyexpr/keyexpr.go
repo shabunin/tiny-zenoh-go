@@ -119,6 +119,9 @@ func (k *Key) Includes(o *Key) bool { return includesChunks(k.pc, o.pc) }
 
 // Matches reports whether the concrete key (no wildcards) is in k's language.
 func (k *Key) Matches(key string) bool {
+	if key == "" {
+		return false
+	}
 	return matchChunks(k.pc, strings.Split(key, "/"))
 }
 
@@ -158,6 +161,9 @@ func compile(s string) []patChunk {
 
 // Match reports whether the concrete key is in the language of key expression e.
 func Match(e, key string) bool {
+	if e == "" || key == "" {
+		return false
+	}
 	if plain(e) && plain(key) {
 		return globKey(e, key)
 	}
@@ -166,6 +172,9 @@ func Match(e, key string) bool {
 
 // Intersect reports whether key expressions a and b share a concrete key.
 func Intersect(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
 	if a == b {
 		return true
 	}
@@ -184,6 +193,9 @@ func Intersect(a, b string) bool {
 
 // Include reports whether every key matching b also matches a.
 func Include(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
 	if a == b {
 		return true
 	}
@@ -387,6 +399,7 @@ func includesChunks(a, b []patChunk) bool { // does a include b?
 		}
 		return true
 	}
+	starChunk := patChunk{raw: "*", toks: []tok{{star: true}}}
 	next, cur := make([]bool, m+1), make([]bool, m+1)
 	next[m] = true
 	for i := len(a) - 1; i >= 0; i-- {
@@ -397,8 +410,9 @@ func includesChunks(a, b []patChunk) bool { // does a include b?
 				// "**" covers zero chunks of b, or one-or-more (any value, including "**").
 				cur[j] = next[j] || (!b[j].verb && cur[j+1])
 			case b[j].dw:
-				// A single chunk cannot cover "**" (which spans any number of chunks).
-				cur[j] = false
+				// b[j] == "**" expands to 0 chunks (cur[j+1]) AND k>=1 arbitrary
+				// non-verbatim chunks (a[i] must cover "*", and a[i+1:] must include b[j:]).
+				cur[j] = cur[j+1] && next[j] && !a[i].verb && chunkIncl(a[i], starChunk)
 			default:
 				cur[j] = next[j+1] && chunkIncl(a[i], b[j])
 			}

@@ -2,12 +2,16 @@ package protocol
 
 import (
 	"errors"
+	"math"
 
 	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 )
 
-// ErrUnknownMessage is returned by the decoders for an unrecognized ID.
-var ErrUnknownMessage = errors.New("protocol: unknown message id")
+// Errors returned by the decoders for invalid transport messages.
+var (
+	ErrUnknownMessage = errors.New("protocol: unknown message id")
+	ErrBadTransport   = errors.New("protocol: malformed transport message")
+)
 
 // CLOSE reason codes (zenoh-protocol transport/close.rs).
 const (
@@ -79,6 +83,9 @@ func decodeInit(r *codec.Reader, hdr byte) (*Init, error) {
 	}
 	if m.ZID, m.WhatAmI, err = readPackedZID(r); err != nil {
 		return nil, err
+	}
+	if m.WhatAmI > Client {
+		return nil, ErrBadTransport
 	}
 	if m.HasParams {
 		res, err := r.ReadByte()
@@ -516,6 +523,9 @@ func decodeJoin(r *codec.Reader, hdr byte) (*Join, error) {
 	if m.ZID, m.WhatAmI, err = readPackedZID(r); err != nil {
 		return nil, err
 	}
+	if m.WhatAmI > Client {
+		return nil, ErrBadTransport
+	}
 	if hdr&flagInitS != 0 {
 		res, err := r.ReadByte()
 		if err != nil {
@@ -532,6 +542,9 @@ func decodeJoin(r *codec.Reader, hdr byte) (*Join, error) {
 		return nil, err
 	}
 	if hdr&flagJoinT != 0 {
+		if m.LeaseMillis > math.MaxUint64/1000 {
+			return nil, ErrBadTransport
+		}
 		m.LeaseMillis *= 1000
 	}
 	if m.NextSN.Reliable, err = r.ReadZInt(); err != nil {

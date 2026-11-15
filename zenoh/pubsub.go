@@ -1,6 +1,7 @@
 package zenoh
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 
@@ -255,16 +256,30 @@ func (s *Session) DeclarePublisher(key string, opts ...PutOption) (*Publisher, e
 		return nil, err
 	}
 	s.mu.Lock()
-	s.nextExpr++
-	id := s.nextExpr
+	var id uint16
 	s.exprMu.Lock()
-	s.localExprs[id] = k.String()
+	for range (1 << 16) - 1 {
+		s.nextExpr++
+		if s.nextExpr == 0 {
+			s.nextExpr++
+		}
+		if _, used := s.localExprs[s.nextExpr]; !used {
+			id = s.nextExpr
+			s.localExprs[id] = k.String()
+			break
+		}
+	}
 	s.exprMu.Unlock()
+	if id == 0 {
+		s.mu.Unlock()
+		return nil, errors.New("zenoh: too many declared publishers")
+	}
 	faces := s.faceListLocked()
 	s.mu.Unlock()
 	err = s.broadcast(faces, &protocol.Declare{QoS: protocol.QoSDeclare,
 		Body: &protocol.DeclareKeyExpr{ID: id, WireExpr: protocol.WireExpr{Suffix: k.String()}}})
 	if err != nil {
+		s.undeclareLocalExpr(id)
 		return nil, err
 	}
 	o := defaultPutOptions()
@@ -273,6 +288,9 @@ func (s *Session) DeclarePublisher(key string, opts ...PutOption) (*Publisher, e
 	}
 	m, err := s.newMatcher(kindSub, k.String(), false, o.destination)
 	if err != nil {
+		faces := s.undeclareLocalExpr(id)
+		_ = s.broadcast(faces, &protocol.Declare{QoS: protocol.QoSDeclare,
+			Body: &protocol.UndeclareKeyExpr{ID: id}})
 		return nil, err
 	}
 	return &Publisher{s: s, key: k.String(), exprID: id, opts: opts,
@@ -314,19 +332,23 @@ func (p *Publisher) Delete(opts ...PutOption) error {
 	return p.s.publishVia(p.key, p.wire(), SampleKindDelete, nil, &o, &p.route)
 }
 
+func (s *Session) undeclareLocalExpr(id uint16) []*face {
+	s.mu.Lock()
+	s.exprMu.Lock()
+	delete(s.localExprs, id)
+	s.exprMu.Unlock()
+	faces := s.faceListLocked()
+	s.mu.Unlock()
+	return faces
+}
+
 // Undeclare releases the publisher's key-expression id and its matching
 // listeners.
 func (p *Publisher) Undeclare() error {
 	if ok, err := p.m.close(); !ok || err != nil {
 		return err
 	}
-	s := p.s
-	s.mu.Lock()
-	s.exprMu.Lock()
-	delete(s.localExprs, p.exprID)
-	s.exprMu.Unlock()
-	faces := s.faceListLocked()
-	s.mu.Unlock()
-	return s.broadcast(faces, &protocol.Declare{QoS: protocol.QoSDeclare,
+	faces := p.s.undeclareLocalExpr(p.exprID)
+	return p.s.broadcast(faces, &protocol.Declare{QoS: protocol.QoSDeclare,
 		Body: &protocol.UndeclareKeyExpr{ID: p.exprID}})
 }

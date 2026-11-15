@@ -65,7 +65,11 @@ func (s *Session) gossipNetOAM(f *face, m *protocol.OAM) {
 	for _, i := range n.changed {
 		nd := n.nodes[i]
 		if i == 0 || nd == nil || !nd.hasLoc || len(nd.locators) == 0 || !nd.hasWAI ||
-			!s.cfg.Gossip.Autoconnect.Matches(nd.whatami) || s.faces[string(nd.zid.Bytes())] != nil {
+			!s.cfg.Gossip.Autoconnect.Matches(nd.whatami) {
+			continue
+		}
+		zk := string(nd.zid.Bytes())
+		if s.faces[zk] != nil || s.connecting[zk] || len(s.connecting)+len(connect) >= maxConcurrentScoutDials {
 			continue
 		}
 		connect = append(connect, cand{nd.zid, nd.locators})
@@ -73,6 +77,6 @@ func (s *Session) gossipNetOAM(f *face, m *protocol.OAM) {
 	s.mu.Unlock()
 	out.send()
 	for _, c := range connect {
-		go s.connectScouted(c.zid, c.locs)
+		s.spawnConnectScouted(c.zid, c.locs)
 	}
 }

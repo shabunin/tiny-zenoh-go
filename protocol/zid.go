@@ -130,6 +130,12 @@ func (z ZID) Equal(o ZID) bool { return string(z.b) == string(o.b) }
 // EntityGlobalId: one byte whose high nibble is len-1 and whose low nibble is
 // caller-defined (WhatAmI for INIT, zero elsewhere), then the raw ZID bytes.
 func writeZIDNibble(w *codec.Writer, z ZID, low byte) {
+	if len(z.b) == 0 {
+		// Encode a 1-byte zero placeholder rather than underflowing len-1 to 15.
+		_ = w.WriteByte(low & 0x0f)
+		_ = w.WriteByte(0)
+		return
+	}
 	_ = w.WriteByte(byte((z.Len()-1)<<4) | (low & 0x0f))
 	w.WriteRaw(z.b)
 }

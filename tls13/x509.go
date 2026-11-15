@@ -151,6 +151,7 @@ type Certificate struct {
 	signature  []byte
 
 	isCA       bool
+	pathLen    int // -1: no pathLenConstraint
 	keyUsage   int // -1: no extension
 	extKU      [][]byte
 	DNSNames   []string
@@ -160,7 +161,7 @@ type Certificate struct {
 
 // ParseCertificate parses one DER certificate.
 func ParseCertificate(raw []byte) (*Certificate, error) {
-	c := &Certificate{Raw: raw, keyUsage: -1}
+	c := &Certificate{Raw: raw, pathLen: -1, keyUsage: -1}
 	body, rest, err := expect(raw, 0x30)
 	if err != nil || len(rest) != 0 {
 		return nil, errDER
@@ -382,11 +383,26 @@ func (c *Certificate) parseExtensions(b []byte) error {
 				return e
 			}
 			if len(bc) > 0 && bc[0] == 0x01 {
-				v, _, e := expect(bc, 0x01)
+				v, rest, e := expect(bc, 0x01)
 				if e != nil || len(v) != 1 {
 					return errDER
 				}
 				c.isCA = v[0] != 0
+				bc = rest
+			}
+			if len(bc) > 0 {
+				if !c.isCA {
+					return errDER // pathLenConstraint requires cA=TRUE
+				}
+				pl, rest, e := derInt(bc)
+				if e != nil || len(rest) != 0 || pl.Sign() < 0 {
+					return errDER
+				}
+				if !pl.IsInt64() || pl.Int64() > 100 {
+					c.pathLen = 100
+				} else {
+					c.pathLen = int(pl.Int64())
+				}
 			}
 		case bytes.Equal(oid, oidExtKeyUsage):
 			bits, _, e := expect(val, 0x03)
@@ -548,33 +564,50 @@ func verifyChain(chain []*Certificate, roots []*Certificate, now time.Time, eku 
 		checks++
 		return checks <= maxSignatureChecks && c.checkSignatureFrom(parent) == nil
 	}
+	checkCA := func(ca *Certificate, intermediates int) error {
+		if !ca.isCA || (ca.keyUsage >= 0 && ca.keyUsage&kuKeyCertSign == 0) {
+			return fmt.Errorf("tls13: certificate %q is not a certificate authority", ca.CommonName)
+		}
+		if ca.pathLen >= 0 && intermediates > ca.pathLen {
+			return fmt.Errorf("tls13: certificate %q path length constraint exceeded", ca.CommonName)
+		}
+		return nil
+	}
+	used := make([]bool, len(chain))
 	cur := leaf
+	intermediates := 0
 	for depth := 0; depth < 10; depth++ {
 		for _, r := range roots {
 			if bytes.Equal(r.Raw, cur.Raw) {
-				return nil
+				return r.checkTime(now)
 			}
 		}
 		for _, r := range roots {
-			if bytes.Equal(r.rawSubject, cur.rawIssuer) && signedBy(cur, r) {
+			if checkCA(r, intermediates) == nil && bytes.Equal(r.rawSubject, cur.rawIssuer) && signedBy(cur, r) {
 				return r.checkTime(now)
 			}
 		}
 		var next *Certificate
-		for _, ic := range chain[1:] {
-			if ic != cur && bytes.Equal(ic.rawSubject, cur.rawIssuer) && signedBy(cur, ic) {
+		nextIdx := -1
+		for i, ic := range chain[1:] {
+			if !used[i+1] && ic != cur && bytes.Equal(ic.rawSubject, cur.rawIssuer) && signedBy(cur, ic) {
 				next = ic
+				nextIdx = i + 1
 				break
 			}
 		}
 		if next == nil {
 			return fmt.Errorf("tls13: certificate %q is not signed by a trusted authority", cur.CommonName)
 		}
-		if !next.isCA || (next.keyUsage >= 0 && next.keyUsage&kuKeyCertSign == 0) {
-			return fmt.Errorf("tls13: certificate %q is not a certificate authority", next.CommonName)
+		if err := checkCA(next, intermediates); err != nil {
+			return err
 		}
 		if err := next.checkTime(now); err != nil {
 			return err
+		}
+		used[nextIdx] = true
+		if !bytes.Equal(next.rawSubject, next.rawIssuer) {
+			intermediates++
 		}
 		cur = next
 	}
@@ -584,6 +617,9 @@ func verifyChain(chain []*Certificate, roots []*Certificate, now time.Time, eku 
 // VerifyHostname checks the certificate's subject alternative names
 // against a DNS name or an IP address.
 func (c *Certificate) VerifyHostname(host string) error {
+	if host == "" || strings.Contains(host, "*") {
+		return fmt.Errorf("tls13: invalid host name %q", host)
+	}
 	if ip, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
 		for _, a := range c.IPs {
 			if a == ip.Unmap() {
@@ -593,6 +629,9 @@ func (c *Certificate) VerifyHostname(host string) error {
 		return fmt.Errorf("tls13: certificate is not valid for IP %s", host)
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "" {
+		return fmt.Errorf("tls13: invalid host name %q", host)
+	}
 	for _, n := range c.DNSNames {
 		if matchHostname(strings.ToLower(strings.TrimSuffix(n, ".")), host) {
 			return nil
@@ -602,10 +641,18 @@ func (c *Certificate) VerifyHostname(host string) error {
 }
 
 func matchHostname(pattern, host string) bool {
-	if pattern == host {
-		return true
+	if pattern == "" || host == "" || strings.Contains(host, "*") {
+		return false
 	}
-	if !strings.HasPrefix(pattern, "*.") {
+	if pattern == host {
+		return !strings.Contains(pattern, "*")
+	}
+	if !strings.HasPrefix(pattern, "*.") || len(pattern) <= 2 {
+		return false
+	}
+	suffix := pattern[2:]
+	// Require at least two domain labels after "*." and no extra wildcards.
+	if strings.Contains(suffix, "*") || strings.IndexByte(suffix, '.') <= 0 {
 		return false
 	}
 	i := strings.IndexByte(host, '.')

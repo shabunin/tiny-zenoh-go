@@ -173,11 +173,23 @@ type Storage struct {
 // Dir is the storage's directory.
 func (s *Storage) Dir() string { return s.base }
 
-func (s *Storage) fspath(key string) string {
+func (s *Storage) fspath(key string) (string, error) {
 	if key == "" {
-		key = rootKey
+		return filepath.Join(s.base, rootKey), nil
 	}
-	return filepath.Join(s.base, filepath.FromSlash(key))
+	if strings.ContainsAny(key, "\\\x00") {
+		return "", errInvalidPath
+	}
+	parts := strings.Split(key, "/")
+	for i, p := range parts {
+		if p == "" || p == "." || p == ".." {
+			return "", errInvalidPath
+		}
+		if i == 0 && p == dataInfoDir {
+			return "", errInvalidPath
+		}
+	}
+	return filepath.Join(s.base, filepath.FromSlash(key)), nil
 }
 
 // rel is a file's path relative to the storage directory, the metadata key.
@@ -189,13 +201,23 @@ func (s *Storage) rel(file string) string {
 	return filepath.ToSlash(r)
 }
 
-var errReadOnly = errors.New("fs: update for a read-only storage")
+var (
+	errReadOnly    = errors.New("fs: update for a read-only storage")
+	errInvalidPath = errors.New("fs: invalid key path")
+	errSymlink     = errors.New("fs: symbolic link forbidden when follow_links is false")
+)
 
 func (s *Storage) Put(key string, v storage.Value) (storage.Result, error) {
 	if s.readOnly {
 		return storage.Outdated, errReadOnly
 	}
-	file := s.fspath(key)
+	file, err := s.fspath(key)
+	if err != nil {
+		return storage.Outdated, err
+	}
+	if !s.followLinks && s.containsSymlink(file) {
+		return storage.Outdated, errSymlink
+	}
 	parent := filepath.Dir(file)
 	// A file where a directory must go moves aside to its conflict name.
 	for a := parent; len(a) > len(s.base); a = filepath.Dir(a) {
@@ -208,6 +230,9 @@ func (s *Storage) Put(key string, v storage.Value) (storage.Result, error) {
 		}
 		if st.Mode().IsRegular() {
 			cf := a + conflictSuffix
+			if !s.followLinks && s.containsSymlink(cf) {
+				return storage.Outdated, errSymlink
+			}
 			if err := os.Rename(a, cf); err != nil {
 				return storage.Outdated, fmt.Errorf("fs: moving %s aside: %w", a, err)
 			}
@@ -221,6 +246,9 @@ func (s *Storage) Put(key string, v storage.Value) (storage.Result, error) {
 	}
 	if st, err := os.Stat(file); err == nil && st.IsDir() {
 		file += conflictSuffix
+		if !s.followLinks && s.containsSymlink(file) {
+			return storage.Outdated, errSymlink
+		}
 	}
 	if err := os.WriteFile(file, v.Payload, 0o644); err != nil {
 		return storage.Outdated, fmt.Errorf("fs: writing %s: %w", file, err)
@@ -240,9 +268,18 @@ func (s *Storage) Delete(key string, _ zenoh.Timestamp) (storage.Result, error) 
 	if s.readOnly {
 		return storage.Outdated, errReadOnly
 	}
-	file := s.fspath(key)
+	file, err := s.fspath(key)
+	if err != nil {
+		return storage.Outdated, err
+	}
+	if !s.followLinks && s.containsSymlink(file) {
+		return storage.Outdated, errSymlink
+	}
 	if !isFile(file) {
 		file += conflictSuffix
+		if !s.followLinks && s.containsSymlink(file) {
+			return storage.Outdated, errSymlink
+		}
 	}
 	if _, err := os.Lstat(file); err == nil {
 		if err := os.Remove(file); err != nil {
@@ -276,7 +313,10 @@ func (s *Storage) containsSymlink(p string) bool {
 
 // valueFile is the file holding key's value, "" if none.
 func (s *Storage) valueFile(key string) string {
-	file := s.fspath(key)
+	file, err := s.fspath(key)
+	if err != nil {
+		return ""
+	}
 	if s.readable(file) {
 		return file
 	}

@@ -190,21 +190,32 @@ func (ls *LivelinessSubscriber) Undeclare() error {
 }
 
 type livGet struct {
-	key   string
-	once  sync.Once
-	cb    func(Reply)
-	done  func()
-	timer *time.Timer
-	faces map[*face]bool // routed faces yet to answer; guarded by Session.mu
+	key      string
+	mu       sync.Mutex
+	finished bool
+	cb       func(Reply)
+	done     func()
+	timer    *time.Timer
+	faces    map[*face]bool // routed faces yet to answer; guarded by Session.mu
 }
 
 func (g *livGet) finish() {
-	g.once.Do(func() {
-		if g.timer != nil {
-			g.timer.Stop()
-		}
-		g.done()
-	})
+	g.mu.Lock()
+	if g.finished {
+		g.mu.Unlock()
+		return
+	}
+	g.finished = true
+	timer := g.timer
+	g.timer = nil
+	done := g.done
+	g.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
+	if done != nil {
+		done()
+	}
 }
 
 // Get returns the liveliness tokens currently alive on key. The channel is
@@ -222,9 +233,15 @@ func (l Liveliness) Get(key string, opts ...GetOption) (<-chan Reply, error) {
 	f := newFifo[Reply](s.done)
 	id := l.interestID()
 	g := &livGet{key: k.String(), cb: f.push, done: f.close, faces: map[*face]bool{}}
+	s.mu.Lock()
+	if s.closed.Load() {
+		s.mu.Unlock()
+		f.close()
+		return nil, ErrSessionClosed
+	}
 	if o.cancel != nil {
 		var ok bool
-		g.cb, g.done, ok = o.cancel.bind(f.push, f.close, func() {
+		g.cb, g.done, _, ok = o.cancel.bind(f.push, f.close, func() {
 			s.mu.Lock()
 			if s.livGets[id] == g {
 				delete(s.livGets, id)
@@ -233,14 +250,10 @@ func (l Liveliness) Get(key string, opts ...GetOption) (<-chan Reply, error) {
 			g.finish()
 		})
 		if !ok {
+			s.mu.Unlock()
 			f.close()
 			return nil, ErrCancelled
 		}
-	}
-	s.mu.Lock()
-	if s.closed.Load() {
-		s.mu.Unlock()
-		return nil, ErrSessionClosed
 	}
 	routed := s.routedFacesLocked()
 	for _, rf := range routed {
@@ -266,12 +279,18 @@ func (l Liveliness) Get(key string, opts ...GetOption) (<-chan Reply, error) {
 		g.finish()
 		return f.out, nil
 	}
-	g.timer = time.AfterFunc(o.timeout, func() {
-		s.mu.Lock()
-		delete(s.livGets, id)
-		s.mu.Unlock()
-		g.finish()
-	})
+	g.mu.Lock()
+	if !g.finished {
+		g.timer = time.AfterFunc(o.timeout, func() {
+			s.mu.Lock()
+			if s.livGets[id] == g {
+				delete(s.livGets, id)
+			}
+			s.mu.Unlock()
+			g.finish()
+		})
+	}
+	g.mu.Unlock()
 	in := &protocol.Interest{
 		ID: id, Mode: protocol.InterestCurrent,
 		Options:  protocol.InterestKeyExprs | protocol.InterestTokens,

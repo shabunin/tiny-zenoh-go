@@ -160,7 +160,7 @@ func (r *Reader) PeekByte() (byte, error) {
 
 // ReadRaw reads exactly n bytes, returning a sub-slice that aliases the buffer.
 func (r *Reader) ReadRaw(n int) ([]byte, error) {
-	if n < 0 || r.pos+n > len(r.buf) {
+	if n < 0 || n > len(r.buf)-r.pos {
 		return nil, ErrShortBuffer
 	}
 	p := r.buf[r.pos : r.pos+n]
@@ -197,6 +197,10 @@ func (r *Reader) ReadZBytes() ([]byte, error) {
 	n, err := r.ReadZInt()
 	if err != nil {
 		return nil, err
+	}
+	rem := len(r.buf) - r.pos
+	if rem < 0 || n > uint64(rem) {
+		return nil, ErrShortBuffer
 	}
 	return r.ReadRaw(int(n))
 }

@@ -165,3 +165,41 @@ func TestJoinRoundTrip(t *testing.T) {
 		t.Errorf("header %#x, want 0x27 (JOIN with T)", b[0])
 	}
 }
+
+func TestTransportValidationAndZeroZID(t *testing.T) {
+	// Invalid WhatAmI=3 in INIT and JOIN must fail to decode.
+	w := codec.NewWriter()
+	(&Init{Version: ProtocolVersion, WhatAmI: WhatAmI(3), ZID: zid(t, 0x01)}).Encode(w)
+	if _, err := DecodeTransport(codec.NewReader(w.Bytes())); err == nil {
+		t.Fatalf("DecodeTransport(Init WhatAmI=3) succeeded, want error")
+	}
+
+	jw := codec.NewWriter()
+	(&Join{Version: ProtocolVersion, WhatAmI: WhatAmI(3), ZID: zid(t, 0x01)}).Encode(jw)
+	if _, err := DecodeTransport(codec.NewReader(jw.Bytes())); err == nil {
+		t.Fatalf("DecodeTransport(Join WhatAmI=3) succeeded, want error")
+	}
+
+	// JOIN with T flag and Lease seconds > MaxUint64/1000 must fail instead of wrapping.
+	overflowJoin := []byte{IDJoin | flagJoinT, ProtocolVersion, byte(Peer), 0x01}
+	ow := codec.NewWriter()
+	ow.WriteRaw(overflowJoin)
+	ow.WriteZInt(^uint64(0)/1000 + 1)
+	ow.WriteZInt(0)
+	ow.WriteZInt(0)
+	if _, err := DecodeTransport(codec.NewReader(ow.Bytes())); err == nil {
+		t.Fatalf("DecodeTransport(Join lease overflow) succeeded, want error")
+	}
+
+	// Encoding a zero ZID in INIT must not corrupt framing via nibble underflow (0xf0).
+	zw := codec.NewWriter()
+	(&Init{Version: ProtocolVersion, WhatAmI: Peer, HasParams: true, Resolution: DefaultResolution, BatchSize: 1024}).Encode(zw)
+	zr := codec.NewReader(zw.Bytes())
+	if _, err := DecodeTransport(zr); err == nil {
+		t.Fatalf("DecodeTransport(Init zero ZID) = nil, want non-zero ZID error")
+	}
+	// Must have stopped after the 1-byte placeholder ZID, leaving the 3 param bytes unread.
+	if zr.Remaining() != 3 {
+		t.Fatalf("zero ZID consumed trailing bytes: Remaining() = %d, want 3", zr.Remaining())
+	}
+}

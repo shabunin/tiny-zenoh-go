@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -656,11 +657,19 @@ func (t *Unicast) leaseFields() (seconds bool, v uint64) {
 	return false, uint64(t.cfg.Lease / time.Millisecond)
 }
 
-func leaseOf(o *protocol.Open) time.Duration {
+const minBatchSize = 64
+
+func leaseOf(o *protocol.Open) (time.Duration, error) {
 	if o.LeaseSeconds {
-		return time.Duration(o.Lease) * time.Second
+		if o.Lease > uint64(math.MaxInt64/time.Second) {
+			return 0, fmt.Errorf("%w: lease overflows duration", ErrHandshake)
+		}
+		return time.Duration(o.Lease) * time.Second, nil
 	}
-	return time.Duration(o.Lease) * time.Millisecond
+	if o.Lease > uint64(math.MaxInt64/time.Millisecond) {
+		return 0, fmt.Errorf("%w: lease overflows duration", ErrHandshake)
+	}
+	return time.Duration(o.Lease) * time.Millisecond, nil
 }
 
 // setPeerSN validates the peer's initial SN and primes the receive window.
@@ -754,8 +763,17 @@ func (t *Unicast) openHandshake() error {
 
 	res, batch := t.cfg.Resolution, l.propose
 	if ack.HasParams {
-		res = ack.Resolution // the responder may only lower it
+		lowered := minResolution(t.cfg.Resolution, ack.Resolution)
+		if lowered != ack.Resolution {
+			_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
+			return fmt.Errorf("%w: peer raised resolution %#x above %#x", ErrHandshake, ack.Resolution, t.cfg.Resolution)
+		}
+		res = lowered // the responder may only lower it
 		batch = min(batch, ack.BatchSize)
+	}
+	if batch < minBatchSize {
+		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
+		return fmt.Errorf("%w: batch size %d below minimum %d", ErrHandshake, batch, minBatchSize)
 	}
 	l.batchSize = int(batch)
 	t.snMask = snMask(res.FrameSNBits())
@@ -786,7 +804,12 @@ func (t *Unicast) openHandshake() error {
 	if !ok || !oack.IsAck {
 		return unexpected("OPEN ACK", m)
 	}
-	l.peerLease = leaseOf(oack)
+	peerLease, err := leaseOf(oack)
+	if err != nil {
+		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
+		return err
+	}
+	l.peerLease = peerLease
 	// Everything after OPEN ACK, both ways, has the batch header.
 	l.enableCompression(useCompression)
 	if t.lowLatency {
@@ -880,6 +903,10 @@ func (t *Unicast) acceptHandshake() error {
 	}
 	res := minResolution(t.cfg.Resolution, theirRes)
 	batch := min(l.propose, theirBatch)
+	if batch < minBatchSize {
+		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
+		return fmt.Errorf("%w: batch size %d below minimum %d", ErrHandshake, batch, minBatchSize)
+	}
 	l.batchSize = int(batch)
 	t.snMask = snMask(res.FrameSNBits())
 
@@ -935,7 +962,12 @@ func (t *Unicast) acceptHandshake() error {
 		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
 		return fmt.Errorf("%w: OPEN SYN carries an unknown cookie", ErrHandshake)
 	}
-	l.peerLease = leaseOf(osyn)
+	peerLease, err := leaseOf(osyn)
+	if err != nil {
+		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
+		return err
+	}
+	l.peerLease = peerLease
 	if err := t.setPeerSN(osyn.InitialSN); err != nil {
 		_ = t.writeTransport(l, &protocol.Close{Reason: protocol.CloseInvalid})
 		return err
@@ -1291,6 +1323,9 @@ func (t *Unicast) sendFragmentsLocked(l *tlink, prio protocol.Priority, reliable
 			first = false
 		}
 		n := min(fcap, len(msg))
+		if n <= 0 {
+			return ErrBatchSize
+		}
 		t.startBatchLocked(l)
 		t.setStreamPrioLocked(prio)
 		f := protocol.Fragment{
@@ -1412,6 +1447,9 @@ func (t *Unicast) deliver(m protocol.Message, reliable bool) error {
 
 func (t *Unicast) keepAliveLoop(l *tlink) {
 	interval := t.cfg.Lease / time.Duration(t.cfg.KeepAliveDivisor)
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for {

@@ -79,8 +79,8 @@ func delPoint(key string, ts zenoh.Timestamp) point {
 }
 
 var (
-	measurementEscaper = strings.NewReplacer(`,`, `\,`, ` `, `\ `, "\n", `\n`)
-	stringEscaper      = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	measurementEscaper = strings.NewReplacer(`\`, `\\`, `,`, `\,`, ` `, `\ `, "\n", `\n`, "\r", `\r`)
+	stringEscaper      = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`)
 )
 
 // line is the point in line protocol.

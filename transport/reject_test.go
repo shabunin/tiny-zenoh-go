@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shabunin/tiny-zenoh-go/internal/codec"
 	"github.com/shabunin/tiny-zenoh-go/protocol"
 )
 
@@ -264,5 +265,86 @@ func TestEstablishConfigErrors(t *testing.T) {
 	b, _ := tcpPair(t)
 	if _, err := Accept(b, Config{ZID: testZID(t), MaxLinks: 2}, Callbacks{}); err == nil || !strings.Contains(err.Error(), "MultiLinkKey") {
 		t.Fatalf("multilink without key: %v", err)
+	}
+}
+
+func TestHandshakeHardeningAndFragmentReset(t *testing.T) {
+	openCases := []hsCase{
+		{name: "batch size below minimum", peer: func(f *fakeRouter) {
+			f.read()
+			ack := goodAck(f)
+			ack.BatchSize = 10
+			f.write(ack)
+		}, want: "batch size", wantClose: true},
+		{name: "responder raises resolution", peer: func(f *fakeRouter) {
+			f.read()
+			ack := goodAck(f)
+			ack.Resolution = 0xff
+			f.write(ack)
+		}, want: "resolution", wantClose: true},
+		{name: "open ack lease overflow", peer: func(f *fakeRouter) {
+			toOpenSyn(f)
+			f.write(&protocol.Open{IsAck: true, LeaseSeconds: true, Lease: ^uint64(0)})
+		}, want: "lease overflows", wantClose: true},
+	}
+	for _, c := range openCases {
+		t.Run("open/"+c.name, func(t *testing.T) { runHandshake(t, true, c) })
+	}
+
+	acceptCases := []hsCase{
+		{name: "batch size below minimum", peer: func(f *fakeRouter) {
+			syn := goodSyn(f)
+			syn.BatchSize = 1
+			f.write(syn)
+		}, want: "batch size", wantClose: true},
+		{name: "open syn lease overflow", peer: func(f *fakeRouter) {
+			toOpenSynAccept(f, func(cookie []byte) protocol.Message {
+				return &protocol.Open{LeaseSeconds: true, Lease: ^uint64(0), Cookie: cookie}
+			})
+		}, want: "lease overflows", wantClose: true},
+		{name: "weak rsa key e=1", cfg: multiLink, peer: func(f *fakeRouter) {
+			// n > 256 bits, e = 1: rejected by readPubKey.
+			w := []byte{33}
+			n := make([]byte, 33)
+			n[0], n[32] = 1, 0x80
+			w = append(w, n...)
+			w = append(w, 1, 1) // e = 1 LE
+			f.write(goodSyn(f, ext(extMultiLink, protocol.ExtZBuf, 0, w)))
+		}, want: "INIT SYN", wantClose: true},
+	}
+	for _, c := range acceptCases {
+		t.Run("accept/"+c.name, func(t *testing.T) { runHandshake(t, false, c) })
+	}
+
+	// rxState.frame must clear an incomplete unpatched fragment chain so a
+	// dropped tail followed by a normal FRAME does not drop the next fragmented msg.
+	var delivered int
+	var rx rxState
+	rx.init(0xffffffff, false, 1<<20, func(protocol.Message, bool) error {
+		delivered++
+		return nil
+	})
+	rx.sync(1)
+	if err := rx.fragment(&protocol.Fragment{Reliable: true, More: true, SN: 1, Payload: []byte{0x1d}}); err != nil {
+		t.Fatalf("partial fragment: %v", err)
+	}
+	if err := rx.frame(func() *codec.Reader {
+		var w codec.Writer
+		(&protocol.Frame{Reliable: true, SN: 2}).Encode(&w)
+		return codec.NewReader(w.Bytes())
+	}()); err != nil {
+		t.Fatalf("frame after partial fragment: %v", err)
+	}
+	// Complete single-fragment Put message after the interrupted stream.
+	var pw codec.Writer
+	(&protocol.Push{
+		WireExpr: protocol.WireExpr{Suffix: "test/key"},
+		Body:     &protocol.Put{Payload: []byte("ok")},
+	}).Encode(&pw)
+	if err := rx.fragment(&protocol.Fragment{Reliable: true, More: false, SN: 3, Payload: pw.Bytes()}); err != nil {
+		t.Fatalf("subsequent fragment: %v", err)
+	}
+	if delivered != 1 {
+		t.Fatalf("delivered = %d, want 1", delivered)
 	}
 }

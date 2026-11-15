@@ -43,6 +43,7 @@ import (
 const (
 	// NoneKey is the object of the strip prefix itself.
 	NoneKey         = "@@none_key@@"
+	maxS3BodyBytes  = 128 << 20
 	timestampMeta   = "X-Amz-Meta-Zenoh-Timestamp"
 	timestampMetaV0 = "X-Amz-Meta-Timestamp_uhlc" // older zenoh-rust versions'
 )
@@ -223,9 +224,12 @@ func (c client) do(method, object string, q url.Values, body []byte, hdr http.He
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxS3BodyBytes+1))
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(b) > maxS3BodyBytes {
+		return nil, nil, fmt.Errorf("s3: response body exceeds %d bytes", maxS3BodyBytes)
 	}
 	if resp.StatusCode/100 != 2 {
 		e := &s3Error{status: resp.StatusCode}
@@ -252,8 +256,13 @@ func (c client) createBucket(reuse bool) error {
 	}
 	var body []byte
 	if c.v.region != "us-east-1" {
-		body = []byte(`<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><LocationConstraint>` +
-			c.v.region + `</LocationConstraint></CreateBucketConfiguration>`)
+		var buf bytes.Buffer
+		buf.WriteString(`<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><LocationConstraint>`)
+		if err := xml.EscapeText(&buf, []byte(c.v.region)); err != nil {
+			return err
+		}
+		buf.WriteString(`</LocationConstraint></CreateBucketConfiguration>`)
+		body = buf.Bytes()
 	}
 	if _, _, err := c.do("PUT", "", nil, body, nil); err != nil {
 		return fmt.Errorf("s3: creating bucket %q: %w", c.bucket, err)
@@ -316,11 +325,32 @@ func (s *Storage) object(key string) string {
 	return key
 }
 
-var errReadOnly = errors.New("s3: update for a read-only storage")
+var (
+	errReadOnly   = errors.New("s3: update for a read-only storage")
+	errInvalidKey = errors.New("s3: invalid object key path")
+)
+
+func validKey(key string) error {
+	if key == "" {
+		return nil
+	}
+	if strings.ContainsAny(key, "\\\x00") {
+		return errInvalidKey
+	}
+	for _, p := range strings.Split(key, "/") {
+		if p == "" || p == "." || p == ".." {
+			return errInvalidKey
+		}
+	}
+	return nil
+}
 
 func (s *Storage) Put(key string, v storage.Value) (storage.Result, error) {
 	if s.readOnly {
 		return storage.Outdated, errReadOnly
+	}
+	if err := validKey(key); err != nil {
+		return storage.Outdated, err
 	}
 	h := http.Header{}
 	h.Set("Content-Encoding", v.Encoding.String())
@@ -338,6 +368,9 @@ func (s *Storage) Put(key string, v storage.Value) (storage.Result, error) {
 func (s *Storage) Delete(key string, _ zenoh.Timestamp) (storage.Result, error) {
 	if s.readOnly {
 		return storage.Outdated, errReadOnly
+	}
+	if err := validKey(key); err != nil {
+		return storage.Outdated, err
 	}
 	if _, _, err := s.c.do("DELETE", s.object(key), nil, nil, nil); err != nil && !notFound(err) {
 		return storage.Outdated, fmt.Errorf("s3: delete %q: %w", key, err)
@@ -357,6 +390,9 @@ func timestampOf(h http.Header) (zenoh.Timestamp, error) {
 }
 
 func (s *Storage) Get(key, _ string) ([]storage.Value, error) {
+	if err := validKey(key); err != nil {
+		return nil, err
+	}
 	resp, b, err := s.c.do("GET", s.object(key), nil, nil, nil)
 	if notFound(err) {
 		return nil, nil
@@ -386,7 +422,7 @@ func (s *Storage) Entries() ([]storage.Entry, error) {
 		case s.prefix != "":
 			full = s.prefix + "/" + key
 		}
-		if full == "" || keyexpr.Validate(full) != nil || !keyexpr.Intersect(full, s.keyExpr) {
+		if full == "" || validKey(key) != nil || keyexpr.Validate(full) != nil || !keyexpr.Intersect(full, s.keyExpr) {
 			continue
 		}
 		resp, _, err := s.c.do("HEAD", o, nil, nil, nil)

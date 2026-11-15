@@ -50,6 +50,9 @@ func NewMultiLinkKey() (*MultiLinkKey, error) { return NewRSAKey(mlKeyBits) }
 
 // NewRSAKey generates an RSA key pair of the given size (e = 65537).
 func NewRSAKey(bits int) (*RSAKey, error) {
+	if bits < 256 || bits > 8192 {
+		return nil, errors.New("transport: RSA key size must be 256..8192 bits")
+	}
 	e := big.NewInt(65537)
 	one := big.NewInt(1)
 	for range 100 {
@@ -132,7 +135,8 @@ func readPubKey(r *codec.Reader) (rsaPub, []byte, error) {
 		return rsaPub{}, nil, err
 	}
 	k := rsaPub{fromLE(nb), fromLE(eb)}
-	if k.n.BitLen() < 64 || k.n.BitLen() > 8192 || k.e.Sign() <= 0 || k.e.BitLen() > 64 {
+	if k.n.BitLen() < 256 || k.n.BitLen() > 8192 || k.n.Bit(0) == 0 ||
+		k.e.Cmp(big.NewInt(3)) < 0 || k.e.Bit(0) == 0 || k.e.BitLen() > 64 {
 		return rsaPub{}, nil, errors.New("bad RSA public key")
 	}
 	return k, encodePubKey(k.n, k.e), nil
@@ -216,7 +220,7 @@ func (t *Unicast) mlInitAck(e *protocol.Extension) error {
 		return fmt.Errorf("%w: %w: INIT ACK: %v", ErrHandshake, errMultiLink, err)
 	}
 	nonce, err := t.cfg.MultiLinkKey.decrypt(ct)
-	if err != nil {
+	if err != nil || len(nonce) < 8 || len(nonce) > 64 {
 		return fmt.Errorf("%w: %w: %v", ErrHandshake, errMultiLink, err)
 	}
 	if t.ml.openSyn, err = peer.encrypt(nonce); err != nil {

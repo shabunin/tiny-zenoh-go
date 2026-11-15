@@ -114,6 +114,8 @@ type V1Storage struct {
 	onClose  string
 	mu       sync.Mutex
 	drops    map[string]*time.Timer
+	dropGen  map[string]uint64
+	mlocks   map[string]*sync.Mutex
 	closed   bool
 }
 
@@ -249,8 +251,38 @@ func (s *V1Storage) deletion(m string) (*zenoh.Timestamp, error) {
 	return nil, nil
 }
 
+func (s *V1Storage) measLock(m string) *sync.Mutex {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mlocks == nil {
+		s.mlocks = map[string]*sync.Mutex{}
+	}
+	ml := s.mlocks[m]
+	if ml == nil {
+		ml = &sync.Mutex{}
+		s.mlocks[m] = ml
+	}
+	return ml
+}
+
+func (s *V1Storage) cancelDrop(m string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dropGen == nil {
+		s.dropGen = map[string]uint64{}
+	}
+	s.dropGen[m]++
+	if t := s.drops[m]; t != nil {
+		t.Stop()
+		delete(s.drops, m)
+	}
+}
+
 func (s *V1Storage) Put(key string, v storage.Value) (storage.Result, error) {
 	m := measurement(key)
+	ml := s.measLock(m)
+	ml.Lock()
+	defer ml.Unlock()
 	del, err := s.deletion(m)
 	if err != nil {
 		return storage.Outdated, fmt.Errorf("influxdb: %w", err)
@@ -258,6 +290,7 @@ func (s *V1Storage) Put(key string, v storage.Value) (storage.Result, error) {
 	if del != nil && tsLess(v.Timestamp, *del) {
 		return storage.Outdated, nil
 	}
+	s.cancelDrop(m)
 	if err := s.c.write(putPoint(key, v).line()); err != nil {
 		return storage.Outdated, fmt.Errorf("influxdb: put %s: %w", m, err)
 	}
@@ -276,8 +309,11 @@ func tsLess(a, b zenoh.Timestamp) bool {
 
 func (s *V1Storage) Delete(key string, ts zenoh.Timestamp) (storage.Result, error) {
 	m := measurement(key)
-	// Points older than the delete go; a DEL point keeps older puts out.
-	if _, err := s.c.query(`DELETE FROM ` + ident(m) + ` WHERE time < ` + strconv.FormatInt(nanos(ts), 10)); err != nil {
+	ml := s.measLock(m)
+	ml.Lock()
+	defer ml.Unlock()
+	// Points at or older than the delete go; a DEL point keeps older puts out.
+	if _, err := s.c.query(`DELETE FROM ` + ident(m) + ` WHERE time <= ` + strconv.FormatInt(nanos(ts), 10)); err != nil {
 		return storage.Outdated, fmt.Errorf("influxdb: delete %s: %w", m, err)
 	}
 	if err := s.c.write(delPoint(key, ts).line()); err != nil {
@@ -295,15 +331,23 @@ func (s *V1Storage) scheduleDrop(m string) {
 	if s.closed {
 		return
 	}
+	if s.dropGen == nil {
+		s.dropGen = map[string]uint64{}
+	}
+	s.dropGen[m]++
+	gen := s.dropGen[m]
 	if t := s.drops[m]; t != nil {
 		t.Stop()
 	}
 	s.drops[m] = time.AfterFunc(DropMeasurementDelay, func() {
+		ml := s.measLock(m)
+		ml.Lock()
+		defer ml.Unlock()
 		s.mu.Lock()
 		delete(s.drops, m)
-		closed := s.closed
+		skip := s.closed || s.dropGen[m] != gen
 		s.mu.Unlock()
-		if closed {
+		if skip {
 			return
 		}
 		series, err := s.c.query(`SELECT "kind" FROM ` + ident(m) + ` WHERE kind!='DEL' LIMIT 1`)

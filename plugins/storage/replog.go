@@ -331,10 +331,20 @@ func (l *replLog) lastElapsed(now time.Time) uint64 {
 
 func (l *replLog) digest(now time.Time) digest { return l.digestFrom(l.lastElapsed(now)) }
 
+func (l *replLog) warmLow(upper uint64) uint64 {
+	if upper+1 > l.hot+l.warm {
+		return upper - l.hot - l.warm + 1
+	}
+	return 0
+}
+
 // digestFrom is the digest whose hot era ends with interval upper.
 func (l *replLog) digestFrom(upper uint64) digest {
-	hotLow := upper - l.hot + 1
-	warmLow := upper - l.hot - l.warm + 1
+	var hotLow uint64
+	if upper+1 > l.hot {
+		hotLow = upper - l.hot + 1
+	}
+	warmLow := l.warmLow(upper)
 	d := digest{cfgFP: l.cfgFP, warm: map[uint64]uint64{}, hot: map[uint64]map[uint64]uint64{}}
 	for idx, iv := range l.intervals {
 		switch {

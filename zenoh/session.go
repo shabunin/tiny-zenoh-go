@@ -309,9 +309,10 @@ func NewZID() ZID {
 
 // Session is a connection to a Zenoh network.
 type Session struct {
-	cfg  Config
-	zid  ZID
-	done chan struct{}
+	cfg        Config
+	customDial bool
+	zid        ZID
+	done       chan struct{}
 
 	closed    atomic.Bool
 	accepting atomic.Int64 // inbound links in their handshake
@@ -324,6 +325,7 @@ type Session struct {
 	mu         sync.Mutex
 	faces      map[string]*face // by peer ZID (registered at handshake)
 	connecting map[string]bool  // ZIDs being dialed after scouting
+	scoutSem   chan struct{}    // bounds concurrent scouted dial goroutines
 	// meshGone: when the link to each neighbour router (by ZID) last went
 	// down; a new link to it waits meshRejoinHold (see admit).
 	meshGone     map[string]time.Time
@@ -374,17 +376,22 @@ type Session struct {
 	evState     []*evEntry        // announced transports, in order
 }
 
+const maxConcurrentScoutDials = 64
+
 // Open starts a session. In client mode it connects to the first reachable
 // locator of cfg.Connect. In peer and router mode it starts listening,
 // connects to cfg.Connect (retrying in the background), and starts scouting.
 func Open(cfg Config) (*Session, error) {
+	customDial := cfg.Dial != nil
 	cfg.setDefaults()
 	s := &Session{
 		cfg:         cfg,
+		customDial:  customDial,
 		zid:         cfg.ZID,
 		done:        make(chan struct{}),
 		faces:       map[string]*face{},
 		connecting:  map[string]bool{},
+		scoutSem:    make(chan struct{}, maxConcurrentScoutDials),
 		meshGone:    map[string]time.Time{},
 		localExprs:  map[uint16]string{},
 		subs:        map[uint32]*Subscriber{},
@@ -935,7 +942,26 @@ func (s *Session) callbacks(f *face) transport.Callbacks {
 
 // dial connects to a locator and returns the established face.
 func (s *Session) dial(ep string) (*face, error) {
-	l, err := s.cfg.Dial(ep, s.cfg.ConnectTimeout)
+	return s.dialWith(ep, false)
+}
+
+func (s *Session) dialScouted(ep string) (*face, error) {
+	return s.dialWith(ep, true)
+}
+
+func (s *Session) dialWith(ep string, scouted bool) (*face, error) {
+	var (
+		l   transport.Link
+		err error
+	)
+	if scouted && !s.customDial {
+		l, err = link.DialWith(ep, s.cfg.ConnectTimeout, link.Options{
+			TLS:                 s.cfg.TLS,
+			IgnoreLocatorConfig: true,
+		})
+	} else {
+		l, err = s.cfg.Dial(ep, s.cfg.ConnectTimeout)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1129,10 +1155,24 @@ func (s *Session) faceByZID(z ZID) *face {
 // and dials at once whatever its ZID (seen in the lab: a non-listening peer
 // missed a second of its cell's data waiting). zenoh-rust peers always dial
 // at once; that is fine, a Go node then just accepts.
+func (s *Session) spawnConnectScouted(z ZID, locs []string) {
+	if s.closed.Load() {
+		return
+	}
+	select {
+	case s.scoutSem <- struct{}{}:
+		go func() {
+			defer func() { <-s.scoutSem }()
+			s.connectScouted(z, locs)
+		}()
+	default:
+	}
+}
+
 func (s *Session) connectScouted(z ZID, locators []string) {
 	key := string(z.Bytes())
 	s.mu.Lock()
-	if s.closed.Load() || s.faces[key] != nil || s.connecting[key] || z.Equal(s.zid) {
+	if s.closed.Load() || s.faces[key] != nil || s.connecting[key] || len(s.connecting) >= maxConcurrentScoutDials || z.Equal(s.zid) {
 		s.mu.Unlock()
 		return
 	}
@@ -1161,7 +1201,8 @@ func (s *Session) connectScouted(z ZID, locators []string) {
 			if err != nil || (l.Protocol == "tcp") != tcp || link.IsMulticast(loc) {
 				continue
 			}
-			if _, err := s.dial(loc); err == nil || errors.Is(err, transport.ErrDuplicate) {
+			safeLoc := l.WithoutConfig().String()
+			if _, err := s.dialScouted(safeLoc); err == nil || errors.Is(err, transport.ErrDuplicate) {
 				return
 			}
 		}

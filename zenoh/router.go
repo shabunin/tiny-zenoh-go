@@ -1,6 +1,7 @@
 package zenoh
 
 import (
+	"math"
 	"sort"
 	"time"
 
@@ -466,6 +467,10 @@ func (s *Session) routerInterest(f *face, m *protocol.Interest) {
 func (s *Session) answerInterest(f *face, m *protocol.Interest, in *remoteInterest, future bool) {
 	var msgs []transport.Encoder
 	s.mu.Lock()
+	if s.closed.Load() || !f.live || f.router == nil || (future && f.router.interests[m.ID] != in) {
+		s.mu.Unlock()
+		return
+	}
 	rs := f.router
 	{
 		id := m.ID
@@ -563,6 +568,17 @@ type routedQuery struct {
 // routerRequest forwards a REQUEST from src to the faces (and local
 // queryables) that can answer it.
 func (s *Session) routerRequest(src *face, key string, m *protocol.Request) {
+	timeout := s.cfg.QueryTimeout
+	if m.TimeoutMS > 0 {
+		const maxMS = uint64(math.MaxInt64 / uint64(time.Millisecond))
+		ms := min(m.TimeoutMS, maxMS)
+		timeout = time.Duration(ms) * time.Millisecond
+	}
+	capped := false
+	if max := s.cfg.MaxQueryTimeout; max > 0 && timeout > max {
+		timeout, capped = max, true
+	}
+
 	s.mu.Lock()
 	rq := &routedQuery{origin: src, originRID: m.ID, pending: map[*face]bool{}}
 	tree, ok := s.meshSourceLocked(src, m.NodeID)
@@ -603,22 +619,13 @@ func (s *Session) routerRequest(src *face, key string, m *protocol.Request) {
 	src.routing++
 	rid := s.nextQID
 	s.nextQID++
+	rq.timer = time.AfterFunc(timeout, func() { s.routeDone(rid, nil, true) })
 	s.routes[rid] = rq
 	dst := make([]*face, 0, len(rq.pending))
 	for f := range rq.pending {
 		dst = append(dst, f)
 	}
 	s.mu.Unlock()
-
-	timeout := s.cfg.QueryTimeout
-	if m.TimeoutMS > 0 {
-		timeout = time.Duration(m.TimeoutMS) * time.Millisecond
-	}
-	capped := false
-	if max := s.cfg.MaxQueryTimeout; max > 0 && timeout > max {
-		timeout, capped = max, true
-	}
-	rq.timer = time.AfterFunc(timeout, func() { s.routeDone(rid, nil, true) })
 
 	fwd := *m
 	fwd.ID = rid
@@ -672,7 +679,9 @@ func (s *Session) routeDone(rid uint32, dst *face, all bool) {
 	delete(s.routes, rid)
 	rq.origin.routing--
 	s.mu.Unlock()
-	rq.timer.Stop()
+	if rq.timer != nil {
+		rq.timer.Stop()
+	}
 	_ = rq.origin.send(true, &protocol.ResponseFinal{RequestID: rq.originRID, QoS: protocol.QoSRequest})
 }
 

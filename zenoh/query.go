@@ -93,10 +93,20 @@ type pendingQuery struct {
 	mu       sync.Mutex
 	cb       func(Reply)
 	onDone   func()
+	unbind   func()
 	finished bool
 	latest   map[string]Reply
 	order    []string
 	mono     map[string]*Timestamp
+}
+
+// tsAccept reports whether newTS supersedes prevTS in monotonic/latest
+// consolidation: when neither reply has a timestamp, arrival order wins.
+func tsAccept(newTS, prevTS *Timestamp) bool {
+	if newTS == nil {
+		return prevTS == nil
+	}
+	return tsAfter(newTS, prevTS)
 }
 
 func (q *pendingQuery) add(r Reply) {
@@ -105,7 +115,7 @@ func (q *pendingQuery) add(r Reply) {
 		q.mu.Unlock()
 		return
 	}
-	if r.Err != nil || q.mode == ConsolidationNone {
+	if r.Sample == nil || r.Err != nil || q.mode == ConsolidationNone {
 		q.mu.Unlock()
 		q.cb(r)
 		return
@@ -113,7 +123,7 @@ func (q *pendingQuery) add(r Reply) {
 	key, ts := r.Sample.KeyExpr, r.Sample.Timestamp
 	switch q.mode {
 	case ConsolidationMonotonic:
-		if prev, ok := q.mono[key]; ok && !tsAfter(ts, prev) {
+		if prev, ok := q.mono[key]; ok && !tsAccept(ts, prev) {
 			q.mu.Unlock()
 			return
 		}
@@ -122,7 +132,7 @@ func (q *pendingQuery) add(r Reply) {
 		q.cb(r)
 	default: // Latest
 		if prev, ok := q.latest[key]; ok {
-			if !tsAfter(ts, prev.Sample.Timestamp) {
+			if !tsAccept(ts, prev.Sample.Timestamp) {
 				q.mu.Unlock()
 				return
 			}
@@ -223,20 +233,6 @@ func (s *Session) get(k *keyexpr.Key, params string, o *getOptions, qr *Querier,
 		latest: map[string]Reply{}, mono: map[string]*Timestamp{},
 		faces: map[*face]bool{}, local: o.destination != LocalityRemote,
 	}
-	if o.cancel != nil {
-		var ok bool
-		pq.cb, pq.onDone, ok = o.cancel.bind(cb, done, func() {
-			s.mu.Lock()
-			if s.queries[pq.qid] == pq {
-				delete(s.queries, pq.qid)
-			}
-			s.mu.Unlock()
-			pq.finish() // its callback no longer delivers anything
-		})
-		if !ok {
-			return ErrCancelled
-		}
-	}
 	s.mu.Lock()
 	if s.closed.Load() {
 		s.mu.Unlock()
@@ -268,6 +264,21 @@ func (s *Session) get(k *keyexpr.Key, params string, o *getOptions, qr *Querier,
 	for f := range pq.faces {
 		dst = append(dst, f)
 	}
+	if o.cancel != nil {
+		var ok bool
+		pq.cb, pq.onDone, pq.unbind, ok = o.cancel.bind(cb, done, func() {
+			s.mu.Lock()
+			if s.queries[pq.qid] == pq {
+				delete(s.queries, pq.qid)
+			}
+			s.mu.Unlock()
+			pq.finish() // its callback no longer delivers anything
+		})
+		if !ok {
+			s.mu.Unlock()
+			return ErrCancelled
+		}
+	}
 	s.queries[qid] = pq
 	s.mu.Unlock()
 	pq.mu.Lock()
@@ -285,13 +296,20 @@ func (s *Session) get(k *keyexpr.Key, params string, o *getOptions, qr *Querier,
 		if err := f.send(true, req); err != nil {
 			if s.cfg.Mode == ModeClient {
 				s.mu.Lock()
-				delete(s.queries, qid)
+				if s.queries[qid] == pq {
+					delete(s.queries, qid)
+				}
 				s.mu.Unlock()
 				pq.mu.Lock()
+				pq.finished = true
 				if pq.timer != nil {
 					pq.timer.Stop()
 				}
+				unbind := pq.unbind
 				pq.mu.Unlock()
+				if unbind != nil {
+					unbind()
+				}
 				if s.closed.Load() {
 					return ErrSessionClosed
 				}

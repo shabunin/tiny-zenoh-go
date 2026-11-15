@@ -104,3 +104,23 @@ func TestHeader(t *testing.T) {
 		t.Errorf("Flag2 set unexpectedly")
 	}
 }
+
+func TestReadRawOverflowAndLargeZBytes(t *testing.T) {
+	r := NewReader([]byte{0x01, 0x02, 0x03})
+	if _, err := r.ReadByte(); err != nil {
+		t.Fatalf("ReadByte: %v", err)
+	}
+	maxInt := int(^uint(0) >> 1)
+	if _, err := r.ReadRaw(maxInt); err != ErrShortBuffer {
+		t.Fatalf("ReadRaw(maxInt) = %v, want ErrShortBuffer", err)
+	}
+	// A huge uint64 length prefix (including values > 1<<32 that truncate on 32-bit targets)
+	// must cleanly return ErrShortBuffer rather than misframing or overflowing.
+	w := NewWriter()
+	w.WriteZInt(uint64(1)<<32 + 1)
+	w.WriteByte(0xaa)
+	r2 := NewReader(w.Bytes())
+	if _, err := r2.ReadZBytes(); err != ErrShortBuffer {
+		t.Fatalf("ReadZBytes(1<<32+1) = %v, want ErrShortBuffer", err)
+	}
+}

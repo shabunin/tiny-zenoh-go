@@ -326,6 +326,7 @@ func (s *V2Storage) Entries() ([]storage.Entry, error) {
 	rows, err := s.query(s.from() + `|> range(start: ` + epoch + `, stop: ` + maxTime + `)
 |> filter(fn: (r) => r._field == "timestamp")
 |> group(columns: ["_measurement"])
+|> sort(columns: ["_time"])
 |> last()`)
 	if err != nil {
 		return nil, fmt.Errorf("influxdb2: %w", err)

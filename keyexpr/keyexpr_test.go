@@ -192,3 +192,36 @@ func TestVerbatim(t *testing.T) {
 		t.Error("Match ignores verbatim chunks")
 	}
 }
+
+func TestEmptyKeyAndDoubleWildInclude(t *testing.T) {
+	for _, pat := range []string{"*", "**", "a", "$*"} {
+		if Match(pat, "") || Match("", pat) || Match("", "") {
+			t.Errorf("Match with empty string unexpectedly returned true for %q", pat)
+		}
+		if Intersect(pat, "") || Intersect("", pat) || Intersect("", "") {
+			t.Errorf("Intersect with empty string unexpectedly returned true for %q", pat)
+		}
+		if Include(pat, "") || Include("", pat) || Include("", "") {
+			t.Errorf("Include with empty string unexpectedly returned true for %q", pat)
+		}
+	}
+	if MustNew("*").Matches("") || MustNew("**").Matches("") {
+		t.Errorf("Key.Matches(\"\") unexpectedly returned true")
+	}
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"a/*/**", "a/**/b", true},
+		{"*/**", "**/b", true},
+		{"*/*/**", "**/a/**/b", true},
+		{"*/**", "**/@b/c", false},
+		{"a/*/**", "a/**", false},
+		{"a/*/b", "a/**/b", false},
+	}
+	for _, c := range cases {
+		if got := Include(c.a, c.b); got != c.want {
+			t.Errorf("Include(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}

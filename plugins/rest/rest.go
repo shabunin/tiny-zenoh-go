@@ -18,18 +18,24 @@
 package rest
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"html"
 	"io"
 	"mime"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/shabunin/tiny-zenoh-go/keyexpr"
 	"github.com/shabunin/tiny-zenoh-go/zenoh"
 )
+
+const maxBodyBytes = 64 << 20
 
 // Sample is the JSON form of a sample or reply.
 type Sample struct {
@@ -63,12 +69,11 @@ func payloadJSON(p []byte, enc zenoh.Encoding) json.RawMessage {
 	}
 	switch enc {
 	case zenoh.EncodingApplicationJSON, zenoh.EncodingTextJSON, encTextJSON5:
-		var v any
-		if json.Unmarshal(p, &v) != nil {
+		var buf bytes.Buffer
+		if json.Compact(&buf, p) != nil {
 			return b64()
 		}
-		b, _ := json.Marshal(v)
-		return b
+		return buf.Bytes()
 	case zenoh.EncodingTextPlain, zenoh.EncodingZenohString:
 		if !isUTF8(p) {
 			return b64()
@@ -116,9 +121,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			err = h.s.Delete(key)
 		} else {
-			body, rerr := io.ReadAll(r.Body)
+			body, code, rerr := readBody(w, r)
 			if rerr != nil {
-				http.Error(w, rerr.Error(), http.StatusInternalServerError)
+				http.Error(w, rerr.Error(), code)
 				return
 			}
 			err = h.s.Put(key, body, zenoh.WithEncoding(requestEncoding(r)))
@@ -129,6 +134,19 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func readBody(w http.ResponseWriter, r *http.Request) ([]byte, int, error) {
+	rc := http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	b, err := io.ReadAll(rc)
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return nil, http.StatusRequestEntityTooLarge, err
+		}
+		return nil, http.StatusInternalServerError, err
+	}
+	return b, 0, nil
 }
 
 func requestEncoding(r *http.Request) zenoh.Encoding {
@@ -144,9 +162,9 @@ func (h *handler) query(w http.ResponseWriter, r *http.Request, key, accept stri
 	if _, ok := zenoh.Param(params, "_time"); ok {
 		opts[0] = zenoh.WithConsolidation(zenoh.ConsolidationNone)
 	}
-	body, err := io.ReadAll(r.Body)
+	body, code, err := readBody(w, r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), code)
 		return
 	}
 	if len(body) > 0 {
@@ -187,7 +205,7 @@ func (h *handler) query(w http.ResponseWriter, r *http.Request, key, accept stri
 				k = rep.Sample.KeyExpr
 			}
 			payload, _ := replyBody(rep)
-			fmt.Fprintf(&b, "<dt>%s</dt>\n<dd>%s</dd>\n", k, strings.ToValidUTF8(string(payload), "�"))
+			fmt.Fprintf(&b, "<dt>%s</dt>\n<dd>%s</dd>\n", html.EscapeString(k), html.EscapeString(strings.ToValidUTF8(string(payload), "\ufffd")))
 		}
 		b.WriteString("</dl>\n")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -281,7 +299,11 @@ func Serve(s *zenoh.Session, addr string) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rest: %w", err)
 	}
-	srv := &http.Server{Handler: Handler(s)}
+	srv := &http.Server{
+		Handler:           Handler(s),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	go func() { _ = srv.Serve(ln) }()
 	return &Server{srv: srv, ln: ln}, nil
 }

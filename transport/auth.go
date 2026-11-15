@@ -169,6 +169,9 @@ func (t *Unicast) authInitAck(e *protocol.Extension) error {
 		if err != nil {
 			return authFail("%v", err)
 		}
+		if len(chal) < 8 || len(chal) > 64 {
+			return authFail("INIT ACK: bad challenge length")
+		}
 		if t.au.pkOpenSyn, err = bob.encrypt(chal); err != nil {
 			return authFail("%v", err)
 		}

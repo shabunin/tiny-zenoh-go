@@ -168,3 +168,31 @@ func TestRESTEventStream(t *testing.T) {
 		t.Errorf("events %q", lines)
 	}
 }
+
+func TestRESTSecurityAndPrecision(t *testing.T) {
+	// Precision of large int64 JSON values must be preserved without float64 rounding.
+	raw := []byte(`{"id":9007199254740993}`)
+	got := payloadJSON(raw, zenoh.EncodingApplicationJSON)
+	if string(got) != `{"id":9007199254740993}` {
+		t.Fatalf("payloadJSON truncated integer: %s", got)
+	}
+
+	// HTML replies must escape XSS payloads.
+	_, c, base := setup(t)
+	pfx := fmt.Sprintf("restsec/%d", time.Now().UnixNano())
+	qbl, err := c.DeclareQueryable(pfx+"/xss", func(q *zenoh.Query) {
+		_ = q.Reply(q.KeyExpr(), []byte(`<script>alert(1)</script>`), zenoh.WithEncoding(zenoh.EncodingTextPlain))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer qbl.Undeclare()
+	time.Sleep(100 * time.Millisecond)
+	htmlOut := read(t, do(t, "GET", base+"/"+pfx+"/xss", "", "", "Accept", "text/html"))
+	if strings.Contains(htmlOut, "<script>") {
+		t.Fatalf("HTML reply unescaped: %s", htmlOut)
+	}
+	if !strings.Contains(htmlOut, "&lt;script&gt;alert(1)&lt;/script&gt;") {
+		t.Fatalf("HTML reply missing escaped content: %s", htmlOut)
+	}
+}

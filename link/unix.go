@@ -33,13 +33,27 @@ type unixListener struct {
 
 func listenUnix(l Locator, bound Locator) (Listener, error) {
 	path := l.Address
-	lock, err := os.OpenFile(path+".lock", os.O_RDONLY|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("link: unixsock-stream lock file: %w", err)
+	var lock *os.File
+	for attempt := 0; attempt < 2; attempt++ {
+		f, err := os.OpenFile(path+".lock", os.O_RDONLY|os.O_CREATE, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("link: unixsock-stream lock file: %w", err)
+		}
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("link: unixsock-stream %s is in use: %w", path, err)
+		}
+		// Verify the lock file was not unlinked/replaced before Flock completed.
+		lockFi, err1 := f.Stat()
+		pathFi, err2 := os.Lstat(path + ".lock")
+		if err1 == nil && err2 == nil && os.SameFile(lockFi, pathFi) {
+			lock = f
+			break
+		}
+		f.Close()
 	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		lock.Close()
-		return nil, fmt.Errorf("link: unixsock-stream %s is in use: %w", path, err)
+	if lock == nil {
+		return nil, fmt.Errorf("link: unixsock-stream %s lock raced", path)
 	}
 	// We hold the lock, so no live process uses the socket: clear a stale one.
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
@@ -47,8 +61,8 @@ func listenUnix(l Locator, bound Locator) (Listener, error) {
 	}
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
-		lock.Close()
 		_ = os.Remove(path + ".lock")
+		lock.Close()
 		return nil, err
 	}
 	ln.SetUnlinkOnClose(true)

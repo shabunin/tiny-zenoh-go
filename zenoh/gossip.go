@@ -33,6 +33,7 @@ type gLink struct {
 	f        *face
 	south    bool              // the remote is "south" of us (a router)
 	mappings map[uint64]string // the remote's psid -> zid key
+	seenSelf bool
 }
 
 type gossipState struct {
@@ -222,6 +223,7 @@ func (s *Session) gossipOAM(f *face, m *protocol.OAM) {
 		locs []string
 	}
 	var connect []cand
+	seenCand := map[string]bool{}
 	out := outbox{}
 	s.mu.Lock()
 	g := s.gossip
@@ -233,6 +235,9 @@ func (s *Session) gossipOAM(f *face, m *protocol.OAM) {
 	for _, ls := range list {
 		z := ls.zid
 		if z.Len() > 0 {
+			if _, ok := src.mappings[ls.psid]; !ok && len(src.mappings) >= maxPSMappings {
+				continue
+			}
 			src.mappings[ls.psid] = zkey(z)
 		} else {
 			k, ok := src.mappings[ls.psid]
@@ -248,6 +253,8 @@ func (s *Session) gossipOAM(f *face, m *protocol.OAM) {
 			w = protocol.Router
 		}
 		if z.Equal(f.zid) {
+			firstSelf := !src.seenSelf
+			src.seenSelf = true
 			fwd := -1
 			if i := g.idx(z); i < 0 {
 				i = g.addNode(&gNode{zid: z, whatami: w, locators: ls.locators, hasLoc: ls.hasLoc,
@@ -255,7 +262,7 @@ func (s *Session) gossipOAM(f *face, m *protocol.OAM) {
 				if ls.hasLoc {
 					fwd = i
 				}
-			} else if n := g.nodes[i]; n.sn < ls.sn {
+			} else if n := g.nodes[i]; n.sn < ls.sn || (firstSelf && (ls.sn < n.sn || (ls.hasLoc && !equalStrings(n.locators, ls.locators)))) {
 				n.sn = ls.sn
 				if ls.hasLoc && !(n.hasLoc && equalStrings(n.locators, ls.locators)) {
 					n.locators, n.hasLoc = ls.locators, true
@@ -271,15 +278,18 @@ func (s *Session) gossipOAM(f *face, m *protocol.OAM) {
 				}
 			}
 		}
+		zk := string(z.Bytes())
 		if ls.hasLoc && len(ls.locators) > 0 && s.cfg.Gossip.Autoconnect.Matches(w) && !z.Equal(s.zid) &&
-			s.faces[string(z.Bytes())] == nil {
+			s.faces[zk] == nil && !s.connecting[zk] && !seenCand[zk] &&
+			len(s.connecting)+len(connect) < maxConcurrentScoutDials {
+			seenCand[zk] = true
 			connect = append(connect, cand{z, ls.locators})
 		}
 	}
 	s.mu.Unlock()
 	out.send()
 	for _, c := range connect {
-		go s.connectScouted(c.zid, c.locs)
+		s.spawnConnectScouted(c.zid, c.locs)
 	}
 }
 

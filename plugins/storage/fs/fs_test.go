@@ -315,3 +315,44 @@ func TestFilesystemContract(t *testing.T) {
 	storagetest.TestBackend(t, b, v.Capability(), "k")
 	storagetest.TestStorage(t, v, map[string]any{"dir": "s"}, "fscontract")
 }
+
+func TestFilesystemPathAndSymlinkSecurity(t *testing.T) {
+	v, err := NewVolume(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := open(t, v, map[string]any{"dir": "sec"})
+	defer s.Close()
+
+	badKeys := []string{"../escape", "a/../../escape", ".", "./a", dataInfoDir + "/x", `a\b`}
+	for _, k := range badKeys {
+		if _, err := s.Put(k, storage.Value{Payload: []byte("bad"), Timestamp: ts(1)}); err == nil {
+			t.Errorf("Put(%q) succeeded, want path error", k)
+		}
+		if _, err := s.Delete(k, ts(2)); err == nil {
+			t.Errorf("Delete(%q) succeeded, want path error", k)
+		}
+		if vs, err := s.Get(k, ""); err != nil || len(vs) != 0 {
+			t.Errorf("Get(%q) = (%v, %v), want empty", k, vs, err)
+		}
+	}
+
+	// Symlink traversal on Put/Delete must be rejected when follow_links=false.
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte("orig"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(s.Dir(), "sym")
+	if err := os.Symlink(outside, linkPath); err == nil {
+		if _, err := s.Put("sym", storage.Value{Payload: []byte("pwn"), Timestamp: ts(3)}); err == nil {
+			t.Errorf("Put through symlink succeeded with follow_links=false")
+		}
+		if _, err := s.Delete("sym", ts(4)); err == nil {
+			t.Errorf("Delete through symlink succeeded with follow_links=false")
+		}
+		got, _ := os.ReadFile(outside)
+		if string(got) != "orig" {
+			t.Errorf("outside target modified: %q", got)
+		}
+	}
+}

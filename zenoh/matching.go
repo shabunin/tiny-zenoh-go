@@ -199,19 +199,23 @@ func (m *matcher) notify() {
 	m.running = true
 	for {
 		m.dirty = false
-		var calls []*MatchingListener
+		type call struct {
+			cb func(MatchingStatus)
+			st bool
+		}
+		var calls []call
 		if len(m.lsn) > 0 {
 			st := m.statusLocked()
 			for l := range m.lsn {
 				if l.cur != st {
 					l.cur = st
-					calls = append(calls, l)
+					calls = append(calls, call{l.cb, st})
 				}
 			}
 		}
 		s.mu.Unlock()
-		for _, l := range calls {
-			l.cb(MatchingStatus{Matching: l.cur})
+		for _, c := range calls {
+			c.cb(MatchingStatus{Matching: c.st})
 		}
 		s.mu.Lock()
 		if !m.dirty {

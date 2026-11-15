@@ -265,7 +265,7 @@ func startScouter(s *Session) (*scouter, error) {
 	if s.cfg.Mode != ModeRouter { // routers only answer scouts (zenoh-rust default)
 		sc.onHello = func(h Hello) {
 			if !h.ZID.Equal(s.zid) && len(h.Locators) > 0 {
-				go s.connectScouted(h.ZID, h.Locators)
+				s.spawnConnectScouted(h.ZID, h.Locators)
 			}
 		}
 	}

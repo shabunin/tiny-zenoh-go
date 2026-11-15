@@ -61,7 +61,11 @@ func configTree(file, restPort string, overrides []string) (map[string]any, erro
 		}
 		tree = m
 	}
-	if restPort != "" && !strings.EqualFold(restPort, "none") {
+	if strings.EqualFold(restPort, "none") {
+		if plugins, ok := tree["plugins"].(map[string]any); ok {
+			delete(plugins, "rest")
+		}
+	} else if restPort != "" {
 		if err := insertPath(tree, "plugins/rest/http_port", restPort); err != nil {
 			return nil, err
 		}
@@ -564,7 +568,9 @@ func decodePlugins(raw json.RawMessage, p *pluginsConfig) error {
 			var n json.Number
 			switch {
 			case json.Unmarshal(r.HTTPPort, &s) == nil && s != "":
-				p.restAddr = s
+				if !strings.EqualFold(s, "none") {
+					p.restAddr = s
+				}
 			case json.Unmarshal(r.HTTPPort, &n) == nil && n != "":
 				p.restAddr = n.String()
 			default:

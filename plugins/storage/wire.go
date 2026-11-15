@@ -139,7 +139,11 @@ func (d *bdec) ts() zenoh.Timestamp {
 	t := d.u64()
 	var id [16]byte
 	copy(id[:], d.take(16))
-	return zenoh.Timestamp{Time: t, ID: idFromBytes(id)}
+	z := idFromBytes(id)
+	if z.IsZero() {
+		d.fail()
+	}
+	return zenoh.Timestamp{Time: t, ID: z}
 }
 
 func (d *bdec) set() []uint64 {

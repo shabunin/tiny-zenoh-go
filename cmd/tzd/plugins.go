@@ -20,6 +20,7 @@ import (
 type pluginRunner struct {
 	mu       sync.Mutex
 	s        *zenoh.Session
+	stopped  bool
 	tree     map[string]any // the plugins section
 	volumes  map[string]runningVolume
 	storages map[string]runningStorage
@@ -49,6 +50,7 @@ func newPluginRunner(tree map[string]any) *pluginRunner {
 func (r *pluginRunner) start(s *zenoh.Session, p *pluginsConfig) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.stopped = false
 	r.s = s
 	if err := r.applyLocked(p); err != nil {
 		r.stopLocked()
@@ -160,6 +162,7 @@ func (r *pluginRunner) stop() {
 }
 
 func (r *pluginRunner) stopLocked() {
+	r.stopped = true
 	if r.restStop != nil {
 		_ = r.restStop()
 		r.restStop, r.restAddr = nil, ""
@@ -192,20 +195,25 @@ func volumeNames(p *pluginsConfig) []string {
 func (r *pluginRunner) onConfig(key string, value []byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.s == nil {
-		return errors.New("plugins not started yet")
+	if r.s == nil || r.stopped {
+		return errors.New("plugins not running")
 	}
 	path := strings.TrimPrefix(key, "plugins/")
 	if path == "" {
 		return errors.New("empty config key")
 	}
-	// Work on a copy: a change that does not decode leaves things as they are.
-	b, err := json.Marshal(r.tree)
+	// Work on a copy and keep the previous decoded config for rollback: if
+	// applying the change fails, both runtime plugins and r.tree stay intact.
+	prevRaw, err := json.Marshal(r.tree)
 	if err != nil {
 		return err
 	}
+	var prevP pluginsConfig
+	if err := decodePlugins(prevRaw, &prevP); err != nil {
+		return err
+	}
 	var tree map[string]any
-	if err := json.Unmarshal(b, &tree); err != nil {
+	if err := json.Unmarshal(prevRaw, &tree); err != nil {
 		return err
 	}
 	if value == nil {
@@ -227,8 +235,12 @@ func (r *pluginRunner) onConfig(key string, value []byte) error {
 	if err := decodePlugins(raw, &p); err != nil {
 		return err
 	}
+	if err := r.applyLocked(&p); err != nil {
+		_ = r.applyLocked(&prevP)
+		return err
+	}
 	r.tree = tree
-	return r.applyLocked(&p)
+	return nil
 }
 
 // splitFilter splits path ".../<array>/<field>=<value>" into the array's

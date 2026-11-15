@@ -364,3 +364,106 @@ func TestConfigArrayFilter(t *testing.T) {
 		t.Error("removing a missing key")
 	}
 }
+
+func TestRestHTTPPortNone(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "rest.json5")
+	if err := os.WriteFile(file, []byte(`{
+		plugins: { rest: { http_port: "127.0.0.1:8000" } }
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tree, err := configTree(file, "none", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := applyConfig(tree, &zenoh.Config{Mode: zenoh.ModeRouter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.restAddr != "" {
+		t.Fatalf("--rest-http-port none left restAddr=%q", p.restAddr)
+	}
+
+	tree2, err := configTree("", "", []string{`plugins/rest/http_port:"NONE"`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := applyConfig(tree2, &zenoh.Config{Mode: zenoh.ModeRouter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p2.restAddr != "" {
+		t.Fatalf("http_port NONE override left restAddr=%q", p2.restAddr)
+	}
+}
+
+func TestOnConfigTransactionalAndStopped(t *testing.T) {
+	tree, err := configTree("", "", []string{
+		`plugins/storage_manager/storages/a:{key_expr:"tx/a/**",volume:"memory"}`,
+		`listen/endpoints:["tcp/127.0.0.1:0"]`,
+		`scouting/multicast/enabled:false`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := zenoh.Config{Mode: zenoh.ModeRouter}
+	p, err := applyConfig(tree, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := newPluginRunner(tree["plugins"].(map[string]any))
+	r, err := zenoh.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if err := runner.start(r, p); err != nil {
+		t.Fatal(err)
+	}
+	defer runner.stop()
+
+	beforeRaw, err := json.Marshal(runner.tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Failing storage update (missing volume) must roll back running storage "a" and keep r.tree unchanged.
+	if err := runner.onConfig("plugins/storage_manager/storages/a", []byte(`{key_expr:"tx/changed/**",volume:"missing_vol"}`)); err == nil {
+		t.Fatal("expected error for missing volume")
+	}
+	afterRaw, err := json.Marshal(runner.tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterRaw) != string(beforeRaw) {
+		t.Fatalf("r.tree mutated after failed onConfig:\ngot:  %s\nwant: %s", afterRaw, beforeRaw)
+	}
+	runner.mu.Lock()
+	_, hasA := runner.storages["a"]
+	runner.mu.Unlock()
+	if !hasA {
+		t.Fatal("existing storage a was not restored on failed onConfig rollback")
+	}
+
+	// Failing REST port must also roll back cleanly and leave r.tree unchanged.
+	if err := runner.onConfig("plugins/rest/http_port", []byte(`"127.0.0.1:999999"`)); err == nil {
+		t.Fatal("expected error for invalid REST port")
+	}
+	afterRestRaw, _ := json.Marshal(runner.tree)
+	if string(afterRestRaw) != string(beforeRaw) {
+		t.Fatalf("r.tree mutated after failed REST onConfig: %s", afterRestRaw)
+	}
+
+	// After stop(), onConfig must refuse cleanly and start nothing.
+	runner.stop()
+	if err := runner.onConfig("plugins/storage_manager/storages/b", []byte(`{key_expr:"tx/b/**",volume:"memory"}`)); err == nil {
+		t.Fatal("onConfig succeeded after runner.stop()")
+	}
+	runner.mu.Lock()
+	leftStorages := len(runner.storages)
+	leftRest := runner.restStop != nil
+	runner.mu.Unlock()
+	if leftStorages != 0 || leftRest {
+		t.Fatalf("plugins started after stop(): storages=%d rest=%v", leftStorages, leftRest)
+	}
+}
