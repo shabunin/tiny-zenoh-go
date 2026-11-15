@@ -112,10 +112,10 @@ func TestRegionsRustPeerGateway(t *testing.T) {
 	n := openRegionNode(t, regionOpts{mode: ModePeer}, l)
 	waitFor(t, "attached", func() bool { return len(s.PeersZID()) == 1 && len(n.PeersZID()) == 1 })
 	g := s.PeersZID()[0]
-	if f := faceOf(s, g); !f.routed || f.remoteBound != BoundSouth {
+	if f := faceOf(t, s, g); !f.routed || f.remoteBound != BoundSouth {
 		t.Fatalf("south peer: routed %v bound %v", f.routed, f.remoteBound)
 	}
-	if f := faceOf(n, g); !f.push || f.remoteBound != BoundNorth {
+	if f := faceOf(t, n, g); !f.push || f.remoteBound != BoundNorth {
 		t.Fatalf("north peer: push %v bound %v", f.push, f.remoteBound)
 	}
 	t.Run("south-north", func(t *testing.T) { pubSubVia(t, s, n, nil) })

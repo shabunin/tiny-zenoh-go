@@ -73,10 +73,10 @@ func TestRouterSubregion(t *testing.T) {
 	if meshKnows(n, North, s1.ZID()) || meshKnows(g, North, s1.ZID()) || meshKnows(s1, North, n.ZID()) {
 		t.Fatal("the meshes are not separate")
 	}
-	if f := faceOf(g, s1.ZID()); !f.mesh || f.region != cell {
+	if f := faceOf(t, g, s1.ZID()); !f.mesh || f.region != cell {
 		t.Fatalf("gateway's face of s1: mesh %v region %v", f.mesh, f.region)
 	}
-	if f := faceOf(s1, g.ZID()); !f.mesh || f.region != North || f.remoteBound != BoundSouth {
+	if f := faceOf(t, s1, g.ZID()); !f.mesh || f.region != North || f.remoteBound != BoundSouth {
 		t.Fatalf("s1's face of the gateway: mesh %v region %v bound %v", f.mesh, f.region, f.remoteBound)
 	}
 
@@ -210,7 +210,7 @@ func TestRouterSubregionRustGateway(t *testing.T) {
 	for _, z := range n.RoutersZID() {
 		gw = z
 	}
-	if f := faceOf(s1, gw); !f.mesh || f.remoteBound != BoundSouth {
+	if f := faceOf(t, s1, gw); !f.mesh || f.remoteBound != BoundSouth {
 		t.Fatalf("s1's face of the Rust gateway: mesh %v bound %v", f.mesh, f.remoteBound)
 	}
 	if meshKnows(n, North, s1.ZID()) {

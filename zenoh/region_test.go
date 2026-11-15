@@ -149,11 +149,30 @@ func openRegionNode(t *testing.T, o regionOpts, connect ...string) *Session {
 
 func loc(s *Session) string { return s.Locators()[0] }
 
-// faceOf returns s's face to node z.
-func faceOf(s *Session, z ZID) *face {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.faces[string(z.Bytes())]
+// faceView is what the tests check of a face, read under Session.mu.
+type faceView struct {
+	routed, push, mesh, hasRouter bool
+	region                        Region
+	remoteBound                   Bound
+}
+
+// faceOf waits until s's face to node z is set up (a face is in s.faces
+// from admission, before its role is assigned) and returns its view.
+func faceOf(t *testing.T, s *Session, z ZID) faceView {
+	t.Helper()
+	var v faceView
+	waitFor(t, "face of "+z.String()+" set up", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		f := s.faces[string(z.Bytes())]
+		if f == nil || !f.live {
+			return false
+		}
+		v = faceView{routed: f.routed, push: f.push, mesh: f.mesh, hasRouter: f.router != nil,
+			region: f.region, remoteBound: f.remoteBound}
+		return true
+	})
+	return v
 }
 
 // expectNone checks that nothing arrives for a while.
@@ -208,10 +227,10 @@ func TestRouterPeerRegionNoDuplicates(t *testing.T) {
 	a := openRegionNode(t, regionOpts{mode: ModePeer, listen: true}, loc(r))
 	b := openRegionNode(t, regionOpts{mode: ModePeer}, loc(r), loc(a))
 	waitFor(t, "b linked to a and r", func() bool { return connected(b, a) && len(b.RoutersZID()) == 1 && len(a.RoutersZID()) == 1 })
-	if f := faceOf(r, a.ZID()); f == nil || f.region != defaultSouth(protocol.Peer) {
+	if f := faceOf(t, r, a.ZID()); f.region != defaultSouth(protocol.Peer) {
 		t.Fatalf("router sees peer in region %v", f.region)
 	}
-	if f := faceOf(a, r.ZID()); f == nil || f.remoteBound != BoundSouth || !f.routed {
+	if f := faceOf(t, a, r.ZID()); f.remoteBound != BoundSouth || !f.routed {
 		t.Fatalf("peer sees router: bound %v", f.remoteBound)
 	}
 	pubSubVia(t, a, b, nil)
@@ -316,13 +335,13 @@ func TestPeerGatewayForPeers(t *testing.T) {
 	n := openRegionNode(t, regionOpts{mode: ModePeer}, loc(g))
 	s := openRegionNode(t, regionOpts{mode: ModePeer, name: "cell"}, loc(g))
 	waitFor(t, "attached", func() bool { return connected(n, g) && connected(s, g) })
-	if f := faceOf(s, g.ZID()); !f.routed || f.remoteBound != BoundSouth {
+	if f := faceOf(t, s, g.ZID()); !f.routed || f.remoteBound != BoundSouth {
 		t.Fatalf("south peer sees gateway: routed %v bound %v", f.routed, f.remoteBound)
 	}
-	if f := faceOf(g, s.ZID()); f.router == nil || !f.region.South {
+	if f := faceOf(t, g, s.ZID()); !f.hasRouter || !f.region.South {
 		t.Fatalf("gateway sees south peer in %v", f.region)
 	}
-	if f := faceOf(g, n.ZID()); !f.push || f.region.South {
+	if f := faceOf(t, g, n.ZID()); !f.push || f.region.South {
 		t.Fatalf("gateway sees north peer in %v", f.region)
 	}
 	t.Run("south-north", func(t *testing.T) { pubSubVia(t, s, n, nil) })
